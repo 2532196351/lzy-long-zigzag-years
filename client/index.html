@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta
+      name="description"
+      content="LZY / 历·择·衍，一款本地单机、持续演化的虚构 A 股式经济与市场游戏。"
+    />
+    <meta name="theme-color" content="#111512" />
+    <title>LZY / 历·择·衍</title>
+    <link rel="icon" href="./assets/lzy-mark.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="./assets/lzy-mark.svg" />
+    <link rel="stylesheet" href="./styles.css?v=20260801-01" />
+    <link rel="stylesheet" href="./src/experience/city-life.css?v=20260801-01" />
+    <link rel="stylesheet" href="./src/experience/social-career.css?v=20260801-01" />
+    <link rel="stylesheet" href="./src/experience/player-wealth.css?v=20260801-01" />
+    <link rel="stylesheet" href="./src/experience/market-intelligence.css?v=20260801-01" />
+    <link rel="stylesheet" href="./src/experience/derivatives.css?v=20260801-01" />
+    <link rel="stylesheet" href="./src/market/stage.css?v=20260801-01" />
+  </head>
+  <body>
+    <a class="skip-link" href="#current-decision">跳到当前世界</a>
+    <div
+      id="app"
+      class="app-shell"
+      data-testid="app-root"
+      aria-busy="true"
+    >
+      <main class="boot-screen" aria-live="polite">
+        <p class="eyebrow">LZY / 历·择·衍</p>
+        <h1>正在读取本地世界…</h1>
+      </main>
+    </div>
+    <noscript>
+      <p class="noscript">LZY 需要启用 JavaScript 才能运行。所有游戏数据仍只保存在本机。</p>
+    </noscript>
+    <script type="module" src="./src/ui.js?v=20260801-01"></script>
+  </body>
+</html>

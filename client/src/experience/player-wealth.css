@@ -1,0 +1,320 @@
+.player-wealth {
+  --player-wealth-gain: #ef5b5b;
+  --player-wealth-loss: #28a96b;
+  --player-wealth-flat: #98a09b;
+  --player-wealth-unknown: #d7a95b;
+
+  min-width: 0;
+  display: grid;
+  gap: var(--space-3, 12px);
+  padding: var(--space-4, 16px);
+  border: 1px solid var(--color-border, #343a35);
+  border-radius: var(--radius-lg, 14px);
+  color: var(--color-text, #f2f4ef);
+  background:
+    linear-gradient(
+      120deg,
+      rgb(var(--rgb-accent, 178 210 94) / 0.08),
+      transparent 56%
+    ),
+    var(--color-surface-1, #161b17);
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+
+.player-wealth [data-tone="gain"] {
+  color: var(--player-wealth-gain);
+}
+
+.player-wealth [data-tone="loss"] {
+  color: var(--player-wealth-loss);
+}
+
+.player-wealth [data-tone="flat"] {
+  color: var(--player-wealth-flat);
+}
+
+.player-wealth [data-tone="unknown"] {
+  color: var(--player-wealth-unknown);
+}
+
+.player-wealth-head {
+  display: flex;
+  gap: 12px;
+  align-items: end;
+  justify-content: space-between;
+}
+
+.player-wealth-head > div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.player-wealth-head h2,
+.player-wealth-head small,
+.player-wealth-head > span,
+.player-wealth-hero span,
+.player-wealth dt,
+.player-wealth-position-summary {
+  margin: 0;
+}
+
+.player-wealth-head h2 {
+  font-family: var(--font-serif, serif);
+  font-size: var(--text-lg, 20px);
+}
+
+.player-wealth-head small,
+.player-wealth-head > span,
+.player-wealth-hero span,
+.player-wealth dt {
+  color: var(--color-text-muted, #a2aca4);
+  font-size: var(--text-xs, 12px);
+}
+
+.player-wealth-hero {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(220px, 0.7fr);
+  gap: 14px;
+  align-items: end;
+  padding: 14px;
+  border-radius: var(--radius-md, 10px);
+  background: rgb(var(--rgb-canvas, 12 15 13) / 0.58);
+}
+
+.player-wealth-hero > div:first-child {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.player-wealth-hero strong {
+  min-width: 0;
+  font-size: clamp(26px, 4vw, 42px);
+  line-height: 1.05;
+  letter-spacing: -0.025em;
+}
+
+.player-wealth-results {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+  justify-items: end;
+}
+
+.player-wealth-result {
+  font-weight: 700;
+  text-align: right;
+}
+
+.player-wealth-warning {
+  margin: 0;
+  padding: 9px 11px;
+  border: 1px solid rgb(215 169 91 / 0.55);
+  border-radius: var(--radius-sm, 7px);
+  color: var(--player-wealth-unknown);
+  background: rgb(215 169 91 / 0.08);
+  font-size: var(--text-sm, 14px);
+}
+
+.player-wealth-cash,
+.player-wealth-baseline {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 7px;
+  margin: 0;
+}
+
+.player-wealth-cash > div,
+.player-wealth-baseline > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+  padding: 9px 10px;
+  border: 1px solid var(--color-border, #343a35);
+  border-radius: var(--radius-sm, 7px);
+  background: var(--color-surface-2, #1e251f);
+}
+
+.player-wealth dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--color-text, #f2f4ef);
+  font-weight: 700;
+}
+
+.player-wealth-position-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  color: var(--color-text-muted, #a2aca4);
+  font-size: var(--text-xs, 12px);
+}
+
+.player-wealth-position-summary span {
+  padding: 4px 7px;
+  border-radius: 999px;
+  background: var(--color-surface-2, #1e251f);
+}
+
+.player-wealth-position-summary b {
+  color: var(--color-text, #f2f4ef);
+}
+
+.player-wealth-funds-grid {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(220px, 0.6fr);
+  gap: 8px;
+}
+
+.player-wealth-baseline {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.player-wealth-table-wrap {
+  min-width: 0;
+  overflow-x: auto;
+  border: 1px solid var(--color-border, #343a35);
+  border-radius: var(--radius-md, 10px);
+}
+
+.player-wealth table {
+  width: 100%;
+  min-width: 720px;
+  border-collapse: collapse;
+}
+
+.player-wealth th,
+.player-wealth td {
+  padding: 10px 11px;
+  border-bottom: 1px solid var(--color-border, #343a35);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.player-wealth thead th {
+  color: var(--color-text-muted, #a2aca4);
+  background: var(--color-surface-2, #1e251f);
+  font-size: var(--text-xs, 12px);
+  font-weight: 600;
+}
+
+.player-wealth tbody tr:last-child > * {
+  border-bottom: 0;
+}
+
+.player-wealth tbody th {
+  display: grid;
+  gap: 2px;
+}
+
+.player-wealth tbody th small,
+.player-wealth-number small {
+  display: block;
+  color: var(--color-text-muted, #a2aca4);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.player-wealth-number {
+  text-align: right;
+}
+
+.player-wealth-empty {
+  margin: 0;
+  padding: 14px;
+  border: 1px dashed var(--color-border, #343a35);
+  border-radius: var(--radius-md, 10px);
+  color: var(--color-text-muted, #a2aca4);
+}
+
+.player-wealth--home {
+  grid-template-columns: minmax(280px, 1.1fr) minmax(360px, 0.9fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 10px;
+}
+
+.player-wealth--home .player-wealth-head {
+  display: none;
+}
+
+.player-wealth--home .player-wealth-hero {
+  grid-template-columns: minmax(0, 1fr) minmax(180px, auto);
+  gap: 8px;
+  padding: 6px 8px;
+}
+
+.player-wealth--home .player-wealth-hero strong {
+  font-size: clamp(21px, 2.4vw, 32px);
+}
+
+.player-wealth--home .player-wealth-cash {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.player-wealth--home .player-wealth-cash > div {
+  padding: 5px 7px;
+}
+
+.player-wealth--home .player-wealth-position-summary {
+  align-content: center;
+}
+
+.player-wealth--home .player-wealth-warning {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 1080px) {
+  .player-wealth--home {
+    grid-template-columns: minmax(0, 1fr) minmax(300px, 0.8fr);
+  }
+
+  .player-wealth--home .player-wealth-position-summary {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 679px) {
+  .player-wealth {
+    padding: 12px;
+  }
+
+  .player-wealth-head {
+    align-items: start;
+  }
+
+  .player-wealth-hero,
+  .player-wealth-funds-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .player-wealth-results {
+    justify-items: start;
+  }
+
+  .player-wealth-result {
+    text-align: left;
+  }
+
+  .player-wealth-cash {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .player-wealth--home {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 8px;
+  }
+
+  .player-wealth--home .player-wealth-hero {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .player-wealth--home .player-wealth-position-summary {
+    grid-column: auto;
+  }
+}

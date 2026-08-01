@@ -1,0 +1,247 @@
+.city-place-panel,
+.city-responsibility-panel,
+.city-service-panel {
+  min-width: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-2);
+}
+
+.life-meters {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.life-home > .city-place-panel,
+.life-home > .city-responsibility-panel,
+.life-home > .city-service-panel {
+  margin-top: var(--space-3);
+}
+
+.city-place-panel > header,
+.city-responsibility-panel > header,
+.city-service-panel > header {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-2);
+}
+
+.city-place-panel > header small,
+.city-place-panel > header strong,
+.city-responsibility-panel > header small,
+.city-responsibility-panel > header strong,
+.city-service-panel > header small,
+.city-service-panel > header strong {
+  display: block;
+}
+
+.city-place-panel small,
+.city-responsibility-panel small,
+.city-service-panel small,
+.city-service-panel p {
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+}
+
+.city-place-grid {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+.city-place-card {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: var(--space-2);
+  align-items: center;
+  padding: 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-1);
+}
+
+.city-place-card img {
+  display: block;
+  width: 64px;
+  height: 64px;
+  border-radius: 7px;
+  object-fit: cover;
+}
+
+.city-place-card strong,
+.city-place-card p,
+.city-place-card small {
+  display: block;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.city-place-card p {
+  margin-block: 2px;
+  font-size: 11px;
+}
+
+.city-capacity-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.city-capacity-grid span,
+.city-obligation-list span {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  padding: 7px;
+  border-radius: 7px;
+  color: var(--color-text-muted);
+  background: var(--color-surface-1);
+  font-size: 11px;
+}
+
+.city-capacity-grid b,
+.city-obligation-list b {
+  overflow: hidden;
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+}
+
+.city-obligation-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.city-responsibility-panel > button {
+  width: 100%;
+  min-height: 44px;
+  margin-top: var(--space-2);
+  border-color: var(--color-accent);
+  color: var(--color-ink-on-accent);
+  background: var(--color-accent);
+}
+
+.city-service-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.city-service-grid article {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-2);
+  align-items: center;
+  padding: 7px;
+  border: 1px solid var(--color-border);
+  border-radius: 7px;
+  background: var(--color-surface-1);
+}
+
+.city-service-grid strong,
+.city-service-grid small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.city-service-grid article > div:last-child {
+  display: flex;
+  gap: 5px;
+}
+
+.city-service-grid button {
+  min-height: 44px;
+  padding-inline: 10px;
+}
+
+.life-category-rail {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 6px;
+  overflow: visible;
+}
+
+.life-category-rail button {
+  min-width: 0;
+  min-height: 44px;
+  padding-inline: 4px;
+  white-space: normal;
+}
+
+.life-owned-actions button,
+.life-buy-button,
+.life-home-action button,
+.life-item button,
+.life-tabs button,
+.life-work-settlement button {
+  min-height: 44px;
+}
+
+.life-owned-actions button,
+.city-service-grid button {
+  line-height: 1.2;
+  white-space: normal;
+}
+
+.life-product-card,
+.life-owned-card,
+.city-place-card,
+.city-service-grid article {
+  overflow: hidden;
+}
+
+@media (max-width: 900px) {
+  .city-place-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 520px) {
+  .life-meters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .city-place-panel,
+  .city-responsibility-panel,
+  .city-service-panel {
+    padding: var(--space-2);
+  }
+
+  .city-place-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .city-capacity-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .city-obligation-list,
+  .city-service-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .life-category-rail {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .city-place-card {
+    grid-template-columns: 72px minmax(0, 1fr);
+  }
+
+  .city-place-card img {
+    width: 72px;
+    height: 58px;
+  }
+}
