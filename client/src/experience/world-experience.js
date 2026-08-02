@@ -799,6 +799,380 @@ function projectWorldline(world) {
   };
 }
 
+function listingBoardLabel(security) {
+  const exchange = security?.listingIdentity?.exchange;
+  const board = security?.listingIdentity?.board;
+  if (board === 'STAR') return '科创板';
+  if (board === 'CHINEXT') return '创业板';
+  if (exchange === 'SZSE') return '深证主板';
+  return '上证主板';
+}
+
+function listingRiskLabel(security) {
+  const risk =
+    security?.listingIdentity?.riskDesignation ??
+    security?.riskDesignation;
+  if (risk === 'STAR_ST') return '*ST';
+  if (risk === 'ST') return 'ST';
+  return '';
+}
+
+function companyOverviewRows(world, marketSnapshot, positions) {
+  return positions.map((position) => {
+    const security =
+      world.market.securities[position.symbol];
+    const marketSecurity =
+      marketSnapshot?.symbols?.[position.symbol] ?? {};
+    const deltaBps = Number.isFinite(
+      Number(marketSecurity.changeBps),
+    )
+      ? Math.round(Number(marketSecurity.changeBps))
+      : Math.round(
+          (position.lastTicks - position.previousTicks) *
+            10_000 /
+            Math.max(1, position.previousTicks),
+        );
+    const signal =
+      world.economy?.businessNetwork
+        ?.lastSignalsByCompany?.[
+          position.company.id
+        ] ?? {};
+    const signalValues = [
+      signal.demandBps,
+      signal.inputAvailabilityBps,
+      signal.unitCostBps,
+      signal.collectionBps,
+      signal.fundingAvailabilityBps,
+      signal.fundingCostBps,
+      signal.investmentIncomeBps,
+    ].map((value) => finite(value, 10_000));
+    const networkDeviationBps = Math.max(
+      0,
+      ...signalValues.map((value) =>
+        Math.abs(value - 10_000),
+      ),
+    );
+    const latestNotice =
+      world.economy?.adaptiveWorldEvents
+        ?.latestByCompany?.[
+          position.company.id
+        ] ?? null;
+    return {
+      companyId: position.company.id,
+      symbol: position.symbol,
+      displayCode:
+        security.displayCode ??
+        security.listingIdentity?.displayCode ??
+        position.symbol,
+      companyName:
+        position.company.shortName ??
+        position.company.name ??
+        position.symbol,
+      fullName:
+        position.company.name ?? position.symbol,
+      industry:
+        position.company.industry ??
+        position.company.role ??
+        '综合行业',
+      boardLabel: listingBoardLabel(security),
+      riskLabel: listingRiskLabel(security),
+      lastPriceTicks: position.lastTicks,
+      deltaBps,
+      direction:
+        deltaBps > 0
+          ? 'up'
+          : deltaBps < 0
+            ? 'down'
+            : 'flat',
+      marketCapCents:
+        position.lastTicks *
+        Math.max(
+          0,
+          Math.trunc(finite(security.outstandingUnits)),
+        ),
+      sessionVolumeShares: Math.max(
+        0,
+        Math.trunc(
+          finite(marketSecurity.sessionVolumeShares),
+        ),
+      ),
+      sessionTurnoverCents: Math.max(
+        0,
+        Math.trunc(
+          finite(marketSecurity.sessionTurnoverCents),
+        ),
+      ),
+      atLimitUp:
+        position.lastTicks ===
+        Math.trunc(finite(marketSecurity.limitUpTicks, -1)),
+      atLimitDown:
+        position.lastTicks ===
+        Math.trunc(finite(marketSecurity.limitDownTicks, -1)),
+      holdingUnits: position.quantity,
+      holdingValue: position.holdingValue,
+      networkDeviationBps,
+      networkCauseCount:
+        signal.causes?.length ?? 0,
+      latestNoticeKind:
+        latestNotice?.kind ?? null,
+      tradeRoute: 'market',
+      informationRoute: 'information',
+    };
+  });
+}
+
+function marketOverview(companyRows) {
+  const advancers = companyRows.filter(
+    (company) => company.deltaBps > 0,
+  ).length;
+  const decliners = companyRows.filter(
+    (company) => company.deltaBps < 0,
+  ).length;
+  const totalTurnoverCents = companyRows.reduce(
+    (sum, company) =>
+      sum + company.sessionTurnoverCents,
+    0,
+  );
+  const topMovers = [...companyRows]
+    .sort(
+      (left, right) =>
+        Math.abs(right.deltaBps) -
+          Math.abs(left.deltaBps) ||
+        right.sessionTurnoverCents -
+          left.sessionTurnoverCents ||
+        left.symbol.localeCompare(right.symbol),
+    )
+    .slice(0, 8);
+  return {
+    listedCount: companyRows.length,
+    advancers,
+    decliners,
+    unchanged:
+      companyRows.length - advancers - decliners,
+    limitUpCount: companyRows.filter(
+      (company) => company.atLimitUp,
+    ).length,
+    limitDownCount: companyRows.filter(
+      (company) => company.atLimitDown,
+    ).length,
+    totalTurnoverCents,
+    topMovers,
+  };
+}
+
+function economyOverview(world) {
+  const economy = world.economy ?? {};
+  const regimeLabels = {
+    balanced_expansion: '均衡扩张',
+    productivity_acceleration: '生产率加速',
+    demand_rebalancing: '需求再平衡',
+    credit_repricing: '信用重定价',
+    structural_transition: '结构转型',
+  };
+  return {
+    regime:
+      regimeLabels[economy.regime] ??
+      '结构演化中',
+    industrialCycle: finite(economy.industrialCycle),
+    developmentIndex: finite(economy.developmentIndex, 1),
+    technologyFrontier: finite(economy.technologyFrontier, 1),
+    potentialDemandIndex: finite(economy.potentialDemandIndex, 1),
+    priceLevel: finite(economy.priceLevel, 1),
+    riskFreeRateBps: Math.round(
+      finite(economy.riskFreeRateBps),
+    ),
+    creditSpreadBps: Math.round(
+      finite(economy.creditSpreadBps),
+    ),
+  };
+}
+
+function businessNetworkOverview(world, companyRows) {
+  const network =
+    world.economy?.businessNetwork ?? {};
+  const companyById = new Map(
+    companyRows.map((company) => [
+      company.companyId,
+      company,
+    ]),
+  );
+  const pressures = companyRows
+    .filter(
+      (company) =>
+        company.networkDeviationBps > 0 ||
+        company.latestNoticeKind,
+    )
+    .sort(
+      (left, right) =>
+        right.networkDeviationBps -
+          left.networkDeviationBps ||
+        left.symbol.localeCompare(right.symbol),
+    )
+    .slice(0, 8)
+    .map((company) => {
+      const signal =
+        network.lastSignalsByCompany?.[
+          company.companyId
+        ] ?? {};
+      const leadingCause = [...(signal.causes ?? [])]
+        .sort(
+          (left, right) =>
+            Math.abs(right.impactBps) -
+            Math.abs(left.impactBps),
+        )[0];
+      return {
+        companyId: company.companyId,
+        symbol: company.symbol,
+        companyName: company.companyName,
+        deviationBps: company.networkDeviationBps,
+        causeCount: company.networkCauseCount,
+        counterpartyName: leadingCause
+          ? companyById.get(
+              leadingCause.counterpartyCompanyId,
+            )?.companyName ?? '关联经营方'
+          : null,
+        relationship:
+          leadingCause?.relationship ?? null,
+        impactBps:
+          leadingCause?.impactBps ?? 0,
+        informationRoute: 'information',
+      };
+    });
+  return {
+    contractVersion:
+      network.contractVersion ?? null,
+    edgeCount: network.edges?.length ?? 0,
+    lastSettledTick:
+      network.lastSettledTick ?? 0,
+    pressures,
+  };
+}
+
+function derivativesOverview(world) {
+  const derivatives = world.derivatives ?? {};
+  const futures =
+    derivatives.universe?.futures ?? {};
+  const options =
+    derivatives.universe?.options ?? {};
+  const trades =
+    derivatives.market?.trades ?? [];
+  const permissionModes =
+    derivatives.access?.permissionModes ?? {};
+  return {
+    futuresCount: Object.keys(futures).length,
+    optionsCount: Object.keys(options).length,
+    actorCount: Object.keys(
+      derivatives.actors ?? {},
+    ).length,
+    liveBookCount: Object.keys(
+      derivatives.books ?? {},
+    ).length,
+    tradeCount: trades.length,
+    activePermissionCount: Object.values(
+      permissionModes,
+    ).filter(
+      (mode) =>
+        mode === 'FULL' || mode === 'BUY_ONLY',
+    ).length,
+    totalPermissionCount: Object.keys(
+      permissionModes,
+    ).length,
+    regimeSignalBps: Math.round(
+      finite(
+        derivatives.market?.regimeSignalBps,
+      ),
+    ),
+    jumpRiskBps: Math.round(
+      finite(derivatives.market?.jumpRiskBps),
+    ),
+    liquidityRiskBps: Math.round(
+      finite(
+        derivatives.market?.liquidityRiskBps,
+      ),
+    ),
+    route: 'market',
+  };
+}
+
+function worldBriefing(world, maximum = 8) {
+  const facts = (world.facts ?? [])
+    .filter((fact) => fact.visibility === 'public')
+    .map((fact) => ({
+      id: `briefing-fact-${fact.id}`,
+      tick: Math.max(0, Math.trunc(finite(fact.tick))),
+      priority:
+        String(fact.type).includes('announcement') ||
+        String(fact.type).includes('notice')
+          ? 3
+          : 2,
+      category:
+        String(fact.type).includes('announcement') ||
+        String(fact.type).includes('notice')
+          ? '公告'
+          : '事实',
+      title: compactText(
+        publicSignalText(fact.summary),
+        72,
+      ),
+      sourceLabel: '世界公开事实',
+      companyId: fact.entityId ?? null,
+      route: {
+        page: 'company',
+        companyId: fact.entityId ?? null,
+        section: 'disclosures',
+      },
+    }));
+  const clues = (world.clues ?? [])
+    .filter((clue) => clue.status !== 'verified')
+    .map((clue) => ({
+      id: `briefing-clue-${clue.id}`,
+      tick: Math.max(
+        0,
+        Math.trunc(finite(clue.publishedTick)),
+      ),
+      priority: 1,
+      category: '待查',
+      title: compactText(clue.title, 72),
+      sourceLabel:
+        String(clue.source ?? '经营线索'),
+      companyId: clue.companyId ?? null,
+      route: {
+        page: 'company',
+        companyId: clue.companyId ?? null,
+        section: 'clues',
+      },
+    }));
+  return [...facts, ...clues]
+    .sort(
+      (left, right) =>
+        right.tick - left.tick ||
+        right.priority - left.priority ||
+        right.id.localeCompare(left.id),
+    )
+    .slice(0, maximum);
+}
+
+function projectWorldOverview(
+  world,
+  marketSnapshot,
+  positions,
+) {
+  const companies = companyOverviewRows(
+    world,
+    marketSnapshot,
+    positions,
+  );
+  return {
+    market: marketOverview(companies),
+    economy: economyOverview(world),
+    businessNetwork:
+      businessNetworkOverview(world, companies),
+    derivatives: derivativesOverview(world),
+    briefing: worldBriefing(world),
+    companies,
+  };
+}
+
 export function projectWorldExperience(
   world,
   marketSnapshot = null,
@@ -920,6 +1294,11 @@ export function projectWorldExperience(
     },
     nodes,
     landmarks,
+    overview: projectWorldOverview(
+      world,
+      marketSnapshot,
+      positions,
+    ),
     worldline: projectWorldline(world),
     signals:
       options.includeSignals === false

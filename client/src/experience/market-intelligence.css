@@ -914,6 +914,133 @@
   padding: 14px 16px 16px;
 }
 
+.mi-company-system-body {
+  display: grid;
+  gap: 14px;
+}
+
+.mi-company-system-body p,
+.mi-company-system-body h4 {
+  margin: 0;
+}
+
+.mi-system-lead {
+  color: var(--mi-text);
+  font-size: 0.9rem;
+  font-weight: 650;
+}
+
+.mi-system-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.mi-system-chips span {
+  padding: 5px 8px;
+  color: var(--mi-muted);
+  font-size: 0.72rem;
+  border: 1px solid var(--mi-border);
+  border-radius: 999px;
+  background: var(--mi-surface-2);
+}
+
+.mi-company-timeline {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mi-company-timeline li {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 9px;
+  align-items: center;
+}
+
+.mi-company-timeline li > span {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  color: var(--mi-accent);
+  font: 700 0.72rem var(--mi-font-mono);
+  border: 1px solid var(--mi-border-strong);
+  border-radius: 50%;
+}
+
+.mi-system-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.mi-system-columns > section {
+  min-width: 0;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+
+.mi-system-list,
+.mi-contract-list {
+  display: grid;
+  gap: 7px;
+}
+
+.mi-system-list article,
+.mi-system-callout {
+  display: grid;
+  gap: 4px;
+  padding: 9px 10px;
+  border: 1px solid var(--mi-border);
+  border-radius: 7px;
+  background: var(--mi-surface-2);
+}
+
+.mi-system-list article span,
+.mi-system-callout p {
+  color: var(--mi-muted);
+  font-size: 0.73rem;
+}
+
+.mi-contract-list button {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 0.75fr) minmax(0, 1.25fr);
+  gap: 10px;
+  align-items: center;
+  padding: 8px 10px;
+  color: inherit;
+  text-align: left;
+  border: 1px solid var(--mi-border);
+  border-radius: 7px;
+  background: var(--mi-surface-2);
+}
+
+.mi-contract-list button:hover {
+  border-color: var(--mi-border-strong);
+  background: var(--mi-surface-3);
+}
+
+.mi-contract-list button > span {
+  min-width: 0;
+  display: grid;
+}
+
+.mi-contract-list small,
+.mi-contract-list em {
+  color: var(--mi-muted);
+  font-size: 0.69rem;
+  font-style: normal;
+}
+
+.mi-contract-list em {
+  text-align: right;
+}
+
 .mi-company-network {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1065,6 +1192,69 @@
   margin-bottom: 12px;
 }
 
+.mi-business-transmission {
+  display: grid;
+  gap: 10px;
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid var(--mi-border);
+  border-radius: 9px;
+  background: linear-gradient(145deg, var(--mi-surface-2), var(--mi-surface-1));
+}
+
+.mi-business-transmission > header,
+.mi-transmission-causes article {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.mi-business-transmission h4 {
+  margin: 2px 0 0;
+  font-size: 0.9rem;
+}
+
+.mi-business-transmission > header small,
+.mi-transmission-causes span,
+.mi-source-note,
+.mi-table-wrap th small,
+.mi-table-wrap td small {
+  display: block;
+  color: var(--mi-muted);
+  font-size: 0.69rem;
+  font-family: var(--mi-font-sans);
+  font-weight: 500;
+}
+
+.mi-transmission-causes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.mi-transmission-causes article {
+  min-width: 0;
+  padding: 7px 9px;
+  border-radius: 7px;
+  background: var(--mi-surface-1);
+}
+
+.mi-transmission-causes article > * {
+  min-width: 0;
+}
+
+.mi-transmission-causes em {
+  color: var(--mi-accent);
+  font-family: var(--mi-font-mono);
+  font-style: normal;
+  white-space: nowrap;
+}
+
+.mi-source-note {
+  margin: 0;
+}
+
 .mi-signal-columns {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1183,6 +1373,10 @@
   .mi-industry-hero .mi-overview-metrics,
   .mi-operating-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .mi-transmission-causes {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .mi-search-results {

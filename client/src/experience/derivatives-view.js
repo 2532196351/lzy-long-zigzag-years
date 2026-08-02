@@ -1,10 +1,10 @@
 import {
   contractDisplayName,
   equityBasketDisplayName,
-} from '../derivatives/contracts.js?v=20260801-01';
+} from '../derivatives/contracts.js?v=20260803-02';
 import {
   mergeDerivativesAuthorityPublication,
-} from '../market/world-publication.js?v=20260801-01';
+} from '../market/world-publication.js?v=20260803-02';
 
 const PUBLIC_DERIVATIVES_SCHEMA =
   'lzy_derivatives_public_v1';
@@ -699,13 +699,27 @@ function selectedMarketPanel(
     projection.contracts.underlyings[
       contract.underlyingId
     ];
+  const priceAuthority =
+    projection.priceAuthoritiesByContract?.[
+      contract.id
+    ] ?? {};
   const lastTrade =
+    priceAuthority.lastTrade?.priceTicks ??
     projection.lastTradePriceTicks[contract.id] ??
     null;
   const settlement =
+    priceAuthority.settlement?.priceTicks ??
     projection.settlementPriceTicks[contract.id] ??
     null;
-  const mark = lastTrade ?? settlement;
+  const mark =
+    priceAuthority.mark?.priceTicks ??
+    lastTrade ??
+    settlement;
+  const markSource =
+    priceAuthority.mark?.source ??
+    (lastTrade !== null
+      ? 'matched_trade'
+      : 'settlement_reference');
   const spot = Number.isSafeInteger(
     Number(underlying?.spotTicks),
   )
@@ -752,9 +766,7 @@ function selectedMarketPanel(
       }"
       data-derivatives-expiry-ms="${contract.expiryMs}"
       data-derivatives-mark-source="${
-        lastTrade !== null
-          ? 'matched_trade'
-          : 'settlement_reference'
+        escapeHtml(markSource)
       }">
       <header class="derivative-market-card__header"
         data-derivatives-live-key="trade-header">
@@ -793,7 +805,7 @@ function selectedMarketPanel(
         <span><small>${
           contract.type === 'future'
             ? '基差'
-            : '权利金'
+            : '盯市权利金'
         }</small><strong>${
           contract.type === 'future'
             ? finiteQuote(basis)

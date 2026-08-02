@@ -1,19 +1,23 @@
 import {
   createMarketWorkerController,
   epochAlignedMonotonicNow,
-} from './worker.js?v=20260801-01';
+} from './worker.js?v=20260803-02';
 import {
   NATURAL_DAY_MS,
   aggregateBars,
-} from './bars.js?v=20260801-01';
+} from './bars.js?v=20260803-02';
 import {
   deriveFixedIntradayTimeDomain,
   INTRADAY_WINDOW_MS,
-} from './chart-domain.js?v=20260801-01';
+} from './chart-domain.js?v=20260803-02';
 import {
   mergeDerivativesAuthorityPublication,
   mergeWorldAuthorityPublication,
-} from './world-publication.js?v=20260801-01';
+} from './world-publication.js?v=20260803-02';
+import {
+  AUDIT_COLD_TRANSPORT_SCHEMA,
+  createBrowserAuditColdStore,
+} from './audit-cold-store.js?v=20260803-02';
 
 const MAX_ADVANCE_WORLD_DAYS = 5;
 const MAX_ADVANCE_VIRTUAL_MS = 300_000;
@@ -152,7 +156,7 @@ function defaultWorkerFactory() {
   if (typeof Worker !== 'function') {
     throw new Error('Module Worker is unavailable.');
   }
-  return new Worker(new URL('./worker.js?v=20260801-01', import.meta.url), {
+  return new Worker(new URL('./worker.js?v=20260803-02', import.meta.url), {
     type: 'module',
   });
 }
@@ -634,6 +638,90 @@ function comparePublicTrades(left, right) {
   );
 }
 
+function validTradeRetention(retention) {
+  if (
+    retention?.schema !== 'lzy_public_trade_retention_v1' ||
+    !Number.isSafeInteger(retention.authorityCommitSeq) ||
+    retention.authorityCommitSeq < 0 ||
+    typeof retention.empty !== 'boolean'
+  ) {
+    return false;
+  }
+  if (retention.empty) return retention.firstTrade === null;
+  return Boolean(
+    typeof retention.firstTrade?.id === 'string' &&
+      retention.firstTrade.id.length > 0 &&
+      Number.isSafeInteger(retention.firstTrade.virtualMs) &&
+      retention.firstTrade.virtualMs >= 0,
+  );
+}
+
+function latestTradeRetention(previous, next) {
+  const prior = validTradeRetention(previous) ? previous : null;
+  const current = validTradeRetention(next) ? next : null;
+  if (!prior) return current;
+  if (!current) return prior;
+  if (
+    current.authorityCommitSeq !== prior.authorityCommitSeq
+  ) {
+    return current.authorityCommitSeq > prior.authorityCommitSeq
+      ? current
+      : prior;
+  }
+  if (current.empty !== prior.empty) {
+    return current.empty ? current : prior;
+  }
+  if (current.empty) return current;
+  return comparePublicTrades(
+    current.firstTrade,
+    prior.firstTrade,
+  ) >= 0
+    ? current
+    : prior;
+}
+
+function applyTradeRetention(trades, retention) {
+  if (!validTradeRetention(retention)) return trades;
+  if (retention.empty) return [];
+  let low = 0;
+  let high = trades.length;
+  while (low < high) {
+    const middle = low + Math.floor((high - low) / 2);
+    if (
+      comparePublicTrades(
+        trades[middle],
+        retention.firstTrade,
+      ) < 0
+    ) {
+      low = middle + 1;
+    } else {
+      high = middle;
+    }
+  }
+  return low === 0 ? trades : trades.slice(low);
+}
+
+function mergeRetainedPublicTrades(
+  previous,
+  next,
+  ...deltaCollections
+) {
+  const retention = latestTradeRetention(
+    previous?.tradeRetention,
+    next?.tradeRetention,
+  );
+  return {
+    retention,
+    trades: applyTradeRetention(
+      mergePublicTrades(
+        previous?.trades,
+        ...deltaCollections,
+      ),
+      retention,
+    ),
+  };
+}
+
 function mergePublicTradesFallback(previousTrades, deltaCollections) {
   const byId = new Map();
   for (const collection of [previousTrades, ...deltaCollections]) {
@@ -772,6 +860,46 @@ function materializeLevel2Depth(previousDepth, delta) {
   };
 }
 
+function replaceQuoteDepthBaselines(baselines, market) {
+  baselines.clear();
+  for (const [symbol, projection] of Object.entries(
+    market?.symbols ?? {},
+  )) {
+    if (projection?.level2Depth) {
+      baselines.set(symbol, projection.level2Depth);
+    }
+  }
+}
+
+function materializeQuoteDepthTransport(baselines, market) {
+  if (!market?.symbols) return market;
+  return {
+    ...market,
+    symbols: Object.fromEntries(
+      Object.entries(market.symbols).map(([symbol, projection]) => {
+        let materialized = projection;
+        if (projection?.level2DepthDelta) {
+          materialized = {
+            ...projection,
+            level2Depth: materializeLevel2Depth(
+              baselines.get(symbol),
+              projection.level2DepthDelta,
+            ),
+          };
+        }
+        const {
+          level2DepthDelta: _level2DepthDelta,
+          ...withoutDelta
+        } = materialized;
+        if (withoutDelta.level2Depth) {
+          baselines.set(symbol, withoutDelta.level2Depth);
+        }
+        return [symbol, withoutDelta];
+      }),
+    ),
+  };
+}
+
 function mixLevel2Fingerprint(hash, value) {
   const text = String(value ?? 'null');
   let next = hash >>> 0;
@@ -884,18 +1012,21 @@ function mergeLevel2Publication(
           String(left.id).localeCompare(String(right.id)),
       )
     : previous.activeOrders;
+  const retainedTrades = mergeRetainedPublicTrades(
+    resync && Array.isArray(next.trades)
+      ? { ...previous, trades: [] }
+      : previous,
+    next,
+    next.trades,
+    tradeDeltas,
+  );
   return {
     ...previous,
     ...topLevel,
     symbols,
     activeOrders,
-    trades: mergePublicTrades(
-      resync && Array.isArray(next.trades)
-        ? []
-        : previous.trades,
-      next.trades,
-      tradeDeltas,
-    ),
+    tradeRetention: retainedTrades.retention,
+    trades: retainedTrades.trades,
   };
 }
 
@@ -928,6 +1059,11 @@ function mergeCommandMarketPatch(previous, patch) {
       Number(left.sequence) - Number(right.sequence) ||
       String(left.id).localeCompare(String(right.id)),
   );
+  const retainedTrades = mergeRetainedPublicTrades(
+    previous,
+    patch,
+    tradeDeltas,
+  );
   return {
     ...previous,
     ...topLevel,
@@ -944,10 +1080,8 @@ function mergeCommandMarketPatch(previous, patch) {
       ...patch.accounts,
     },
     activeOrders,
-    trades: mergePublicTrades(
-      previous.trades,
-      tradeDeltas,
-    ),
+    tradeRetention: retainedTrades.retention,
+    trades: retainedTrades.trades,
     capacity: {
       ...previous.capacity,
       ...patch.capacity,
@@ -1018,8 +1152,34 @@ export function mergeMarketPublication(
   const previousSymbols = previous?.symbols ?? {};
   const preferPriorCurrentSymbols = new Set();
   const symbols = Object.fromEntries(
-    Object.entries(next.symbols).map(([symbol, current]) => {
+    Object.entries(next.symbols).map(([symbol, publication]) => {
       const prior = previousSymbols[symbol] ?? {};
+      const materializedPublication =
+        publication.level2DepthDelta
+          ? {
+              ...publication,
+              level2Depth: materializeLevel2Depth(
+                prior.level2Depth,
+                publication.level2DepthDelta,
+              ),
+            }
+          : publication;
+      const {
+        level2DepthDelta: _level2DepthDelta,
+        ...publicationWithoutLevel2Delta
+      } = materializedPublication;
+      const current =
+        publicationWithoutLevel2Delta.level2Depth &&
+        !Array.isArray(publicationWithoutLevel2Delta.bids) &&
+        !Array.isArray(publicationWithoutLevel2Delta.asks)
+          ? {
+              ...publicationWithoutLevel2Delta,
+              bids:
+                publicationWithoutLevel2Delta.level2Depth.bids.slice(0, 10),
+              asks:
+                publicationWithoutLevel2Delta.level2Depth.asks.slice(0, 10),
+            }
+          : publicationWithoutLevel2Delta;
       const {
         ultraTradeDeltas,
         ...currentWithoutUltraDelta
@@ -1177,6 +1337,12 @@ export function mergeMarketPublication(
       !Number.isSafeInteger(currentCommitSeq) ||
       previousCommitSeq > currentCommitSeq
     );
+  const retainedTrades = mergeRetainedPublicTrades(
+    previous,
+    next,
+    next.trades,
+    next.tradeDeltas,
+  );
   return {
     ...next,
     nowMs: authorityNowMs,
@@ -1197,14 +1363,15 @@ export function mergeMarketPublication(
       priorTopLevelIsNewer
         ? previous?.marketData
         : next.marketData ?? previous?.marketData,
+    fundamentalNetwork:
+      priorTopLevelIsNewer
+        ? previous?.fundamentalNetwork
+        : next.fundamentalNetwork ?? previous?.fundamentalNetwork,
     symbols,
     accounts,
     activeOrders,
-    trades: mergePublicTrades(
-      previous?.trades,
-      next.trades,
-      next.tradeDeltas,
-    ),
+    tradeRetention: retainedTrades.retention,
+    trades: retainedTrades.trades,
     capacity:
       retainedPriorPlayerAccount
         ? previous?.capacity
@@ -1233,6 +1400,7 @@ export function createMarketClient({
   testingAccessOpen = false,
   onFrame = () => {},
   onRealtime = () => {},
+  onWorld2D = () => {},
   onPaint = () => {},
   onReceipt = () => {},
   onError = () => {},
@@ -1242,6 +1410,7 @@ export function createMarketClient({
   frameScheduler = defaultFrameScheduler,
   cancelFrame = defaultCancelFrame,
   wallNow = defaultWallNow,
+  auditColdStore = undefined,
 } = {}) {
   if (typeof testingAccessOpen !== 'boolean') {
     throw new TypeError(
@@ -1255,6 +1424,22 @@ export function createMarketClient({
   ) {
     throw new TypeError(
       'frameScheduler, cancelFrame and wallNow must be functions.',
+    );
+  }
+  const resolvedAuditColdStore =
+    auditColdStore === undefined
+      ? createBrowserAuditColdStore()
+      : auditColdStore;
+  if (
+    resolvedAuditColdStore !== null &&
+    (
+      typeof resolvedAuditColdStore !== 'object' ||
+      typeof resolvedAuditColdStore.put !== 'function' ||
+      typeof resolvedAuditColdStore.verifyCheckpoint !== 'function'
+    )
+  ) {
+    throw new TypeError(
+      'auditColdStore must provide put and verifyCheckpoint.',
     );
   }
   let worker = null;
@@ -1286,6 +1471,7 @@ export function createMarketClient({
   let fallbackAttempted = fallback;
   let pendingFrameMessage = null;
   let pendingRealtimeMessage = null;
+  let pendingWorld2DMessage = null;
   let renderDrainWaiters = [];
   let renderScheduled = false;
   let renderHandle = null;
@@ -1297,11 +1483,56 @@ export function createMarketClient({
   let latestDerivativesAuthority = null;
   let derivativesResyncPending = false;
   let latestMarketPublication = null;
+  // Quote-frame depth deltas are chained to the last quote transport that the
+  // Worker posted, not to whichever newer command, save or realtime
+  // publication currently wins the semantic market projection. A
+  // SAVE_BARRIER can publish a newer full snapshot while older fixed quote
+  // endpoints are still draining under publication credit. Keeping this
+  // transport baseline separate lets those endpoints materialize exactly;
+  // mergeMarketPublication then independently retains the newest authority.
+  const quoteDepthBaselines = new Map();
   // Public quote/command publications must never be accumulated on top of the
   // canonical INIT/SAVE world. The canonical state is intentionally private;
   // this accumulator is only for the redacted public projection.
   let latestWorldAuthority = null;
   const pending = new Map();
+  const pendingAuditColdWrites = new Set();
+  let auditColdFailure = null;
+
+  function persistAuditColdRecord(message) {
+    if (
+      message?.schema !== AUDIT_COLD_TRANSPORT_SCHEMA ||
+      !resolvedAuditColdStore
+    ) {
+      failClosed(
+        new Error(
+          'Realtime-audit cold storage transport is unavailable.',
+        ),
+      );
+      return;
+    }
+    let operation;
+    operation = Promise.resolve()
+      .then(() => resolvedAuditColdStore.put(message.record))
+      .catch((error) => {
+        auditColdFailure =
+          error instanceof Error
+            ? error
+            : new Error(String(error));
+        failClosed(auditColdFailure);
+      })
+      .finally(() => {
+        pendingAuditColdWrites.delete(operation);
+      });
+    pendingAuditColdWrites.add(operation);
+  }
+
+  async function flushAuditColdWrites() {
+    while (pendingAuditColdWrites.size > 0) {
+      await Promise.all([...pendingAuditColdWrites]);
+    }
+    if (auditColdFailure) throw auditColdFailure;
+  }
 
   function mergePublicWorldAuthority(envelope) {
     const merged = mergeWorldAuthorityPublication(
@@ -1398,8 +1629,10 @@ export function createMarketClient({
     renderHandle = null;
     const realtimeMessage = pendingRealtimeMessage;
     const frameMessage = pendingFrameMessage;
+    const world2dMessage = pendingWorld2DMessage;
     pendingRealtimeMessage = null;
     pendingFrameMessage = null;
+    pendingWorld2DMessage = null;
     if (destroyed || failedError) {
       const waiters = renderDrainWaiters;
       renderDrainWaiters = [];
@@ -1487,6 +1720,30 @@ export function createMarketClient({
       });
       acknowledgePublication(realtimeMessage);
     }
+    if (world2dMessage) {
+      safelyObserve(
+        onWorld2D,
+        world2dMessage.world?.state ?? latestWorldAuthority,
+        world2dMessage,
+      );
+      safelyObserve(onPaint, {
+        kind: 'world2d',
+        authorityTrace:
+          world2dMessage.authorityTrace === undefined
+            ? null
+            : cloneValue(world2dMessage.authorityTrace),
+        wallPaintedAt,
+        wallPublishedAt:
+          world2dMessage.wallPublishedAt ?? null,
+        latestPublicationMs:
+          world2dMessage.world?.state?.experience?.world2d
+            ?.authorityNowMs ?? null,
+        latestEventMs:
+          world2dMessage.authorityTrace?.scheduledMs ?? null,
+        latestSequence:
+          world2dMessage.world?.commitSeq ?? null,
+      });
+    }
     const waiters = renderDrainWaiters;
     renderDrainWaiters = [];
     for (const resolve of waiters) resolve();
@@ -1496,7 +1753,8 @@ export function createMarketClient({
     if (
       !renderScheduled &&
       !pendingFrameMessage &&
-      !pendingRealtimeMessage
+      !pendingRealtimeMessage &&
+      !pendingWorld2DMessage
     ) {
       return Promise.resolve();
     }
@@ -1528,8 +1786,17 @@ export function createMarketClient({
     scheduleRender();
   }
 
+  function scheduleWorld2D(message) {
+    pendingWorld2DMessage = message;
+    scheduleRender();
+  }
+
   function cancelRenderIfIdle() {
-    if (pendingFrameMessage || pendingRealtimeMessage) return;
+    if (
+      pendingFrameMessage ||
+      pendingRealtimeMessage ||
+      pendingWorld2DMessage
+    ) return;
     if (renderScheduled && renderHandle !== null) {
       try {
         cancelFrame(renderHandle);
@@ -1552,6 +1819,11 @@ export function createMarketClient({
     const message = pendingRealtimeMessage;
     pendingRealtimeMessage = null;
     acknowledgePublication(message);
+    cancelRenderIfIdle();
+  }
+
+  function cancelPendingWorld2D() {
+    pendingWorld2DMessage = null;
     cancelRenderIfIdle();
   }
 
@@ -1681,6 +1953,10 @@ export function createMarketClient({
 
   function handleMessage({ data }) {
     if (destroyed || failedError) return;
+    if (data?.type === 'AUDIT_COLD_RECORD') {
+      persistAuditColdRecord(data);
+      return;
+    }
     let message = data;
     const level2WallReceivedAt =
       message?.type === 'LEVEL2_UPDATE'
@@ -1719,6 +1995,28 @@ export function createMarketClient({
           state: latestWorldAuthority,
         },
       };
+    }
+    if (message?.type === 'WORLD2D_UPDATE') {
+      scheduleWorld2D(message);
+      return;
+    }
+    const directMarket = message?.market;
+    if (message?.type === 'QUOTE_FRAME' && directMarket) {
+      message = {
+        ...message,
+        market: materializeQuoteDepthTransport(
+          quoteDepthBaselines,
+          directMarket,
+        ),
+      };
+    } else if (
+      message?.type !== 'LEVEL2_UPDATE' &&
+      directMarket?.symbols
+    ) {
+      replaceQuoteDepthBaselines(
+        quoteDepthBaselines,
+        directMarket,
+      );
     }
     if (message?.marketPatch) {
       const market = mergeMarketPublication(
@@ -1878,7 +2176,13 @@ export function createMarketClient({
         pending.delete(message.requestId);
         entry.resolve(publication);
       }
-      safelyObserve(onReceipt, publication);
+      // Receipt observers commonly reconcile a dense market stage. Keep that
+      // presentation work behind the command-promise boundary so a large DOM
+      // cannot hold the authoritative acknowledgement hostage. The observer
+      // still runs in the same task turn, before the browser may paint.
+      queueMicrotask(() => {
+        safelyObserve(onReceipt, publication);
+      });
       return;
     }
     settle(message);
@@ -1974,6 +2278,7 @@ export function createMarketClient({
     resumeAfterVisibility = false;
     cancelPendingFrame();
     cancelPendingRealtime();
+    cancelPendingWorld2D();
     documentTarget?.removeEventListener?.(
       'visibilitychange',
       visibilityChanged,
@@ -2047,16 +2352,37 @@ export function createMarketClient({
     });
   }
 
-  const ready = send(
-    'INIT',
-    {
-      world: cloneValue(world),
-      savedState:
-        savedState && cloneValue(savedState),
-      testingAccessOpen,
-    },
-    (message) => ({ ...message, fallback }),
-  );
+  const initPayload = {
+    world: cloneValue(world),
+    savedState:
+      savedState && cloneValue(savedState),
+    testingAccessOpen,
+  };
+  const beginInit = (verifiedReferences = null) =>
+    send(
+      'INIT',
+      {
+        ...initPayload,
+        ...(verifiedReferences
+          ? {
+              auditColdTransport: {
+                schema: AUDIT_COLD_TRANSPORT_SCHEMA,
+                verifiedReferences,
+              },
+            }
+          : {}),
+      },
+      (message) => ({ ...message, fallback }),
+    );
+  const ready = resolvedAuditColdStore
+    ? Promise.resolve()
+        .then(() =>
+          savedState
+            ? resolvedAuditColdStore.verifyCheckpoint(savedState)
+            : [],
+        )
+        .then(beginInit)
+    : beginInit();
 
   function visibilityChanged() {
     if (destroyed) return;
@@ -2082,6 +2408,7 @@ export function createMarketClient({
     testingAccessOpen,
     onFrame,
     onRealtime,
+    onWorld2D,
     onPaint,
     onReceipt,
     onError,
@@ -2091,6 +2418,7 @@ export function createMarketClient({
     frameScheduler,
     cancelFrame,
     wallNow,
+    auditColdStore: resolvedAuditColdStore,
   };
   let clientApi = null;
   clientApi = Object.freeze({
@@ -2131,14 +2459,17 @@ export function createMarketClient({
       return send('STEP_FRAME');
     },
 
-    async worldCommand(command) {
+    worldCommand(command) {
       ensureActive();
-      await ready;
-      return send(
-        'WORLD_COMMAND',
-        { command: cloneValue(command) },
-        commandReceipt,
-      );
+      const dispatch = () =>
+        send(
+          'WORLD_COMMAND',
+          { command: cloneValue(command) },
+          commandReceipt,
+        );
+      return readyReceived
+        ? dispatch()
+        : ready.then(dispatch);
     },
 
     async advanceWorldDays(days) {
@@ -2162,7 +2493,14 @@ export function createMarketClient({
     async saveBarrier() {
       ensureActive();
       await ready;
-      return send('SAVE_BARRIER');
+      return send(
+        'SAVE_BARRIER',
+        {},
+        async (message) => {
+          await flushAuditColdWrites();
+          return message;
+        },
+      );
     },
 
     async replaceWorld({
@@ -2194,6 +2532,7 @@ export function createMarketClient({
       resumeAfterVisibility = false;
       cancelPendingFrame();
       cancelPendingRealtime();
+      cancelPendingWorld2D();
       documentTarget?.removeEventListener?.(
         'visibilitychange',
         visibilityChanged,

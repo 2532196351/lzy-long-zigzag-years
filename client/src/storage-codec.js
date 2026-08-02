@@ -1,16 +1,43 @@
 const LEGACY_CHECKPOINT_ENCODING = 'lzw-utf8-u16-base64-v1';
 const PREVIOUS_CHECKPOINT_ENCODING = 'lzw-utf8-u16-utf16-v2';
-const CHECKPOINT_ENCODING = 'lzw-utf8-u16-utf16-blocks-v3';
+const PREVIOUS_BLOCK_CHECKPOINT_ENCODING =
+  'lzw-utf8-u16-utf16-blocks-v3';
+const PREVIOUS_CHUNKED_CHECKPOINT_ENCODING =
+  'lzw-utf8-u16-utf16-chunked-v4';
+const CHECKPOINT_ENCODING =
+  'lzw-utf8-u16-utf16-binary-audit-v5';
 const MAX_DICTIONARY_CODE = 65_535;
 const MAX_CHECKPOINT_JSON_BYTES = 24_000_000;
 const MAX_CHECKPOINT_BLOCKS = 256;
+const LZW_DICTIONARY_RESET_BYTES = 512_000;
+const MAX_LZW_DICTIONARY_RESET_BYTES = 2_000_000;
 const UTF16_PACK_BITS = 15;
 const UTF16_PACK_BASE = 0x1000;
 const UTF16_PACK_MAX = UTF16_PACK_BASE + 0x7fff;
 const UTF16_PACK_CHUNK = 8_192;
 const DERIVED_MARKET_MIRROR_PROJECTION_KEY =
   '__lzy_checkpoint_derived_market_mirrors_v1';
+const COMPACT_BOOKS_PROJECTION_KEY =
+  '__lzy_checkpoint_compact_books_v1';
+const PACKED_AUDIT_PAYLOADS_PROJECTION_KEY =
+  '__lzy_checkpoint_packed_audit_payloads_v1';
+const PACKED_AUDIT_PAYLOAD_ENCODING =
+  'lzy_checkpoint_binary_attachment_ref_v1';
+const AUDIT_PAYLOAD_ENCODING =
+  'lzy_realtime_audit_lz4_json_base64_v1';
 const freshCheckpointCache = new WeakMap();
+
+function dictionaryResetBytesForBlock(key) {
+  if (
+    key === 'books' ||
+    key === 'agentEcology' ||
+    key === 'orderArchive'
+  ) {
+    return 1_000_000;
+  }
+  if (key === 'quoteFrames') return 2_000_000;
+  return LZW_DICTIONARY_RESET_BYTES;
+}
 
 function checksumBytes(bytes) {
   let hash = 0x811c9dc5;
@@ -144,6 +171,78 @@ function utf16ToCodes(value, expectedCodeCount) {
   return codes;
 }
 
+function bytesToUtf16(bytes) {
+  const chunks = [];
+  let characters = [];
+  let buffer = 0;
+  let bufferedBits = 0;
+
+  function append(value) {
+    characters.push(String.fromCharCode(value + UTF16_PACK_BASE));
+    if (characters.length >= UTF16_PACK_CHUNK) {
+      chunks.push(characters.join(''));
+      characters = [];
+    }
+  }
+
+  for (const byte of bytes) {
+    buffer = buffer * 256 + byte;
+    bufferedBits += 8;
+    while (bufferedBits >= UTF16_PACK_BITS) {
+      bufferedBits -= UTF16_PACK_BITS;
+      const divisor = 2 ** bufferedBits;
+      append(Math.floor(buffer / divisor) & 0x7fff);
+      buffer %= divisor;
+    }
+  }
+  if (bufferedBits > 0) {
+    append(buffer * 2 ** (UTF16_PACK_BITS - bufferedBits));
+  }
+  if (characters.length > 0) chunks.push(characters.join(''));
+  return chunks.join('');
+}
+
+function utf16ToBytes(value, expectedByteCount) {
+  if (
+    typeof value !== 'string' ||
+    !Number.isSafeInteger(expectedByteCount) ||
+    expectedByteCount <= 0 ||
+    value.length !==
+      Math.ceil((expectedByteCount * 8) / UTF16_PACK_BITS)
+  ) {
+    throw new Error('Invalid packed audit payload length.');
+  }
+  const bytes = new Uint8Array(expectedByteCount);
+  let byteIndex = 0;
+  let buffer = 0;
+  let bufferedBits = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (
+      codeUnit < UTF16_PACK_BASE ||
+      codeUnit > UTF16_PACK_MAX
+    ) {
+      throw new Error('Invalid packed audit payload character.');
+    }
+    buffer =
+      buffer * 32_768 +
+      (codeUnit - UTF16_PACK_BASE);
+    bufferedBits += UTF16_PACK_BITS;
+    while (bufferedBits >= 8 && byteIndex < expectedByteCount) {
+      bufferedBits -= 8;
+      const divisor = 2 ** bufferedBits;
+      bytes[byteIndex] =
+        Math.floor(buffer / divisor) & 0xff;
+      byteIndex += 1;
+      buffer %= divisor;
+    }
+  }
+  if (byteIndex !== expectedByteCount || buffer !== 0) {
+    throw new Error('Invalid packed audit payload padding.');
+  }
+  return bytes;
+}
+
 function lzwEncode(bytes) {
   if (bytes.length === 0) return new Uint16Array();
   // A transition is uniquely identified by (prefix-code, next byte). Keeping
@@ -267,8 +366,16 @@ function freshCacheMatches(encoded, cached) {
       block.key !== expected.key ||
       block.jsonBytes !== expected.jsonBytes ||
       block.codeCount !== expected.codeCount ||
+      block.dictionaryResetBytes !==
+        expected.dictionaryResetBytes ||
+      block.compressedDataLength !==
+        expected.compressedDataLength ||
       block.dataLength !== expected.dataLength ||
-      block.checksum !== expected.checksum
+      block.checksum !== expected.checksum ||
+      JSON.stringify(block.chunks) !==
+        JSON.stringify(expected.chunks) ||
+      JSON.stringify(block.attachments ?? []) !==
+        JSON.stringify(expected.attachments ?? [])
     ) {
       return false;
     }
@@ -521,6 +628,411 @@ function restoreDerivedMarketMirrors(checkpoint) {
   return checkpoint;
 }
 
+function projectCompactBooks(checkpoint) {
+  if (
+    Object.hasOwn(
+      checkpoint,
+      COMPACT_BOOKS_PROJECTION_KEY,
+    ) ||
+    !checkpoint.books ||
+    typeof checkpoint.books !== 'object' ||
+    Array.isArray(checkpoint.books)
+  ) {
+    return checkpoint;
+  }
+  const shapes = [];
+  const shapeIndexBySignature = new Map();
+  const bookRows = [];
+  try {
+    for (const [symbol, book] of Object.entries(
+      checkpoint.books,
+    )) {
+      if (
+        !exactOrderedKeys(book, [
+          'symbol',
+          'bids',
+          'asks',
+          'orders',
+          'nextSequence',
+        ]) ||
+        book.symbol !== symbol ||
+        !book.bids ||
+        !book.asks ||
+        !book.orders ||
+        !Number.isSafeInteger(book.nextSequence)
+      ) {
+        return checkpoint;
+      }
+      const orderRows = [];
+      for (const [orderId, order] of Object.entries(
+        book.orders,
+      )) {
+        if (
+          !order ||
+          typeof order !== 'object' ||
+          Array.isArray(order) ||
+          order.id !== orderId
+        ) {
+          return checkpoint;
+        }
+        const keys = Object.keys(order);
+        if (
+          keys.length === 0 ||
+          new Set(keys).size !== keys.length ||
+          keys.some(
+            (key) => order[key] === undefined,
+          )
+        ) {
+          return checkpoint;
+        }
+        const signature = JSON.stringify(keys);
+        let shapeIndex =
+          shapeIndexBySignature.get(signature);
+        if (shapeIndex === undefined) {
+          shapeIndex = shapes.length;
+          shapes.push(keys);
+          shapeIndexBySignature.set(
+            signature,
+            shapeIndex,
+          );
+        }
+        orderRows.push([
+          shapeIndex,
+          ...keys.map((key) => order[key]),
+        ]);
+      }
+      const levelRows = (levels) =>
+        Object.entries(levels).map(
+          ([priceTicks, queue]) => [
+            Number(priceTicks),
+            queue,
+          ],
+        );
+      bookRows.push([
+        symbol,
+        book.nextSequence,
+        levelRows(book.bids),
+        levelRows(book.asks),
+        orderRows,
+      ]);
+    }
+  } catch {
+    return checkpoint;
+  }
+  if (bookRows.length === 0) return checkpoint;
+  const projected = {
+    ...checkpoint,
+    books: {
+      version: 1,
+      shapes,
+      rows: bookRows,
+    },
+  };
+  projected[COMPACT_BOOKS_PROJECTION_KEY] = {
+    version: 1,
+    symbolOrder: Object.keys(checkpoint.books),
+  };
+  return projected;
+}
+
+function restoreCompactBooks(checkpoint) {
+  if (!Object.hasOwn(
+    checkpoint,
+    COMPACT_BOOKS_PROJECTION_KEY,
+  )) {
+    return checkpoint;
+  }
+  const projection =
+    checkpoint[COMPACT_BOOKS_PROJECTION_KEY];
+  const compact = checkpoint.books;
+  if (
+    projection?.version !== 1 ||
+    compact?.version !== 1 ||
+    !Array.isArray(projection.symbolOrder) ||
+    new Set(projection.symbolOrder).size !==
+      projection.symbolOrder.length ||
+    !Array.isArray(compact.shapes) ||
+    !Array.isArray(compact.rows) ||
+    compact.rows.length !==
+      projection.symbolOrder.length
+  ) {
+    throw new Error(
+      'Invalid checkpoint compact book projection.',
+    );
+  }
+  const shapes = compact.shapes.map((keys) => {
+    if (
+      !Array.isArray(keys) ||
+      keys.length === 0 ||
+      new Set(keys).size !== keys.length ||
+      keys.some(
+        (key) =>
+          typeof key !== 'string' ||
+          key.length === 0,
+      )
+    ) {
+      throw new Error(
+        'Invalid checkpoint compact order shape.',
+      );
+    }
+    return keys;
+  });
+  const books = {};
+  const restoreLevels = (rows) => {
+    if (!Array.isArray(rows)) {
+      throw new Error(
+        'Invalid checkpoint compact price levels.',
+      );
+    }
+    const levels = {};
+    for (const row of rows) {
+      if (
+        !Array.isArray(row) ||
+        row.length !== 2 ||
+        !Number.isSafeInteger(row[0]) ||
+        row[0] <= 0 ||
+        !Array.isArray(row[1]) ||
+        row[1].length === 0
+      ) {
+        throw new Error(
+          'Invalid checkpoint compact price level.',
+        );
+      }
+      levels[String(row[0])] = row[1];
+    }
+    return levels;
+  };
+  compact.rows.forEach((row, bookIndex) => {
+    if (
+      !Array.isArray(row) ||
+      row.length !== 5 ||
+      row[0] !== projection.symbolOrder[bookIndex] ||
+      !Number.isSafeInteger(row[1]) ||
+      !Array.isArray(row[4])
+    ) {
+      throw new Error(
+        'Invalid checkpoint compact book row.',
+      );
+    }
+    const orders = {};
+    for (const orderRow of row[4]) {
+      const shapeIndex = orderRow?.[0];
+      const keys = shapes[shapeIndex];
+      if (
+        !Array.isArray(orderRow) ||
+        !Number.isSafeInteger(shapeIndex) ||
+        !keys ||
+        orderRow.length !== keys.length + 1
+      ) {
+        throw new Error(
+          'Invalid checkpoint compact order row.',
+        );
+      }
+      const order = Object.fromEntries(
+        keys.map((key, index) => [
+          key,
+          orderRow[index + 1],
+        ]),
+      );
+      if (
+        typeof order.id !== 'string' ||
+        order.id.length === 0 ||
+        Object.hasOwn(orders, order.id)
+      ) {
+        throw new Error(
+          'Invalid checkpoint compact order identity.',
+        );
+      }
+      orders[order.id] = order;
+    }
+    const symbol = row[0];
+    books[symbol] = {
+      symbol,
+      bids: restoreLevels(row[2]),
+      asks: restoreLevels(row[3]),
+      orders,
+      nextSequence: row[1],
+    };
+  });
+  checkpoint.books = books;
+  delete checkpoint[COMPACT_BOOKS_PROJECTION_KEY];
+  return checkpoint;
+}
+
+function projectPackedAuditPayloads(checkpoint) {
+  if (
+    Object.hasOwn(
+      checkpoint,
+      PACKED_AUDIT_PAYLOADS_PROJECTION_KEY,
+    ) ||
+    !checkpoint.realtimeAuditArchive ||
+    typeof checkpoint.realtimeAuditArchive !== 'object' ||
+    Array.isArray(checkpoint.realtimeAuditArchive) ||
+    !Array.isArray(
+      checkpoint.realtimeAuditArchive.foldedBlocks,
+    )
+  ) {
+    return { checkpoint, attachments: [] };
+  }
+  const foldedBlocks =
+    checkpoint.realtimeAuditArchive.foldedBlocks;
+  const packedIndexes = [];
+  const attachments = [];
+  const projectedBlocks = [...foldedBlocks];
+  try {
+    foldedBlocks.forEach((block, index) => {
+      if (
+        !block ||
+        typeof block !== 'object' ||
+        Array.isArray(block) ||
+        block.losslessPayloadEncoding !==
+          AUDIT_PAYLOAD_ENCODING ||
+        typeof block.compressedLosslessPayloads !== 'string'
+      ) {
+        return;
+      }
+      const bytes = base64ToBytes(
+        block.compressedLosslessPayloads,
+      );
+      const attachmentIndex = attachments.length;
+      const checksum = checksumBytes(bytes);
+      attachments.push(bytes);
+      projectedBlocks[index] = {
+        ...block,
+        compressedLosslessPayloads: {
+          encoding: PACKED_AUDIT_PAYLOAD_ENCODING,
+          attachmentIndex,
+          byteLength: bytes.length,
+          checksum,
+        },
+      };
+      packedIndexes.push(index);
+    });
+  } catch {
+    return { checkpoint, attachments: [] };
+  }
+  if (packedIndexes.length === 0) {
+    return { checkpoint, attachments: [] };
+  }
+  const projected = {
+    ...checkpoint,
+    realtimeAuditArchive: {
+      ...checkpoint.realtimeAuditArchive,
+      foldedBlocks: projectedBlocks,
+    },
+  };
+  projected[PACKED_AUDIT_PAYLOADS_PROJECTION_KEY] = {
+    version: 1,
+    foldedBlockIndexes: packedIndexes,
+    attachmentCount: attachments.length,
+  };
+  return { checkpoint: projected, attachments };
+}
+
+function restorePackedAuditPayloads(
+  checkpoint,
+  attachments = [],
+) {
+  if (!Object.hasOwn(
+    checkpoint,
+    PACKED_AUDIT_PAYLOADS_PROJECTION_KEY,
+  )) {
+    if (attachments.length > 0) {
+      throw new Error(
+        'Checkpoint contains unreferenced audit attachments.',
+      );
+    }
+    return checkpoint;
+  }
+  const projection =
+    checkpoint[PACKED_AUDIT_PAYLOADS_PROJECTION_KEY];
+  const archive = checkpoint.realtimeAuditArchive;
+  const indexes = projection?.foldedBlockIndexes;
+  if (
+    projection?.version !== 1 ||
+    !archive ||
+    typeof archive !== 'object' ||
+    Array.isArray(archive) ||
+    !Array.isArray(archive.foldedBlocks) ||
+    !Array.isArray(indexes) ||
+    indexes.length === 0 ||
+    projection.attachmentCount !== indexes.length ||
+    !Array.isArray(attachments) ||
+    attachments.length !== projection.attachmentCount ||
+    new Set(indexes).size !== indexes.length ||
+    indexes.some(
+      (index, position) =>
+        !Number.isSafeInteger(index) ||
+        index < 0 ||
+        index >= archive.foldedBlocks.length ||
+        (position > 0 && index <= indexes[position - 1]),
+    )
+  ) {
+    throw new Error(
+      'Invalid checkpoint packed audit projection.',
+    );
+  }
+  const foldedBlocks = [...archive.foldedBlocks];
+  indexes.forEach((index, expectedAttachmentIndex) => {
+    const block = foldedBlocks[index];
+    const packed = block?.compressedLosslessPayloads;
+    if (
+      !block ||
+      typeof block !== 'object' ||
+      Array.isArray(block) ||
+      block.losslessPayloadEncoding !==
+        AUDIT_PAYLOAD_ENCODING ||
+      !packed ||
+      typeof packed !== 'object' ||
+      Array.isArray(packed) ||
+      packed.encoding !== PACKED_AUDIT_PAYLOAD_ENCODING ||
+      packed.attachmentIndex !== expectedAttachmentIndex ||
+      !Number.isSafeInteger(packed.byteLength) ||
+      packed.byteLength <= 0 ||
+      typeof packed.checksum !== 'string' ||
+      !/^[0-9a-f]{8}$/.test(packed.checksum)
+    ) {
+      throw new Error(
+        'Invalid checkpoint packed audit payload.',
+      );
+    }
+    const bytes = attachments[expectedAttachmentIndex];
+    if (
+      !(bytes instanceof Uint8Array) ||
+      bytes.length !== packed.byteLength ||
+      checksumBytes(bytes) !== packed.checksum
+    ) {
+      throw new Error(
+        'Invalid checkpoint packed audit attachment.',
+      );
+    }
+    foldedBlocks[index] = {
+      ...block,
+      compressedLosslessPayloads: bytesToBase64(bytes),
+    };
+  });
+  checkpoint.realtimeAuditArchive = {
+    ...archive,
+    foldedBlocks,
+  };
+  delete checkpoint[PACKED_AUDIT_PAYLOADS_PROJECTION_KEY];
+  return checkpoint;
+}
+
+function restoreCheckpointProjections(
+  checkpoint,
+  auditAttachments = [],
+) {
+  return restoreDerivedMarketMirrors(
+    restoreCompactBooks(
+      restorePackedAuditPayloads(
+        checkpoint,
+        auditAttachments,
+      ),
+    ),
+  );
+}
+
 export function encodeCheckpoint(checkpoint) {
   if (
     !checkpoint ||
@@ -529,14 +1041,21 @@ export function encodeCheckpoint(checkpoint) {
   ) {
     throw new TypeError('Checkpoint must be a JSON object.');
   }
-  const projectedCheckpoint =
-    projectDerivedMarketMirrors(checkpoint);
+  const projectedAudit = projectPackedAuditPayloads(
+    projectCompactBooks(
+      projectDerivedMarketMirrors(checkpoint),
+    ),
+  );
+  const projectedCheckpoint = projectedAudit.checkpoint;
+  const auditAttachments = projectedAudit.attachments;
   const encoder = new TextEncoder();
   const blocks = [];
   const packedBlocks = [];
   const cachedBlocks = [];
   let jsonBytes = 0;
   let codeCount = 0;
+  let binaryBytes = 0;
+  let auditAttachmentsWritten = false;
   try {
     for (const [key, value] of Object.entries(projectedCheckpoint)) {
       const json = JSON.stringify(value);
@@ -548,22 +1067,75 @@ export function encodeCheckpoint(checkpoint) {
           'Checkpoint JSON exceeds the codec safety bound.',
         );
       }
-      const codes = lzwEncode(source);
-      const data = codesToUtf16(codes);
+      const chunks = [];
+      const dataParts = [];
+      const dictionaryResetBytes =
+        dictionaryResetBytesForBlock(key);
+      let blockCodeCount = 0;
+      let blockDataLength = 0;
+      for (
+        let offset = 0;
+        offset < source.length;
+        offset += dictionaryResetBytes
+      ) {
+        const sourceChunk = source.subarray(
+          offset,
+          Math.min(
+            source.length,
+            offset + dictionaryResetBytes,
+          ),
+        );
+        const codes = lzwEncode(sourceChunk);
+        const data = codesToUtf16(codes);
+        const chunk = {
+          jsonBytes: sourceChunk.length,
+          codeCount: codes.length,
+          dataLength: data.length,
+        };
+        chunks.push(chunk);
+        dataParts.push(data);
+        blockCodeCount += codes.length;
+        blockDataLength += data.length;
+      }
+      const compressedDataLength = blockDataLength;
+      const attachments = [];
+      if (
+        key === 'realtimeAuditArchive' &&
+        auditAttachments.length > 0
+      ) {
+        for (const bytes of auditAttachments) {
+          const data = bytesToUtf16(bytes);
+          attachments.push({
+            byteLength: bytes.length,
+            dataLength: data.length,
+            checksum: checksumBytes(bytes),
+          });
+          dataParts.push(data);
+          blockDataLength += data.length;
+          binaryBytes += bytes.length;
+        }
+        auditAttachmentsWritten = true;
+      }
       const block = {
         key,
         jsonBytes: source.length,
-        codeCount: codes.length,
-        dataLength: data.length,
+        codeCount: blockCodeCount,
+        dictionaryResetBytes,
+        compressedDataLength,
+        dataLength: blockDataLength,
         checksum: checksumBlock(key, source),
+        chunks,
       };
+      if (attachments.length > 0) {
+        block.attachments = attachments;
+      }
       blocks.push(block);
       cachedBlocks.push({
         ...block,
         json,
       });
-      packedBlocks.push(data);
-      codeCount += codes.length;
+      packedBlocks.push(dataParts.join(''));
+      codeCount += blockCodeCount;
     }
   } catch (error) {
     if (
@@ -580,7 +1152,9 @@ export function encodeCheckpoint(checkpoint) {
   if (
     blocks.length === 0 ||
     blocks.length > MAX_CHECKPOINT_BLOCKS ||
-    jsonBytes === 0
+    jsonBytes === 0 ||
+    jsonBytes + binaryBytes > MAX_CHECKPOINT_JSON_BYTES ||
+    (auditAttachments.length > 0 && !auditAttachmentsWritten)
   ) {
     throw new Error('Checkpoint JSON exceeds the codec safety bound.');
   }
@@ -596,6 +1170,8 @@ export function encodeCheckpoint(checkpoint) {
     jsonBytes,
     codeCount,
     blocks: cachedBlocks,
+    auditAttachments: auditAttachments.map((bytes) =>
+      bytes.slice()),
   });
   return encoded;
 }
@@ -605,18 +1181,25 @@ export function decodeCheckpoint(encoded) {
     !encoded ||
     ![
       CHECKPOINT_ENCODING,
+      PREVIOUS_CHUNKED_CHECKPOINT_ENCODING,
+      PREVIOUS_BLOCK_CHECKPOINT_ENCODING,
       PREVIOUS_CHECKPOINT_ENCODING,
       LEGACY_CHECKPOINT_ENCODING,
     ].includes(encoded.encoding)
   ) {
     throw new Error('Unsupported checkpoint encoding.');
   }
-  if (encoded.encoding === CHECKPOINT_ENCODING) {
+  if (
+    encoded.encoding === CHECKPOINT_ENCODING ||
+    encoded.encoding === PREVIOUS_CHUNKED_CHECKPOINT_ENCODING ||
+    encoded.encoding === PREVIOUS_BLOCK_CHECKPOINT_ENCODING
+  ) {
     const fresh = freshCheckpointCache.get(encoded);
     freshCheckpointCache.delete(encoded);
     if (freshCacheMatches(encoded, fresh)) {
-      return restoreDerivedMarketMirrors(
+      return restoreCheckpointProjections(
         decodeFreshCheckpoint(fresh),
+        fresh.auditAttachments,
       );
     }
     if (
@@ -631,8 +1214,78 @@ export function decodeCheckpoint(encoded) {
     let dataOffset = 0;
     let totalJsonBytes = 0;
     let totalCodeCount = 0;
+    let totalAttachmentBytes = 0;
+    const decodedAuditAttachments = [];
     const checkpoint = {};
     for (const block of encoded.blocks) {
+      const expectedCompressedDataLength = Array.isArray(
+        block?.chunks,
+      )
+        ? block.chunks.reduce(
+            (sum, chunk) =>
+              sum +
+              (Number.isSafeInteger(chunk?.dataLength)
+                ? chunk.dataLength
+                : 0),
+            0,
+          )
+        : Number.isSafeInteger(block?.codeCount)
+          ? Math.ceil(
+              (block.codeCount * 16) /
+                UTF16_PACK_BITS,
+            )
+          : -1;
+      const attachmentMetadata = block?.attachments;
+      const hasAttachments = Array.isArray(attachmentMetadata);
+      const attachmentDataLength = hasAttachments
+        ? attachmentMetadata.reduce(
+            (sum, attachment) =>
+              sum + (Number.isSafeInteger(attachment?.dataLength)
+                ? attachment.dataLength
+                : 0),
+            0,
+          )
+        : 0;
+      const binaryBlockMetadataValid =
+        encoded.encoding !== CHECKPOINT_ENCODING
+          ? block?.dataLength === expectedCompressedDataLength
+          : Number.isSafeInteger(
+                block?.dictionaryResetBytes,
+              ) &&
+            block.dictionaryResetBytes >=
+              LZW_DICTIONARY_RESET_BYTES &&
+            block.dictionaryResetBytes <=
+              MAX_LZW_DICTIONARY_RESET_BYTES &&
+            block?.compressedDataLength ===
+              expectedCompressedDataLength &&
+            block?.dataLength ===
+              expectedCompressedDataLength +
+                attachmentDataLength &&
+            (!hasAttachments ||
+              (block?.key === 'realtimeAuditArchive' &&
+                attachmentMetadata.length > 0 &&
+                attachmentMetadata.length <=
+                  MAX_CHECKPOINT_BLOCKS &&
+                attachmentMetadata.every(
+                  (attachment) =>
+                    attachment &&
+                    Number.isSafeInteger(
+                      attachment.byteLength,
+                    ) &&
+                    attachment.byteLength > 0 &&
+                    Number.isSafeInteger(
+                      attachment.dataLength,
+                    ) &&
+                    attachment.dataLength ===
+                      Math.ceil(
+                        (attachment.byteLength * 8) /
+                          UTF16_PACK_BITS,
+                      ) &&
+                    typeof attachment.checksum === 'string' &&
+                    /^[0-9a-f]{8}$/.test(
+                      attachment.checksum,
+                    ),
+                )));
       if (
         !block ||
         typeof block.key !== 'string' ||
@@ -644,8 +1297,7 @@ export function decodeCheckpoint(encoded) {
         block.codeCount > block.jsonBytes ||
         !Number.isSafeInteger(block.dataLength) ||
         block.dataLength <= 0 ||
-        block.dataLength !==
-          Math.ceil((block.codeCount * 16) / UTF16_PACK_BITS) ||
+        !binaryBlockMetadataValid ||
         typeof block.checksum !== 'string' ||
         !/^[0-9a-f]{8}$/.test(block.checksum)
       ) {
@@ -654,19 +1306,135 @@ export function decodeCheckpoint(encoded) {
       keys.add(block.key);
       totalJsonBytes += block.jsonBytes;
       totalCodeCount += block.codeCount;
+      if (hasAttachments) {
+        totalAttachmentBytes += attachmentMetadata.reduce(
+          (sum, attachment) => sum + attachment.byteLength,
+          0,
+        );
+      }
       if (
-        totalJsonBytes > MAX_CHECKPOINT_JSON_BYTES ||
+        totalJsonBytes + totalAttachmentBytes >
+          MAX_CHECKPOINT_JSON_BYTES ||
         dataOffset + block.dataLength > encoded.data.length
       ) {
         throw new Error('Invalid compressed checkpoint block bounds.');
       }
-      const packed = encoded.data.slice(
-        dataOffset,
-        dataOffset + block.dataLength,
-      );
+      let source;
+      if (
+        encoded.encoding === CHECKPOINT_ENCODING ||
+        encoded.encoding ===
+          PREVIOUS_CHUNKED_CHECKPOINT_ENCODING
+      ) {
+        if (
+          !Array.isArray(block.chunks) ||
+          block.chunks.length === 0
+        ) {
+          throw new Error(
+            'Invalid compressed checkpoint chunk metadata.',
+          );
+        }
+        source = new Uint8Array(block.jsonBytes);
+        let sourceOffset = 0;
+        let blockDataOffset = dataOffset;
+        let chunkCodeCount = 0;
+        let chunkDataLength = 0;
+        for (const chunk of block.chunks) {
+          if (
+            !chunk ||
+            !Number.isSafeInteger(chunk.jsonBytes) ||
+            chunk.jsonBytes <= 0 ||
+            chunk.jsonBytes >
+              (encoded.encoding === CHECKPOINT_ENCODING
+                ? block.dictionaryResetBytes
+                : LZW_DICTIONARY_RESET_BYTES) ||
+            !Number.isSafeInteger(chunk.codeCount) ||
+            chunk.codeCount <= 0 ||
+            chunk.codeCount > chunk.jsonBytes ||
+            !Number.isSafeInteger(chunk.dataLength) ||
+            chunk.dataLength !==
+              Math.ceil(
+                chunk.codeCount * 16 /
+                  UTF16_PACK_BITS,
+              )
+          ) {
+            throw new Error(
+              'Invalid compressed checkpoint chunk metadata.',
+            );
+          }
+          const packed = encoded.data.slice(
+            blockDataOffset,
+            blockDataOffset + chunk.dataLength,
+          );
+          const codes = utf16ToCodes(
+            packed,
+            chunk.codeCount,
+          );
+          const decoded = lzwDecode(
+            codes,
+            chunk.jsonBytes,
+          );
+          source.set(decoded, sourceOffset);
+          sourceOffset += chunk.jsonBytes;
+          blockDataOffset += chunk.dataLength;
+          chunkCodeCount += chunk.codeCount;
+          chunkDataLength += chunk.dataLength;
+        }
+        if (
+          sourceOffset !== block.jsonBytes ||
+          chunkCodeCount !== block.codeCount ||
+          chunkDataLength !==
+            (encoded.encoding === CHECKPOINT_ENCODING
+              ? block.compressedDataLength
+              : block.dataLength)
+        ) {
+          throw new Error(
+            'Invalid compressed checkpoint chunk totals.',
+          );
+        }
+      } else {
+        const packed = encoded.data.slice(
+          dataOffset,
+          dataOffset + block.dataLength,
+        );
+        const codes = utf16ToCodes(
+          packed,
+          block.codeCount,
+        );
+        source = lzwDecode(
+          codes,
+          block.jsonBytes,
+        );
+      }
+      if (
+        encoded.encoding === CHECKPOINT_ENCODING &&
+        hasAttachments
+      ) {
+        let attachmentOffset =
+          dataOffset + block.compressedDataLength;
+        for (const attachment of attachmentMetadata) {
+          const packed = encoded.data.slice(
+            attachmentOffset,
+            attachmentOffset + attachment.dataLength,
+          );
+          const bytes = utf16ToBytes(
+            packed,
+            attachment.byteLength,
+          );
+          if (checksumBytes(bytes) !== attachment.checksum) {
+            throw new Error(
+              'Compressed checkpoint attachment checksum does not match.',
+            );
+          }
+          decodedAuditAttachments.push(bytes);
+          attachmentOffset += attachment.dataLength;
+        }
+        if (attachmentOffset !== dataOffset + block.dataLength) {
+          throw new Error(
+            'Invalid compressed checkpoint attachment totals.',
+          );
+        }
+      }
       dataOffset += block.dataLength;
-      const codes = utf16ToCodes(packed, block.codeCount);
-      const source = lzwDecode(codes, block.jsonBytes);
       if (checksumBlock(block.key, source) !== block.checksum) {
         throw new Error(
           'Compressed checkpoint block checksum does not match.',
@@ -704,7 +1472,10 @@ export function decodeCheckpoint(encoded) {
     ) {
       throw new Error('Invalid compressed checkpoint block totals.');
     }
-    return restoreDerivedMarketMirrors(checkpoint);
+    return restoreCheckpointProjections(
+      checkpoint,
+      decodedAuditAttachments,
+    );
   }
   if (
     !Number.isSafeInteger(encoded.jsonBytes) ||

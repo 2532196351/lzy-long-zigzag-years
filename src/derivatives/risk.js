@@ -3,11 +3,11 @@ import {
   contractById,
   contractReferenceSpotTicks,
   sameEquityBasketIdentity,
-} from './contracts.js?v=20260801-01';
+} from './contracts.js?v=20260803-02';
 import {
   priceEuropeanOption,
   resolveOptionCarryInputs,
-} from './pricing.js?v=20260801-01';
+} from './pricing.js?v=20260803-02';
 
 export const RISK_RULE_VERSION = 'lzy-derivatives-risk-v1';
 export const FINANCING_INITIAL_RATIO_BPS = 18_000;

@@ -4,26 +4,26 @@ import {
   activePriceTicksExcludingOrders,
   aggregateBookMetrics,
   bookLevelMetrics,
-} from './order-book.js?v=20260801-01';
+} from './order-book.js?v=20260803-02';
 import {
   buildLimitFollowerQueue,
   diffLimitFollowerQueue,
   diffMakerLadder,
-} from './liquidity.js?v=20260801-01';
+} from './liquidity.js?v=20260803-02';
 import {
   createActorValuationObservation,
   createValuationSnapshot,
-} from './valuation.js?v=20260801-01';
+} from './valuation.js?v=20260803-02';
 import {
   computeMakerQuotePlan,
   REGIME_PRESETS,
-} from './maker-ecology.js?v=20260801-01';
-import { deriveInstitutionValuationView } from './institutional-ecology.js?v=20260801-01';
+} from './maker-ecology.js?v=20260803-02';
+import { deriveInstitutionValuationView } from './institutional-ecology.js?v=20260803-02';
 import {
   createInstitutionValuationObservation,
   createMakerValuationObservation,
   institutionalPolicyForLiveAgent,
-} from './ecology-contract.js?v=20260801-01';
+} from './ecology-contract.js?v=20260803-02';
 import {
   BEHAVIOR_LIMITS,
   BEHAVIOR_RULE_VERSION,
@@ -41,14 +41,18 @@ import {
   recordBehaviorAction,
   recordBehaviorReceipt,
   recordBehaviorSettlement,
-} from './behavior-kernel.js?v=20260801-01';
+} from './behavior-kernel.js?v=20260803-02';
 
 export const AGENT_RULE_VERSION =
-  'lzy-agent-ecology-0.9.0';
+  'lzy-agent-ecology-0.11.0';
 export const SYMBOL_ORDER_CONTEXT_VERSION =
   'lzy-symbol-order-context-1';
 const LIMIT_QUEUE_EPISODE_VERSION =
   'lzy-limit-queue-episode-1';
+const PRE_STABILIZATION_AGENT_RULE_VERSION =
+  'lzy-agent-ecology-0.9.0';
+const PRE_QUANT_AGENT_RULE_VERSION =
+  'lzy-agent-ecology-0.10.0';
 const PREVIOUS_AGENT_RULE_VERSION =
   'lzy-agent-ecology-0.8.0';
 const PRE_CAPACITY_AGENT_RULE_VERSION =
@@ -65,11 +69,16 @@ const MAX_OBSERVED_TRADES_PER_RESPONSE = 24;
 const MAX_PUBLIC_ACTIONS_PER_ACTIVITY = 4;
 const MAX_FUNDAMENTAL_SOURCES_PER_SYMBOL = 8;
 const MIN_INSTITUTION_ACTION_INTERVAL_MS = 700;
-const MIN_PUBLIC_RESPONSE_INTERVAL_MS = 1_200;
+// A settled tape burst is observed as one bounded batch per four ordinary
+// quote intervals. Agents still run their independent cadence between those
+// batches, so this removes duplicate rereads without delaying the first
+// information-eligible response or suppressing ordinary trading decisions.
+const MIN_PUBLIC_RESPONSE_INTERVAL_MS = 12_000;
 const MIN_LIMIT_FOLLOWER_REST_MS = 1_200;
 const MIN_CONSENSUS_LIMIT_REST_MS = 4_500;
 const MAX_CONSENSUS_LIMIT_REST_MS = 7_500;
 const MAX_EVENT_APPROACH_AGE_MS = 180_000;
+const MAKER_DEPTH_SIGNATURE_BUCKET_UNITS = 64;
 // Product contract: a normal 10,000-share clip must be executable from the
 // finite standing book.  This is a game interaction calibration, not a claim
 // about a universal real-market order size.
@@ -88,7 +97,6 @@ const LIMIT_QUEUE_EPISODE_STATES = new Set([
 const MAX_RETAIL_WORKING_ORDERS = 4;
 const MIN_RETAIL_RESTING_LIFETIME_MS = 3_000;
 const MAX_RETAIL_RESTING_LIFETIME_MS = 9_000;
-const MAKER_DEEP_REQUOTE_HORIZON_MS = 3_000;
 const FUNDAMENTAL_FACT_TYPES = Object.freeze([
   'company_inventory',
   'company_receivables',
@@ -233,6 +241,75 @@ const CORE_AGENT_TEMPLATES = Object.freeze({
     },
     riskFractionBps: 1400,
   }),
+  npc_quant_institution: Object.freeze({
+    id: 'npc_quant_institution',
+    name: '千机量化交易机构',
+    kind: 'institution',
+    strategy: 'cross_sectional_microstructure_ensemble',
+    brokerId: 'broker_lzy',
+    cadenceMs: 1_200,
+    cadenceJitterMs: 40,
+    initialOffsetMs: 540,
+    informationDelayMs: 120,
+    latencyMs: 12,
+    fundamentalNoiseBps: 320,
+    accountAllocationBps: 10_000,
+    valuationMethodWeightsBps: {
+      earnings: 2_000,
+      book: 1_000,
+      freeCashFlow: 7_000,
+    },
+    riskFractionBps: 2_200,
+    marketPriceWriteAuthority: 'none',
+    quantModel: Object.freeze({
+      contractVersion:
+        'lzy-quant-microstructure-ensemble-v1',
+      maxWorkingOrders: 6,
+      symbolsPerShard: 8,
+      fullUniverseSweepMaxMs: 4_800,
+      killSwitch: Object.freeze({
+        drawdownBps: 1_200,
+        fundingStressBps: 1_800,
+      }),
+      signalAuthority:
+        'settled_public_facts_tape_and_finite_order_book',
+      executionAuthority:
+        'finite_ioc_slices_through_realtime_book',
+    }),
+  }),
+  npc_stabilization_fund: Object.freeze({
+    id: 'npc_stabilization_fund',
+    name: '市场稳定力量联席组合',
+    kind: 'institution',
+    strategy: 'systemic_stabilization',
+    brokerId: 'broker_lzy',
+    cadenceMs: 1_800,
+    cadenceJitterMs: 80,
+    initialOffsetMs: 1_080,
+    informationDelayMs: 900,
+    fundamentalNoiseBps: 0,
+    accountAllocationBps: 10_000,
+    valuationMethodWeightsBps: {
+      earnings: 3_000,
+      book: 4_000,
+      freeCashFlow: 3_000,
+    },
+    riskFractionBps: 2200,
+    marketPriceWriteAuthority: 'none',
+    stabilizationMandate: Object.freeze({
+      contractVersion: 'lzy-systemic-stabilization-mandate-v1',
+      activation: 'broad_public_market_stress_only',
+      permittedSide: 'buy',
+      maximumParticipationBps: 1_200,
+      minimumDistressedBreadthBps: 3_500,
+      minimumWeightedDeclineBps: 150,
+      distressedReturnBps: -350,
+      severeReturnBps: -700,
+      guaranteedFloor: false,
+      executionAuthority: 'finite_realtime_orders_only',
+      marketPriceWriteAuthority: 'none',
+    }),
+  }),
 });
 
 const AGENT_TEMPLATES = Object.freeze({
@@ -240,11 +317,36 @@ const AGENT_TEMPLATES = Object.freeze({
   ...RETAIL_AGENT_TEMPLATES,
 });
 const AGENT_IDS = Object.freeze(Object.keys(AGENT_TEMPLATES));
+const PRE_QUANT_AGENT_IDS = Object.freeze(
+  AGENT_IDS.filter(
+    (id) => id !== 'npc_quant_institution',
+  ),
+);
+const PRE_STABILIZATION_AGENT_IDS = Object.freeze(
+  PRE_QUANT_AGENT_IDS.filter(
+    (id) => id !== 'npc_stabilization_fund',
+  ),
+);
+const CURRENT_WITHOUT_STABILIZATION_AGENT_IDS =
+  Object.freeze(
+    AGENT_IDS.filter(
+      (id) => id !== 'npc_stabilization_fund',
+    ),
+  );
 const LEGACY_AGENT_IDS = Object.freeze(
-  Object.keys(CORE_AGENT_TEMPLATES),
+  Object.keys(CORE_AGENT_TEMPLATES).filter(
+    (id) =>
+      id !== 'npc_stabilization_fund' &&
+      id !== 'npc_quant_institution',
+  ),
 );
 const PUBLIC_RESPONSE_AGENT_IDS = Object.freeze(
-  AGENT_IDS.filter((id) => AGENT_TEMPLATES[id].kind !== 'maker'),
+  AGENT_IDS.filter(
+    (id) =>
+      AGENT_TEMPLATES[id].kind !== 'maker' &&
+      AGENT_TEMPLATES[id].strategy !==
+        'cross_sectional_microstructure_ensemble',
+  ),
 );
 
 function cloneJson(value) {
@@ -743,15 +845,18 @@ const orderReferenceCache = new WeakMap();
 const publicTradeIndexCache = new WeakMap();
 const publicShockCache = new WeakMap();
 const publicTapeCache = new WeakMap();
-const eligibleFundamentalFactsCache = new WeakMap();
+const fundamentalFactIndexes = new WeakMap();
+const activeOrdersByOwnerCache = new WeakMap();
+const quantCrossSectionCache = new WeakMap();
 
 function publicRealtimeTape(state) {
   const trades = state.world.market.trades;
+  const firstTrade = trades[0];
   const lastTrade = trades.at(-1);
   const cached = publicTapeCache.get(state);
   if (
-    cached?.commitSeq === state.commitSeq &&
-    cached.tradesLength === trades.length &&
+    cached?.tradesLength === trades.length &&
+    cached.firstTradeId === firstTrade?.id &&
     cached.lastTradeId === lastTrade?.id
   ) {
     return cached;
@@ -767,19 +872,32 @@ function publicRealtimeTape(state) {
     }
   }
   const tape = {
-    commitSeq: state.commitSeq,
     tradesLength: trades.length,
+    firstTradeId: firstTrade?.id,
     lastTradeId: lastTrade?.id,
     bySymbol,
+    metricsBySymbol: new Map(),
   };
   publicTapeCache.set(state, tape);
   return tape;
 }
 
 function activeOrdersOwnedBy(state, ownerId) {
-  return Object.values(state.books).flatMap((book) =>
+  let cache = activeOrdersByOwnerCache.get(state);
+  if (cache?.commitSeq !== state.commitSeq) {
+    cache = {
+      commitSeq: state.commitSeq,
+      byOwner: new Map(),
+    };
+    activeOrdersByOwnerCache.set(state, cache);
+  }
+  const cached = cache.byOwner.get(ownerId);
+  if (cached) return cached;
+  const orders = Object.values(state.books).flatMap((book) =>
     activeOrdersForOwner(book, ownerId),
   );
+  cache.byOwner.set(ownerId, orders);
+  return orders;
 }
 
 function orderReferences(state) {
@@ -932,84 +1050,93 @@ function makeBaselines(world) {
   return baselines;
 }
 
-function eligibleFundamentalFacts(world, symbol) {
-  const issuerId = world.market.securities[symbol]?.issuerId;
+function fundamentalFactIndex(world) {
   const facts = world.facts ?? [];
-  const worldTick = world.world.tick;
+  let index = fundamentalFactIndexes.get(facts);
   const firstFactId = facts[0]?.id ?? null;
   const lastFactId = facts.at(-1)?.id ?? null;
-  let cache = eligibleFundamentalFactsCache.get(world);
-  if (
-    !cache ||
-    cache.facts !== facts ||
-    cache.factsLength !== facts.length ||
-    cache.firstFactId !== firstFactId ||
-    cache.lastFactId !== lastFactId ||
-    cache.worldTick !== worldTick
-  ) {
-    const byIssuer = new Map();
-    for (const fact of facts) {
-      if (
-        fact.authority === 'world_fact' &&
-        fact.visibility === 'public' &&
-        fact.confidence === 1 &&
-        FUNDAMENTAL_FACT_TYPES.includes(fact.type) &&
-        Number.isSafeInteger(fact.tick) &&
-        fact.tick <= worldTick
-      ) {
-        const issuerFacts =
-          byIssuer.get(fact.entityId) ?? [];
-        issuerFacts.push(fact);
-        byIssuer.set(fact.entityId, issuerFacts);
-      }
-    }
-    for (const [entityId, issuerFacts] of byIssuer) {
-      byIssuer.set(
-        entityId,
-        issuerFacts
-          .sort(
-            (left, right) =>
-              left.tick - right.tick ||
-              (
-                Number.isSafeInteger(
-                  left.publishedAtMs,
-                )
-                  ? left.publishedAtMs
-                  : Number.isSafeInteger(
-                        left.virtualMs,
-                      )
-                    ? left.virtualMs
-                    : left.tick *
-                      86_400_000
-              ) -
-                (
-                  Number.isSafeInteger(
-                    right.publishedAtMs,
-                  )
-                    ? right.publishedAtMs
-                    : Number.isSafeInteger(
-                          right.virtualMs,
-                        )
-                      ? right.virtualMs
-                      : right.tick *
-                        86_400_000
-                ) ||
-              left.id.localeCompare(right.id),
-          )
-          .slice(-MAX_FUNDAMENTAL_SOURCES_PER_SYMBOL),
-      );
-    }
-    cache = {
-      facts,
-      factsLength: facts.length,
+  const appendOnly =
+    index &&
+    facts.length >= index.factsLength &&
+    index.firstFactId === firstFactId &&
+    (
+      facts.length > index.factsLength ||
+      index.lastFactId === lastFactId
+    );
+  if (!appendOnly) {
+    index = {
+      factsLength: 0,
       firstFactId,
-      lastFactId,
-      worldTick,
-      byIssuer,
+      lastFactId: null,
+      byIssuer: new Map(),
+      financialReports: [],
     };
-    eligibleFundamentalFactsCache.set(world, cache);
+    fundamentalFactIndexes.set(facts, index);
   }
-  return cache.byIssuer.get(issuerId) ?? [];
+  for (
+    let position = index.factsLength;
+    position < facts.length;
+    position += 1
+  ) {
+    const fact = facts[position];
+    if (
+      fact?.authority !== 'world_fact' ||
+      fact.visibility !== 'public' ||
+      !Number.isSafeInteger(fact.tick)
+    ) {
+      continue;
+    }
+    if (
+      fact.type === 'company_financial_report' &&
+      Number(fact.confidence) > 0
+    ) {
+      index.financialReports.push(fact);
+    }
+    if (
+      fact.confidence === 1 &&
+      FUNDAMENTAL_FACT_TYPES.includes(fact.type)
+    ) {
+      const issuerFacts =
+        index.byIssuer.get(fact.entityId) ?? [];
+      issuerFacts.push(fact);
+      index.byIssuer.set(fact.entityId, issuerFacts);
+    }
+  }
+  index.factsLength = facts.length;
+  index.firstFactId = firstFactId;
+  index.lastFactId = lastFactId;
+  return index;
+}
+
+function fundamentalPublicationMs(fact) {
+  return Number.isSafeInteger(fact.publishedAtMs)
+    ? fact.publishedAtMs
+    : Number.isSafeInteger(fact.virtualMs)
+      ? fact.virtualMs
+      : fact.tick * 86_400_000;
+}
+
+function financialReportPublicationMs(fact) {
+  return Number.isSafeInteger(fact.publishedAtMs)
+    ? fact.publishedAtMs
+    : fact.tick * 86_400_000;
+}
+
+function eligibleFundamentalFacts(world, symbol) {
+  const issuerId = world.market.securities[symbol]?.issuerId;
+  const worldTick = world.world.tick;
+  return (
+    fundamentalFactIndex(world).byIssuer.get(issuerId) ?? []
+  )
+    .filter((fact) => fact.tick <= worldTick)
+    .sort(
+      (left, right) =>
+        left.tick - right.tick ||
+        fundamentalPublicationMs(left) -
+          fundamentalPublicationMs(right) ||
+        left.id.localeCompare(right.id),
+    )
+    .slice(-MAX_FUNDAMENTAL_SOURCES_PER_SYMBOL);
 }
 
 function fundamentalFactSignalTicks(fact, security = null) {
@@ -1369,20 +1496,13 @@ function visibleFundamentalTick(world, nowMs, informationDelayMs) {
     -Number.MAX_SAFE_INTEGER,
     Math.floor(nowMs - informationDelayMs),
   );
-  const ticks = (world.facts ?? [])
+  const ticks = fundamentalFactIndex(world)
+    .financialReports
     .filter(
       (fact) =>
-        fact.type === 'company_financial_report' &&
-        fact.authority === 'world_fact' &&
-        fact.visibility === 'public' &&
-        Number(fact.confidence) > 0 &&
         Number.isSafeInteger(fact.tick) &&
         fact.tick <= world.world.tick &&
-        (
-          Number.isSafeInteger(fact.publishedAtMs)
-            ? fact.publishedAtMs
-            : fact.tick * 86_400_000
-        ) <= visibleAtMs,
+        financialReportPublicationMs(fact) <= visibleAtMs,
     )
     .map((fact) => fact.tick);
   if (ticks.length === 0) return 0;
@@ -1571,6 +1691,9 @@ function createOpeningSignals(world, agentId, fundamentals) {
   const signals = Object.fromEntries(
     symbols.map((symbol) => [symbol, 0]),
   );
+  if (agentId === 'npc_stabilization_fund') {
+    return signals;
+  }
   const valueFundamentals =
     agentId === 'npc_value_fund'
       ? fundamentals
@@ -1672,6 +1795,8 @@ export function createAgentCatalog(world) {
           lastTrigger: null,
           lastObservedTradeMs: -1,
           publicFlowMemory: null,
+          makerCadenceCursor: 0,
+          lastMakerEvaluatedSymbols: [],
           initialEquityCents: Math.max(
             1,
             Math.floor(
@@ -1944,6 +2069,71 @@ function migrateCustodyAccountTracking(
   return true;
 }
 
+function reconcileLegacyMandateResources(
+  state,
+  ecology,
+) {
+  const symbols = Object.keys(state.books ?? {});
+  for (const accountId of ecologyTrackedAccountIds(state)) {
+    const account = state.accounts[accountId];
+    const mandates = Object.values(ecology.agents)
+      .filter((agent) => agent.accountId === accountId)
+      .sort((left, right) => left.id.localeCompare(right.id));
+    if (!account || mandates.length === 0) continue;
+
+    const allocate = (total, valueForAgent) => {
+      let allocated = 0;
+      return mandates.map((agent, index) => {
+        const value =
+          index === mandates.length - 1
+            ? total - allocated
+            : Math.floor(
+                total *
+                  valueForAgent(agent) /
+                  10_000,
+              );
+        allocated += value;
+        return value;
+      });
+    };
+    const cashTargets = allocate(
+      account.cashCents,
+      (agent) => agent.accountAllocationBps,
+    );
+    const holdingTargets = Object.fromEntries(
+      symbols.map((symbol) => [
+        symbol,
+        allocate(
+          account.holdings[symbol] ?? 0,
+          (agent) => agent.accountAllocationBps,
+        ),
+      ]),
+    );
+
+    mandates.forEach((agent, index) => {
+      const ledger = agent.behaviorState.account;
+      ledger.settledNetCashCents =
+        cashTargets[index] - ledger.cashEnvelopeCents;
+      ledger.settledNetUnits = Object.fromEntries(
+        symbols.map((symbol) => [
+          symbol,
+          holdingTargets[symbol][index] -
+            ledger.initialHoldings[symbol],
+        ]),
+      );
+      ledger.openExposureCostTicks =
+        Object.fromEntries(
+          symbols.map((symbol) => [
+            symbol,
+            ledger.settledNetUnits[symbol] === 0
+              ? 0
+              : publicLastPriceTicks(state, symbol),
+          ]),
+        );
+    });
+  }
+}
+
 function migrateExpandedStockUniverseEcology(state) {
   const ecology = state.agentEcology;
   const symbols = Object.keys(state.books ?? {});
@@ -2130,6 +2320,121 @@ function migrateExpandedStockUniverseEcology(state) {
   return true;
 }
 
+function migrateMissingStabilizationAgent(state) {
+  const ecology = state.agentEcology;
+  const actorId = 'npc_stabilization_fund';
+  if (ecology.agents?.[actorId]) return false;
+  if (
+    (
+      !sameStringSet(
+        Object.keys(ecology.agents ?? {}),
+        PRE_STABILIZATION_AGENT_IDS,
+      ) &&
+      !sameStringSet(
+        Object.keys(ecology.agents ?? {}),
+        CURRENT_WITHOUT_STABILIZATION_AGENT_IDS,
+      )
+    ) ||
+    !state.accounts?.[actorId]
+  ) {
+    throw new Error(
+      'Unsupported partial stabilization-agent checkpoint.',
+    );
+  }
+  const fresh = createAgentCatalog(state.world);
+  const sourceAgent = fresh.agents[actorId];
+  const sourceBaseline =
+    fresh.accountBaselines[actorId];
+  if (!sourceAgent || !sourceBaseline) {
+    throw new Error(
+      'Missing canonical stabilization-agent migration source.',
+    );
+  }
+  ecology.agents[actorId] = cloneJson(sourceAgent);
+  ecology.accountBaselines[actorId] =
+    cloneJson(sourceBaseline);
+  const ledger = ecology.capacityLedger;
+  if (ledger) {
+    if (
+      ![
+        CAPACITY_LEDGER_RULE_VERSION,
+        LEGACY_CAPACITY_LEDGER_RULE_VERSION,
+      ].includes(ledger.ruleVersion) ||
+      !ledger.byAccount ||
+      !ledger.byAgent
+    ) {
+      throw new Error(
+        'Unsupported stabilization capacity checkpoint.',
+      );
+    }
+    ledger.byAccount[actorId] = cloneJson(
+      fresh.capacityLedger.byAccount[actorId],
+    );
+    ledger.byAgent[actorId] = cloneJson(
+      fresh.capacityLedger.byAgent[actorId],
+    );
+    if (
+      ledger.ruleVersion ===
+      CAPACITY_LEDGER_RULE_VERSION
+    ) {
+      sealCapacityLedger(ledger);
+    }
+  }
+  return true;
+}
+
+function migrateMissingQuantAgent(state) {
+  const ecology = state.agentEcology;
+  const actorId = 'npc_quant_institution';
+  if (ecology.agents?.[actorId]) return false;
+  if (
+    !sameStringSet(
+      Object.keys(ecology.agents ?? {}),
+      PRE_QUANT_AGENT_IDS,
+    ) ||
+    !state.accounts?.[actorId]
+  ) {
+    throw new Error(
+      'Unsupported partial quant-agent checkpoint.',
+    );
+  }
+  const fresh = createAgentCatalog(state.world);
+  const sourceAgent = fresh.agents[actorId];
+  const sourceBaseline =
+    fresh.accountBaselines[actorId];
+  ecology.agents[actorId] = cloneJson(sourceAgent);
+  ecology.accountBaselines[actorId] =
+    cloneJson(sourceBaseline);
+  const ledger = ecology.capacityLedger;
+  if (ledger) {
+    if (
+      ![
+        CAPACITY_LEDGER_RULE_VERSION,
+        LEGACY_CAPACITY_LEDGER_RULE_VERSION,
+      ].includes(ledger.ruleVersion) ||
+      !ledger.byAccount ||
+      !ledger.byAgent
+    ) {
+      throw new Error(
+        'Unsupported quant capacity checkpoint.',
+      );
+    }
+    ledger.byAccount[actorId] = cloneJson(
+      fresh.capacityLedger.byAccount[actorId],
+    );
+    ledger.byAgent[actorId] = cloneJson(
+      fresh.capacityLedger.byAgent[actorId],
+    );
+    if (
+      ledger.ruleVersion ===
+      CAPACITY_LEDGER_RULE_VERSION
+    ) {
+      sealCapacityLedger(ledger);
+    }
+  }
+  return true;
+}
+
 export function migrateAgentEcologyState(
   state,
   {
@@ -2150,6 +2455,40 @@ export function migrateAgentEcologyState(
       state,
       custodyMigration,
     );
+  if (
+    ecology.ruleVersion ===
+    PRE_QUANT_AGENT_RULE_VERSION
+  ) {
+    if (
+      !sameStringSet(
+        Object.keys(ecology.agents ?? {}),
+        PRE_QUANT_AGENT_IDS,
+      )
+    ) {
+      throw new Error(
+        `Unsupported agent ecology schema: ${ecology.ruleVersion}`,
+      );
+    }
+    migrateMissingQuantAgent(state);
+    if (
+      ecology.capacityLedger?.ruleVersion ===
+      LEGACY_CAPACITY_LEDGER_RULE_VERSION
+    ) {
+      migrateLegacyCapacityLedger(state);
+    } else if (
+      ecology.capacityLedger?.ruleVersion !==
+      CAPACITY_LEDGER_RULE_VERSION
+    ) {
+      throw new Error(
+        `Unsupported capacity ledger schema: ${
+          ecology.capacityLedger?.ruleVersion
+        }`,
+      );
+    }
+    ecology.ruleVersion = AGENT_RULE_VERSION;
+    migratePublicObservationEvidence(state);
+    return true;
+  }
   if (ecology.ruleVersion === AGENT_RULE_VERSION) {
     let migrated =
       stockUniverseMigrated ||
@@ -2199,6 +2538,14 @@ export function migrateAgentEcologyState(
           `Unsupported limit-queue episode schema: ${agent.id}`,
         );
       }
+      if (!Number.isSafeInteger(agent.makerCadenceCursor)) {
+        agent.makerCadenceCursor = 0;
+        migrated = true;
+      }
+      if (!Array.isArray(agent.lastMakerEvaluatedSymbols)) {
+        agent.lastMakerEvaluatedSymbols = [];
+        migrated = true;
+      }
     }
     if (!strictCurrentSchema) {
       migrated =
@@ -2208,9 +2555,60 @@ export function migrateAgentEcologyState(
     return migrated;
   }
   if (
+    ecology.ruleVersion ===
+    PRE_STABILIZATION_AGENT_RULE_VERSION
+  ) {
+    if (
+      !sameStringSet(
+        Object.keys(ecology.agents ?? {}),
+        AGENT_IDS,
+      ) &&
+      !sameStringSet(
+        Object.keys(ecology.agents ?? {}),
+        PRE_STABILIZATION_AGENT_IDS,
+      ) &&
+      !sameStringSet(
+        Object.keys(ecology.agents ?? {}),
+        CURRENT_WITHOUT_STABILIZATION_AGENT_IDS,
+      )
+    ) {
+      throw new Error(
+        `Unsupported agent ecology schema: ${ecology.ruleVersion}`,
+      );
+    }
+    migrateMissingStabilizationAgent(state);
+    migrateMissingQuantAgent(state);
+    if (
+      ecology.capacityLedger?.ruleVersion ===
+      LEGACY_CAPACITY_LEDGER_RULE_VERSION
+    ) {
+      migrateLegacyCapacityLedger(state);
+    } else if (
+      ecology.capacityLedger?.ruleVersion !==
+      CAPACITY_LEDGER_RULE_VERSION
+    ) {
+      throw new Error(
+        `Unsupported capacity ledger schema: ${
+          ecology.capacityLedger?.ruleVersion
+        }`,
+      );
+    }
+    ecology.ruleVersion = AGENT_RULE_VERSION;
+    migratePublicObservationEvidence(state);
+    return true;
+  }
+  if (
     ecology.ruleVersion === PREVIOUS_AGENT_RULE_VERSION
   ) {
     if (
+      !sameStringSet(
+        Object.keys(ecology.agents ?? {}),
+        PRE_STABILIZATION_AGENT_IDS,
+      ) &&
+      !sameStringSet(
+        Object.keys(ecology.agents ?? {}),
+        CURRENT_WITHOUT_STABILIZATION_AGENT_IDS,
+      ) &&
       !sameStringSet(
         Object.keys(ecology.agents ?? {}),
         AGENT_IDS,
@@ -2220,6 +2618,8 @@ export function migrateAgentEcologyState(
         `Unsupported agent ecology schema: ${ecology.ruleVersion}`,
       );
     }
+    migrateMissingStabilizationAgent(state);
+    migrateMissingQuantAgent(state);
     if (
       ecology.capacityLedger?.ruleVersion ===
       LEGACY_CAPACITY_LEDGER_RULE_VERSION
@@ -2251,6 +2651,8 @@ export function migrateAgentEcologyState(
         },
       );
       agent.limitQueueEpisodes ??= {};
+      agent.makerCadenceCursor ??= 0;
+      agent.lastMakerEvaluatedSymbols ??= [];
     }
     ecology.ruleVersion = AGENT_RULE_VERSION;
     migratePublicObservationEvidence(state);
@@ -2261,9 +2663,19 @@ export function migrateAgentEcologyState(
     PRE_CAPACITY_AGENT_RULE_VERSION
   ) {
     if (
-      !sameStringSet(
-        Object.keys(ecology.agents ?? {}),
-        AGENT_IDS,
+      (
+        !sameStringSet(
+          Object.keys(ecology.agents ?? {}),
+          PRE_STABILIZATION_AGENT_IDS,
+        ) &&
+        !sameStringSet(
+          Object.keys(ecology.agents ?? {}),
+          CURRENT_WITHOUT_STABILIZATION_AGENT_IDS,
+        ) &&
+        !sameStringSet(
+          Object.keys(ecology.agents ?? {}),
+          AGENT_IDS,
+        )
       ) ||
       Object.hasOwn(ecology, 'capacityLedger')
     ) {
@@ -2271,6 +2683,8 @@ export function migrateAgentEcologyState(
         `Unsupported agent ecology schema: ${ecology.ruleVersion}`,
       );
     }
+    migrateMissingStabilizationAgent(state);
+    migrateMissingQuantAgent(state);
     const symbols = Object.keys(state.books ?? {});
     for (const agent of Object.values(ecology.agents)) {
       if (!agent?.behaviorState) {
@@ -2287,6 +2701,8 @@ export function migrateAgentEcologyState(
         },
       );
       agent.limitQueueEpisodes ??= {};
+      agent.makerCadenceCursor ??= 0;
+      agent.lastMakerEvaluatedSymbols ??= [];
     }
     ecology.ruleVersion = AGENT_RULE_VERSION;
     hydrateCapacityLedger(state);
@@ -2311,9 +2727,19 @@ export function migrateAgentEcologyState(
     );
   }
   const fresh = createAgentCatalog(state.world);
+  const stabilizationBaseline = cloneJson(
+    fresh.accountBaselines.npc_stabilization_fund,
+  );
+  const quantBaseline = cloneJson(
+    fresh.accountBaselines.npc_quant_institution,
+  );
   fresh.accountBaselines = cloneJson(
     ecology.accountBaselines,
   );
+  fresh.accountBaselines.npc_stabilization_fund ??=
+    stabilizationBaseline;
+  fresh.accountBaselines.npc_quant_institution ??=
+    quantBaseline;
   for (const agent of Object.values(fresh.agents)) {
     const baseline =
       fresh.accountBaselines[agent.accountId];
@@ -2349,30 +2775,6 @@ export function migrateAgentEcologyState(
   }
   for (const agentId of LEGACY_AGENT_IDS) {
     const migrated = fresh.agents[agentId];
-    const account =
-      state.accounts[migrated.accountId];
-    const baseline =
-      fresh.accountBaselines[migrated.accountId];
-    migrated.behaviorState.account.settledNetCashCents =
-      account.cashCents - baseline.cashCents;
-    migrated.behaviorState.account.settledNetUnits =
-      Object.fromEntries(
-        Object.keys(state.books).map((symbol) => [
-          symbol,
-          account.holdings[symbol] -
-            baseline.holdings[symbol],
-        ]),
-      );
-    migrated.behaviorState.account.openExposureCostTicks =
-      Object.fromEntries(
-        Object.keys(state.books).map((symbol) => [
-          symbol,
-          migrated.behaviorState.account
-            .settledNetUnits[symbol] === 0
-            ? 0
-            : publicLastPriceTicks(state, symbol),
-        ]),
-      );
     fresh.agents[agentId] = {
       ...migrated,
       ...cloneJson(ecology.agents[agentId]),
@@ -2384,6 +2786,7 @@ export function migrateAgentEcologyState(
       behaviorState: migrated.behaviorState,
     };
   }
+  reconcileLegacyMandateResources(state, fresh);
   for (const event of state.eventQueue ?? []) {
     if (
       event.type !== 'agent_command_batch' ||
@@ -2454,6 +2857,28 @@ function compareEvents(left, right) {
   );
 }
 
+function siftUpEcologyEvent(queue, startIndex) {
+  let index = startIndex;
+  while (index > 0) {
+    const parentIndex = Math.floor((index - 1) / 2);
+    if (compareEvents(queue[parentIndex], queue[index]) <= 0) {
+      break;
+    }
+    [queue[parentIndex], queue[index]] = [
+      queue[index],
+      queue[parentIndex],
+    ];
+    index = parentIndex;
+  }
+  return index;
+}
+
+function insertEcologyEvent(state, event) {
+  const queue = state.eventQueue;
+  queue.push(event);
+  siftUpEcologyEvent(queue, queue.length - 1);
+}
+
 function scheduleEcologyEvent(
   state,
   { type, scheduledMs, phasePriority, actorId, payload },
@@ -2472,8 +2897,7 @@ function scheduleEcologyEvent(
     payload: cloneJson(payload),
     rngKey: `${state.world.world.seed}:${scheduledMs}:${phasePriority}:${sequence}`,
   };
-  state.eventQueue.push(event);
-  state.eventQueue.sort(compareEvents);
+  insertEcologyEvent(state, event);
   return event;
 }
 
@@ -2489,6 +2913,31 @@ function cadenceFor(state, agent) {
  * Ensures exactly one recurring decision event per agent. Missing events are
  * recreated from the agent's own deterministic substream.
  */
+export function scheduleNextAgentDecision(state, agentId) {
+  if (!state.agentEcology?.enabled) return null;
+  const agent = state.agentEcology.agents[agentId];
+  if (!agent) {
+    throw new Error(`Unknown market agent: ${agentId}`);
+  }
+  const scheduledMs =
+    agent.lastDecisionMs === null
+      ? state.nowMs + agent.initialOffsetMs
+      : state.nowMs + cadenceFor(state, agent);
+  return scheduleEcologyEvent(state, {
+    type: 'agent_decision',
+    scheduledMs,
+    phasePriority:
+      agent.kind === 'maker'
+        ? state.phasePriority.MAKER_QUOTE
+        : state.phasePriority.INSTITUTION_DECISION,
+    actorId: agentId,
+    payload: {
+      agentId,
+      trigger: 'cadence',
+    },
+  });
+}
+
 export function scheduleAgentDecisions(state) {
   if (!state.agentEcology?.enabled) return [];
   const scheduled = [];
@@ -2499,26 +2948,7 @@ export function scheduleAgentDecisions(state) {
         event.actorId === agentId,
     );
     if (alreadyScheduled) continue;
-    const agent = state.agentEcology.agents[agentId];
-    const scheduledMs =
-      agent.lastDecisionMs === null
-        ? state.nowMs + agent.initialOffsetMs
-        : state.nowMs + cadenceFor(state, agent);
-    scheduled.push(
-      scheduleEcologyEvent(state, {
-        type: 'agent_decision',
-        scheduledMs,
-        phasePriority:
-          agent.kind === 'maker'
-            ? state.phasePriority.MAKER_QUOTE
-            : state.phasePriority.INSTITUTION_DECISION,
-        actorId: agentId,
-        payload: {
-          agentId,
-          trigger: 'cadence',
-        },
-      }),
-    );
+    scheduled.push(scheduleNextAgentDecision(state, agentId));
   }
   return scheduled;
 }
@@ -2528,25 +2958,7 @@ function publicLastPriceTicks(state, symbol) {
 }
 
 function publicVolatilityTicks(state, symbol) {
-  const trades =
-    publicRealtimeTape(state).bySymbol.get(symbol) ?? [];
-  const prices = [];
-  for (
-    let index = Math.max(0, trades.length - 32);
-    index < trades.length;
-    index += 1
-  ) {
-    const priceTicks = trades[index]?.priceTicks;
-    if (isPositiveInteger(priceTicks)) {
-      prices.push(priceTicks);
-    }
-  }
-  if (prices.length < 2) return 0;
-  let total = 0;
-  for (let index = 1; index < prices.length; index += 1) {
-    total += Math.abs(prices[index] - prices[index - 1]);
-  }
-  return Math.round(total / (prices.length - 1));
+  return publicTapeMetrics(state, symbol).volatilityTicks;
 }
 
 function freeCash(account) {
@@ -2940,12 +3352,55 @@ function reallocateMakerLawfulLaneCoverage({
     ) % laneModulus;
   const targetLevelsPerLane = Math.ceil(100 / laneModulus);
   const reallocatedByLayer = new Map();
+  const desiredBidTicks = orders
+    .filter((order) => order.side === 'buy')
+    .reduce(
+      (best, order) => Math.max(best, order.priceTicks),
+      0,
+    );
+  const desiredAskTicks = orders
+    .filter((order) => order.side === 'sell')
+    .reduce(
+      (best, order) => Math.min(best, order.priceTicks),
+      Number.MAX_SAFE_INTEGER,
+    );
+  let ownBidCeilingTicks = desiredBidTicks;
+  let ownAskFloorTicks = desiredAskTicks;
+  if (
+    isPositiveInteger(desiredBidTicks) &&
+    isPositiveInteger(desiredAskTicks) &&
+    dailyBand.limitDownTicks < dailyBand.limitUpTicks
+  ) {
+    if (desiredBidTicks >= desiredAskTicks) {
+      const splitTicks = clamp(
+        Math.floor((desiredBidTicks + desiredAskTicks) / 2),
+        dailyBand.limitDownTicks,
+        dailyBand.limitUpTicks - 1,
+      );
+      ownBidCeilingTicks = splitTicks;
+      ownAskFloorTicks = splitTicks + 1;
+    } else {
+      ownBidCeilingTicks = clamp(
+        desiredBidTicks,
+        dailyBand.limitDownTicks,
+        dailyBand.limitUpTicks - 1,
+      );
+      ownAskFloorTicks = clamp(
+        desiredAskTicks,
+        ownBidCeilingTicks + 1,
+        dailyBand.limitUpTicks,
+      );
+    }
+  }
   const retainSide = (side) => {
     const sideOrders = orders.filter((order) => order.side === side);
     const minimumPriceTicks = side === 'buy'
       ? dailyBand.limitDownTicks
       : Math.max(
           dailyBand.limitDownTicks,
+          isPositiveInteger(ownAskFloorTicks)
+            ? ownAskFloorTicks
+            : dailyBand.limitDownTicks,
           isPositiveInteger(bestExternalBidTicks)
             ? bestExternalBidTicks + 1
             : dailyBand.limitDownTicks,
@@ -2953,6 +3408,9 @@ function reallocateMakerLawfulLaneCoverage({
     const maximumPriceTicks = side === 'buy'
       ? Math.min(
           dailyBand.limitUpTicks,
+          isPositiveInteger(ownBidCeilingTicks)
+            ? ownBidCeilingTicks
+            : dailyBand.limitUpTicks,
           isPositiveInteger(bestExternalAskTicks)
             ? bestExternalAskTicks - 1
             : dailyBand.limitUpTicks,
@@ -4595,11 +5053,18 @@ function makerCommands(
   state,
   agent,
   observedCapacity = null,
+  requestedSymbols = null,
 ) {
   const account = state.accounts[agent.accountId];
-  const symbols = Object.keys(state.books);
+  const allSymbols = Object.keys(state.books);
+  const symbols = Array.isArray(requestedSymbols)
+    ? requestedSymbols.filter((symbol) =>
+        Object.hasOwn(state.books, symbol),
+      )
+    : allSymbols;
   const commands = [];
   if (!account) return commands;
+  agent.lastMakerEvaluatedSymbols = [...symbols];
   const activeQuantityBySymbol = Object.fromEntries(
     symbols.map((symbol) => [
       symbol,
@@ -4622,12 +5087,12 @@ function makerCommands(
     ]),
   );
   const perSymbolRiskCents = Math.floor(
-    agent.riskBudgetCents / Math.max(1, symbols.length),
+    agent.riskBudgetCents / Math.max(1, allSymbols.length),
   );
   const notionalReferenceTicks = Math.max(
     1,
     Math.round(
-      symbols.reduce(
+      allSymbols.reduce(
         (sum, symbol) =>
           sum +
           (
@@ -4637,7 +5102,7 @@ function makerCommands(
           ),
         0,
       ) /
-        Math.max(1, symbols.length),
+        Math.max(1, allSymbols.length),
     ),
   );
   const capacityMultiplier = calculateCapacityMultiplier(
@@ -4646,6 +5111,10 @@ function makerCommands(
     agent.id,
     observedCapacity,
   );
+  const capacityQuoteBucketBps =
+    Math.round(
+      Math.round(capacityMultiplier * 10_000) / 250,
+    ) * 250;
   const currentEquityCents = equityCentsFromWorld(
     state.world,
     account.cashCents,
@@ -4742,6 +5211,20 @@ function makerCommands(
         3
       ) -
       1;
+    const limitEpisode =
+      agent.limitQueueEpisodes?.[symbol] ?? null;
+    const limitEpisodeDecisionGate = limitEpisode
+      ? [
+          limitEpisode.state,
+          limitEpisode.direction,
+          limitEpisode.limitPriceTicks,
+          limitEpisode.state === 'break' &&
+            state.nowMs - limitEpisode.stateSinceMs >=
+              MAX_CONSENSUS_LIMIT_REST_MS
+            ? 'recovery_window_expired'
+            : 'recovery_window_open',
+        ].join(':')
+      : 'none';
     let currentOrderFingerprint = 2166136261;
     for (const order of currentOrders) {
       currentOrderFingerprint ^=
@@ -4757,21 +5240,33 @@ function makerCommands(
     const quoteInputSignature = [
       lastPriceTicks,
       bestBidTicks ?? 0,
-      bestBidQuantity,
+      Math.floor(
+        bestBidQuantity /
+          MAKER_DEPTH_SIGNATURE_BUCKET_UNITS,
+      ),
       bestAskTicks ?? 0,
-      bestAskQuantity,
-      bidDepthUnits,
-      askDepthUnits,
+      Math.floor(
+        bestAskQuantity /
+          MAKER_DEPTH_SIGNATURE_BUCKET_UNITS,
+      ),
+      Math.floor(
+        bidDepthUnits /
+          MAKER_DEPTH_SIGNATURE_BUCKET_UNITS,
+      ),
+      Math.floor(
+        askDepthUnits /
+          MAKER_DEPTH_SIGNATURE_BUCKET_UNITS,
+      ),
       account.holdings[symbol] ?? 0,
-      freeCash(account),
-      freeUnits(account, symbol),
+      buyBudgetCents,
+      sellCapacityUnits,
       account.fundingStressBps ?? 0,
       makerQuoteState(account),
       band.ruleVersion,
       band.midpointTicks,
       band.confidenceBps,
       agent.lastFundamentalTick,
-      Math.round(capacityMultiplier * 10_000),
+      capacityQuoteBucketBps,
       publicShock.intensityBps,
       publicShock.netSignedUnits,
       volatility,
@@ -4783,6 +5278,7 @@ function makerCommands(
       orderContext.arrivalBudgetUnits,
       orderContext.depthBudgetUnits,
       quoteMicroNoiseTicks,
+      limitEpisodeDecisionGate,
       currentOrderFingerprint,
     ].join(':');
     agent.makerQuoteInputCache ??= {};
@@ -4790,9 +5286,7 @@ function makerCommands(
       agent.makerQuoteInputCache[symbol];
     if (
       priorQuoteInput?.signature ===
-        quoteInputSignature &&
-      state.nowMs - priorQuoteInput.computedAtMs <
-        MAKER_DEEP_REQUOTE_HORIZON_MS
+        quoteInputSignature
     ) {
       continue;
     }
@@ -5503,46 +5997,72 @@ function makerCommands(
   return commands;
 }
 
-function publishedMomentum(state, symbol) {
-  const trades =
-    publicRealtimeTape(state).bySymbol.get(symbol) ?? [];
+function publicTapeMetrics(state, symbol) {
+  const tape = publicRealtimeTape(state);
+  const cached = tape.metricsBySymbol.get(symbol);
+  if (cached) return cached;
+  const trades = tape.bySymbol.get(symbol) ?? [];
+  const start32 = Math.max(0, trades.length - 32);
+  const start20 = Math.max(0, trades.length - 20);
+  let totalPriceTicks = 0;
+  let meanPriceCount = 0;
+  let priorVolatilityPriceTicks = null;
+  let totalAbsoluteMoveTicks = 0;
+  let volatilityMoveCount = 0;
   let firstPriceTicks = null;
   let lastPriceTicks = null;
-  let priceCount = 0;
-  for (
-    let index = Math.max(0, trades.length - 20);
-    index < trades.length;
-    index += 1
-  ) {
-    const priceTicks = trades[index].priceTicks;
-    if (!isPositiveInteger(priceTicks)) continue;
-    firstPriceTicks ??= priceTicks;
-    lastPriceTicks = priceTicks;
-    priceCount += 1;
-  }
-  return priceCount < 2
-    ? 0
-    : lastPriceTicks - firstPriceTicks;
-}
-
-function publishedMeanPrice(state, symbol) {
-  const trades =
-    publicRealtimeTape(state).bySymbol.get(symbol) ?? [];
-  let totalPriceTicks = 0;
-  let priceCount = 0;
-  for (
-    let index = Math.max(0, trades.length - 32);
-    index < trades.length;
-    index += 1
-  ) {
+  let momentumPriceCount = 0;
+  for (let index = start32; index < trades.length; index += 1) {
     const priceTicks = trades[index].priceTicks;
     if (!isPositiveInteger(priceTicks)) continue;
     totalPriceTicks += priceTicks;
-    priceCount += 1;
+    meanPriceCount += 1;
+    if (priorVolatilityPriceTicks !== null) {
+      totalAbsoluteMoveTicks += Math.abs(
+        priceTicks - priorVolatilityPriceTicks,
+      );
+      volatilityMoveCount += 1;
+    }
+    priorVolatilityPriceTicks = priceTicks;
+    if (index >= start20) {
+      firstPriceTicks ??= priceTicks;
+      lastPriceTicks = priceTicks;
+      momentumPriceCount += 1;
+    }
   }
-  return priceCount === 0
+  const metrics = {
+    momentumTicks:
+      momentumPriceCount < 2
+        ? 0
+        : lastPriceTicks - firstPriceTicks,
+    meanPriceTicks:
+      meanPriceCount === 0
+        ? null
+        : Math.round(
+            totalPriceTicks / meanPriceCount,
+          ),
+    volatilityTicks:
+      volatilityMoveCount === 0
+        ? 0
+        : Math.round(
+            totalAbsoluteMoveTicks /
+              volatilityMoveCount,
+          ),
+  };
+  tape.metricsBySymbol.set(symbol, metrics);
+  return metrics;
+}
+
+function publishedMomentum(state, symbol) {
+  return publicTapeMetrics(state, symbol).momentumTicks;
+}
+
+function publishedMeanPrice(state, symbol) {
+  const meanPriceTicks =
+    publicTapeMetrics(state, symbol).meanPriceTicks;
+  return meanPriceTicks === null
     ? publicLastPriceTicks(state, symbol)
-    : Math.round(totalPriceTicks / priceCount);
+    : meanPriceTicks;
 }
 
 function eligibleBehaviorPublicTrades(state, agent) {
@@ -5608,11 +6128,18 @@ function behaviorValueTicks(
       ?.actionableValueTicks ??
     agent.delayedFundamentals?.[symbol] ??
     publicLastPriceTicks(state, symbol);
-  const catalystTicks = publicCatalystSignalTicks(
-    state,
-    agent,
-    symbol,
-  );
+  const currentOrderContext =
+    agent.lastSymbolOrderContext?.[symbol];
+  const catalystTicks =
+    currentOrderContext?.version ===
+      SYMBOL_ORDER_CONTEXT_VERSION &&
+    currentOrderContext.virtualMs === state.nowMs
+      ? currentOrderContext.rawCatalystTicks
+      : publicCatalystSignalTicks(
+          state,
+          agent,
+          symbol,
+        );
   if (
     agent.lastFundamentalTick !== 0 ||
     !isPositiveInteger(rawValueTicks)
@@ -5662,14 +6189,24 @@ function behaviorValueTicks(
   );
 }
 
-function observeAgentBehavior(state, agent) {
+function observeAgentBehavior(
+  state,
+  agent,
+  observedSymbols = null,
+) {
   if (!agent.behaviorState) return null;
+  const allSymbols = Object.keys(state.books);
+  const selectedSymbols = Array.isArray(observedSymbols)
+    ? observedSymbols.filter((symbol) =>
+        Object.hasOwn(state.books, symbol),
+      )
+    : allSymbols;
   const publicTrades = eligibleBehaviorPublicTrades(
     state,
     agent,
   );
   const symbols = Object.fromEntries(
-    Object.keys(state.books).map((symbol) => {
+    selectedSymbols.map((symbol) => {
       const orderContext = symbolOrderContextFor(
         state,
         agent,
@@ -5753,6 +6290,17 @@ function observeAgentBehavior(state, agent) {
   observeBehaviorState(agent.behaviorState, {
     nowMs: state.nowMs,
     symbols,
+    markPrices: Object.fromEntries(
+      allSymbols.map((symbol) => [
+        symbol,
+        {
+          priceTicks: publicLastPriceTicks(
+            state,
+            symbol,
+          ),
+        },
+      ]),
+    ),
     publicTrades,
     capacityPressureBps: Math.max(
       0,
@@ -5765,7 +6313,7 @@ function observeAgentBehavior(state, agent) {
       state.accounts[agent.accountId]
         ?.fundingStressBps ?? 0,
   });
-  const publicCatalystAttention = Object.keys(state.books)
+  const publicCatalystAttention = selectedSymbols
     .map((symbol) => agent.lastSymbolOrderContext[symbol])
     .filter(
       (context) =>
@@ -6559,7 +7107,62 @@ export function institutionValuationRiskSignal(
   return gapTicks;
 }
 
-function institutionSignal(state, agent, symbol, symbolIndex) {
+function quantCrossSection(state) {
+  const cached = quantCrossSectionCache.get(state);
+  if (
+    cached?.commitSeq === state.commitSeq &&
+    cached.nowMs === state.nowMs
+  ) {
+    return cached;
+  }
+  const momentumBpsBySymbol = Object.fromEntries(
+    Object.keys(state.books).map((symbol) => {
+      const currentTicks = publicLastPriceTicks(
+        state,
+        symbol,
+      );
+      return [
+        symbol,
+        Math.round(
+          publishedMomentum(state, symbol) *
+            10_000 /
+            Math.max(1, currentTicks),
+        ),
+      ];
+    }),
+  );
+  const values = Object.values(momentumBpsBySymbol);
+  const meanBps =
+    values.reduce((sum, value) => sum + value, 0) /
+    Math.max(1, values.length);
+  const dispersionBps = Math.max(
+    1,
+    Math.sqrt(
+      values.reduce(
+        (sum, value) =>
+          sum + (value - meanBps) ** 2,
+        0,
+      ) / Math.max(1, values.length),
+    ),
+  );
+  const result = {
+    commitSeq: state.commitSeq,
+    nowMs: state.nowMs,
+    momentumBpsBySymbol,
+    meanBps,
+    dispersionBps,
+  };
+  quantCrossSectionCache.set(state, result);
+  return result;
+}
+
+function institutionSignal(
+  state,
+  agent,
+  symbol,
+  symbolIndex,
+  orderContext = null,
+) {
   const current = publicLastPriceTicks(state, symbol);
   const seedBias =
     deterministicUnit(state, agent, `signal:${symbol}`) - 0.5;
@@ -6582,6 +7185,44 @@ function institutionSignal(state, agent, symbol, symbolIndex) {
     agent,
     symbol,
   );
+  if (
+    agent.strategy ===
+    'cross_sectional_microstructure_ensemble'
+  ) {
+    const crossSection = quantCrossSection(state);
+    const residualBps =
+      (crossSection.momentumBpsBySymbol[symbol] ?? 0) -
+      crossSection.meanBps;
+    const residualZ =
+      residualBps / crossSection.dispersionBps;
+    const flowScale = Math.max(
+      1,
+      orderContext?.arrivalBudgetUnits ?? 1,
+    );
+    const queueFlowSignal = clamp(
+      (orderContext?.flowNetSignedUnits ?? 0) /
+        flowScale,
+      -6,
+      6,
+    );
+    const factRiskGuard = clamp(
+      (orderContext?.beliefGapBps ?? 0) / 500,
+      -3,
+      3,
+    );
+    return clamp(
+      -residualZ * 8 +
+        flow / 45 +
+        queueFlowSignal +
+        factRiskGuard +
+        valuationRisk * 0.2 +
+        adaptiveSignal * 0.35 +
+        catalystSignal * 0.2 +
+        seedBias * 0.6,
+      -30,
+      30,
+    );
+  }
   if (agent.strategy === 'delayed_fundamental_value') {
     const band = agent.valuationBands[symbol];
     const fair = Math.round(
@@ -6830,6 +7471,7 @@ function profitCertificateForOrder(
     expectedExitTicks,
     quantity,
     tif,
+    strategicBenefitCents = 0,
   },
 ) {
   const depth = aggregateBookMetrics(
@@ -6914,7 +7556,11 @@ function profitCertificateForOrder(
       behavior.performance.drawdownBps,
     tif,
     strategicBenefitCents:
-      mandateAvoidedLossCents,
+      mandateAvoidedLossCents +
+      Math.max(
+        0,
+        Math.round(strategicBenefitCents),
+      ),
   });
   return {
     expectedUtility,
@@ -7101,6 +7747,54 @@ function activeLimitFollowerOrdersForAgent(
     }
   }
   return orders;
+}
+
+function stableLimitFollowerSymbols(
+  state,
+  accountId,
+) {
+  const symbols = new Set();
+  for (const [symbol, security] of Object.entries(
+    state.world.market.securities,
+  )) {
+    const band = securityDailyBand(security);
+    const lastPriceTicks = publicLastPriceTicks(
+      state,
+      symbol,
+    );
+    const lockingSide =
+      lastPriceTicks === band.limitUpTicks
+        ? 'buy'
+        : lastPriceTicks === band.limitDownTicks
+          ? 'sell'
+          : null;
+    if (!lockingSide) continue;
+    const boundaryTicks =
+      lockingSide === 'buy'
+        ? band.limitUpTicks
+        : band.limitDownTicks;
+    if (
+      activeOrdersAtPrice(
+        state,
+        symbol,
+        lockingSide,
+        boundaryTicks,
+      ).some(
+        (order) =>
+          order.ownerId === accountId &&
+          (
+            order.ecologyIntentKind ===
+              'limit_follower' ||
+            order.parentOrderId?.startsWith(
+              'limit-follow:',
+            )
+          ),
+      )
+    ) {
+      symbols.add(symbol);
+    }
+  }
+  return symbols;
 }
 
 function limitFollowerCommands(
@@ -7764,39 +8458,6 @@ function limitFollowerCommands(
   return commands;
 }
 
-function accountHasStableLimitFollower(state, accountId) {
-  for (const [symbol, security] of Object.entries(
-    state.world.market.securities,
-  )) {
-    const band = securityDailyBand(security);
-    const lastPriceTicks = publicLastPriceTicks(
-      state,
-      symbol,
-    );
-    for (const [side, boundaryTicks] of [
-      ['buy', band.limitUpTicks],
-      ['sell', band.limitDownTicks],
-    ]) {
-      if (lastPriceTicks !== boundaryTicks) continue;
-      if (
-        activeOrdersAtPrice(
-          state,
-          symbol,
-          side,
-          boundaryTicks,
-        ).some(
-          (order) =>
-            order.ownerId === accountId &&
-            order.ecologyIntentKind === 'limit_follower',
-        )
-      ) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
 function boundaryQueueExecutionThreshold(
   state,
   symbol,
@@ -8000,11 +8661,19 @@ function ordinaryParticipantCommands(
     publicFlowSignal(state, agent, symbol) / 160;
   const visibleFlowMs =
     state.nowMs - publicFlowObservationDelayMs(agent);
-  const lastVisiblePublicTrade = [
-    ...(publicRealtimeTape(state).bySymbol.get(symbol) ?? []),
-  ]
-    .reverse()
-    .find((trade) => trade.virtualMs <= visibleFlowMs);
+  const publicTrades =
+    publicRealtimeTape(state).bySymbol.get(symbol) ?? [];
+  let lastVisiblePublicTrade = null;
+  for (
+    let index = publicTrades.length - 1;
+    index >= 0;
+    index -= 1
+  ) {
+    if (publicTrades[index].virtualMs <= visibleFlowMs) {
+      lastVisiblePublicTrade = publicTrades[index];
+      break;
+    }
+  }
   let preferredSide;
   if (inventoryDeviationUnits >= inventoryBandUnits) {
     preferredSide = 'sell';
@@ -8561,8 +9230,9 @@ function retailCommands(
 ) {
   const account = state.accounts[agent.accountId];
   if (!account) return [];
+  const allSymbols = Object.keys(state.books);
   const market = Object.fromEntries(
-    Object.keys(state.books).map((symbol) => {
+    allSymbols.map((symbol) => {
       const depth = aggregateBookMetrics(
         state.books[symbol],
         1,
@@ -8632,14 +9302,13 @@ function retailCommands(
     });
     return limitCommands;
   }
-  if (
-    accountHasStableLimitFollower(
-      state,
-      agent.accountId,
-    )
-  ) {
-    return [];
-  }
+  const blockedSymbols = stableLimitFollowerSymbols(
+    state,
+    agent.accountId,
+  );
+  const participationSymbols = allSymbols.filter(
+    (symbol) => !blockedSymbols.has(symbol),
+  );
   const workingLifecycle = retailWorkingOrderLifecycle(
     state,
     agent,
@@ -8652,6 +9321,7 @@ function retailCommands(
     });
     return workingLifecycle.commands;
   }
+  if (participationSymbols.length === 0) return [];
   if (
     agent.lastOrderMs !== null &&
     state.nowMs <
@@ -8666,13 +9336,18 @@ function retailCommands(
     brokerId: agent.brokerId,
     decisionSequence: agent.decisionSequence,
     nowMs: state.nowMs,
-    market,
+    market: Object.fromEntries(
+      participationSymbols.map((symbol) => [
+        symbol,
+        market[symbol],
+      ]),
+    ),
     freeCashCents: Math.min(
       freeCash(account),
       mandate.freeCashCents,
     ),
     freeUnitsBySymbol: Object.fromEntries(
-      Object.keys(state.books).map((symbol) => [
+      participationSymbols.map((symbol) => [
         symbol,
         Math.min(
           freeUnits(account, symbol),
@@ -8690,7 +9365,7 @@ function retailCommands(
         state,
         agent,
         account,
-        Object.keys(state.books),
+        participationSymbols,
         mandate,
         observedCapacity,
       ),
@@ -8783,6 +9458,394 @@ function retailCommands(
   return intentCommands;
 }
 
+/**
+ * Reads only the public, settled market mirror and finite displayed books.
+ * It detects a market-function problem; it does not infer that a single
+ * issuer deserves support and it never supplies a price to the authority.
+ */
+export function systemicStabilizationAssessment(
+  state,
+  actorId = 'npc_stabilization_fund',
+) {
+  const agent = state?.agentEcology?.agents?.[actorId];
+  if (
+    !agent ||
+    agent.strategy !== 'systemic_stabilization'
+  ) {
+    throw new TypeError(
+      'a live systemic-stabilization agent is required',
+    );
+  }
+  const mandate = agent.stabilizationMandate;
+  const symbols = Object.keys(state.books).sort();
+  const observations = symbols.map((symbol) => {
+    const security = state.world.market.securities[symbol];
+    const previousCloseTicks = isPositiveInteger(
+      security.previousCloseTicks,
+    )
+      ? security.previousCloseTicks
+      : publicLastPriceTicks(state, symbol);
+    const lastPriceTicks = publicLastPriceTicks(
+      state,
+      symbol,
+    );
+    const returnBps = Math.round(
+      (lastPriceTicks - previousCloseTicks) *
+        10_000 /
+        Math.max(1, previousCloseTicks),
+    );
+    const band = securityDailyBand(security);
+    const depth = aggregateBookMetrics(
+      state.books[symbol],
+      5,
+      { excludeOwnerId: agent.accountId },
+    );
+    const shockScale = marketFlowShockScale(
+      state,
+      symbol,
+    );
+    const visibleBidUnits = depth.bids.totalQuantity;
+    const liquidityVacuum =
+      visibleBidUnits <=
+      Math.max(
+        1,
+        Math.round(
+          shockScale.expectedDailyUnits * 8 / 10_000,
+        ),
+      );
+    const atLimitDown =
+      lastPriceTicks <= band.limitDownTicks;
+    const distressed =
+      returnBps <= mandate.distressedReturnBps ||
+      atLimitDown ||
+      (
+        returnBps <= -200 &&
+        liquidityVacuum
+      );
+    const severe =
+      returnBps <= mandate.severeReturnBps ||
+      atLimitDown;
+    const publicFloatValueCents = Math.max(
+      1,
+      Math.round(
+        Number(security.floatUnits ?? 1) *
+          previousCloseTicks,
+      ),
+    );
+    return {
+      symbol,
+      previousCloseTicks,
+      lastPriceTicks,
+      returnBps,
+      atLimitDown,
+      distressed,
+      severe,
+      liquidityVacuum,
+      visibleBidUnits,
+      expectedDailyUnits:
+        shockScale.expectedDailyUnits,
+      publicFloatValueCents,
+    };
+  });
+  const totalFloatValueCents = observations.reduce(
+    (sum, observation) =>
+      sum + observation.publicFloatValueCents,
+    0,
+  );
+  const weightedMarketReturnBps = Math.round(
+    observations.reduce(
+      (sum, observation) =>
+        sum +
+        observation.returnBps *
+          observation.publicFloatValueCents,
+      0,
+    ) /
+      Math.max(1, totalFloatValueCents),
+  );
+  const distressedSymbols = observations.filter(
+    (observation) => observation.distressed,
+  );
+  const declineBreadthBps = Math.round(
+    distressedSymbols.length * 10_000 /
+      Math.max(1, observations.length),
+  );
+  const limitDownCount = observations.filter(
+    (observation) => observation.atLimitDown,
+  ).length;
+  const breadthThresholdCount = Math.max(
+    3,
+    Math.ceil(
+      observations.length *
+        mandate.minimumDistressedBreadthBps /
+        10_000,
+    ),
+  );
+  const limitDownThresholdCount = Math.max(
+    2,
+    Math.ceil(observations.length * 2_000 / 10_000),
+  );
+  const active =
+    (
+      distressedSymbols.length >=
+        breadthThresholdCount &&
+      weightedMarketReturnBps <=
+        -mandate.minimumWeightedDeclineBps
+    ) ||
+    limitDownCount >= limitDownThresholdCount;
+  const selected = active
+    ? [...distressedSymbols].sort(
+        (left, right) =>
+          Number(right.atLimitDown) -
+            Number(left.atLimitDown) ||
+          Number(right.liquidityVacuum) -
+            Number(left.liquidityVacuum) ||
+          right.publicFloatValueCents -
+            left.publicFloatValueCents ||
+          left.returnBps - right.returnBps ||
+          left.symbol.localeCompare(right.symbol),
+      )[0] ?? null
+    : null;
+  const maximumParticipationUnits = selected
+    ? Math.max(
+        1,
+        Math.round(
+          selected.expectedDailyUnits *
+            mandate.maximumParticipationBps /
+            10_000,
+        ),
+      )
+    : 0;
+  return {
+    contractVersion: mandate.contractVersion,
+    observedCommitSeq: state.commitSeq,
+    observedAtMs: state.nowMs,
+    sourceAuthority:
+      'settled_realtime_market_mirror_and_finite_order_book',
+    active,
+    reason: active
+      ? 'SYSTEMIC_MARKET_FUNCTION_STRESS'
+      : 'SYSTEMIC_THRESHOLD_NOT_MET',
+    distressedSymbols: distressedSymbols.map(
+      (observation) => observation.symbol,
+    ),
+    declineBreadthBps,
+    weightedMarketReturnBps,
+    limitDownCount,
+    liquidityVacuumCount: observations.filter(
+      (observation) => observation.liquidityVacuum,
+    ).length,
+    selectedSymbol: selected?.symbol ?? null,
+    maximumParticipationUnits,
+    permittedSide: mandate.permittedSide,
+    guaranteedFloor: mandate.guaranteedFloor,
+    executionAuthority: mandate.executionAuthority,
+    priceWriteAuthority:
+      mandate.marketPriceWriteAuthority,
+    thresholds: {
+      breadthThresholdCount,
+      limitDownThresholdCount,
+      minimumDistressedBreadthBps:
+        mandate.minimumDistressedBreadthBps,
+      minimumWeightedDeclineBps:
+        mandate.minimumWeightedDeclineBps,
+    },
+  };
+}
+
+function activeSystemicStabilizationOrders(
+  state,
+  agent,
+) {
+  return activeOrdersOwnedBy(state, agent.accountId)
+    .filter(
+      (order) =>
+        activeOrder(order) &&
+        order.ecologyAgentId === agent.id &&
+        order.parentOrderId?.startsWith(
+          `systemic-stabilization:${agent.id}:`,
+        ),
+    );
+}
+
+function systemicStabilizationCommands(
+  state,
+  agent,
+  account,
+  mandate,
+  observedCapacity,
+) {
+  const assessment = systemicStabilizationAssessment(
+    state,
+    agent.id,
+  );
+  const activeOrders = activeSystemicStabilizationOrders(
+    state,
+    agent,
+  );
+  if (!assessment.active) {
+    return activeOrders.map((order) => ({
+      type: 'cancel_order',
+      actorId: agent.accountId,
+      brokerId: agent.brokerId,
+      orderId: order.id,
+    }));
+  }
+  if (activeOrders.length > 0) {
+    return activeOrders.map((order) => ({
+      type: 'cancel_order',
+      actorId: agent.accountId,
+      brokerId: agent.brokerId,
+      orderId: order.id,
+    }));
+  }
+  const symbol = assessment.selectedSymbol;
+  const depth = aggregateBookMetrics(
+    state.books[symbol],
+    5,
+    { excludeOwnerId: agent.accountId },
+  );
+  const executablePriceTicks =
+    depth.asks.bestPriceTicks;
+  if (!isPositiveInteger(executablePriceTicks)) {
+    return [];
+  }
+  const capacityMultiplier = calculateCapacityMultiplier(
+    state,
+    agent.accountId,
+    agent.id,
+    observedCapacity,
+  );
+  const riskBudgetUnits = Math.max(
+    0,
+    Math.floor(
+      agent.riskBudgetCents /
+        executablePriceTicks,
+    ),
+  );
+  const quantity = Math.min(
+    assessment.maximumParticipationUnits,
+    Math.max(1, depth.asks.bestQuantity),
+    Math.max(
+      1,
+      Math.floor(
+        assessment.maximumParticipationUnits *
+          clamp(capacityMultiplier, 0.1, 1.5),
+      ),
+    ),
+    Math.max(
+      0,
+      Math.floor(
+        (mandate.freeCashCents - 5) /
+          executablePriceTicks,
+      ),
+    ),
+    riskBudgetUnits,
+  );
+  if (quantity <= 0) return [];
+  const security =
+    state.world.market.securities[symbol];
+  const expectedRecoveryTicks = Math.max(
+    1,
+    Math.round(
+      Math.abs(
+        assessment.weightedMarketReturnBps,
+      ) *
+        security.previousCloseTicks /
+        25_000,
+    ),
+  );
+  const expectedExitTicks = Math.max(
+    executablePriceTicks + 1,
+    Math.min(
+      security.previousCloseTicks,
+      executablePriceTicks + expectedRecoveryTicks,
+    ),
+  );
+  const mandateBenefitBps = clamp(
+    80 +
+      Math.round(
+        assessment.declineBreadthBps / 20,
+      ) +
+      Math.round(
+        Math.max(
+          0,
+          -assessment.weightedMarketReturnBps,
+        ) / 4,
+      ),
+    80,
+    1_500,
+  );
+  const certificate = profitCertificateForOrder(
+    state,
+    agent,
+    mandate,
+    {
+      symbol,
+      side: 'buy',
+      priceTicks: executablePriceTicks,
+      expectedExitTicks,
+      quantity,
+      tif: 'IOC',
+      strategicBenefitCents: Math.max(
+        0,
+        Math.floor(
+          executablePriceTicks *
+            quantity *
+            mandateBenefitBps /
+            10_000,
+        ),
+      ),
+    },
+  );
+  if (!certificate.expectedUtility.shouldTrade) {
+    return [];
+  }
+  return [
+    tagCommandOrderContext(
+      {
+        type: 'submit_order',
+        actorId: agent.accountId,
+        brokerId: agent.brokerId,
+        symbol,
+        side: 'buy',
+        priceTicks: executablePriceTicks,
+        quantity,
+        tif: 'IOC',
+        parentOrderId:
+          `systemic-stabilization:${agent.id}:` +
+          `${state.nowMs}:${agent.decisionSequence}`,
+        ecologyIntentKind:
+          'public_systemic_stabilization',
+        capacityMultiplierBps: Math.round(
+          capacityMultiplier * 10_000,
+        ),
+        stabilizationMandate: {
+          contractVersion:
+            assessment.contractVersion,
+          observedCommitSeq:
+            assessment.observedCommitSeq,
+          reason: assessment.reason,
+          declineBreadthBps:
+            assessment.declineBreadthBps,
+          weightedMarketReturnBps:
+            assessment.weightedMarketReturnBps,
+          guaranteedFloor: false,
+          priceWriteAuthority: 'none',
+        },
+        expectedUtility:
+          certificate.expectedUtility,
+        profitObjective:
+          certificate.profitObjective,
+      },
+      symbolOrderContextFor(
+        state,
+        agent,
+        symbol,
+      ),
+    ),
+  ];
+}
+
 function institutionCommands(
   state,
   agent,
@@ -8790,8 +9853,63 @@ function institutionCommands(
 ) {
   const account = state.accounts[agent.accountId];
   if (!account || state.quoteFrames.length === 0) return [];
-  const symbols = Object.keys(state.books);
+  const allSymbols = Object.keys(state.books);
+  const candidateSymbols =
+    agent.strategy ===
+    'cross_sectional_microstructure_ensemble'
+      ? Array.from(
+          {
+            length: Math.min(
+              allSymbols.length,
+              agent.quantModel.symbolsPerShard,
+            ),
+          },
+          (_, offset) =>
+            allSymbols[
+              (
+                agent.decisionSequence *
+                  agent.quantModel.symbolsPerShard +
+                offset
+              ) % allSymbols.length
+            ],
+        )
+      : allSymbols;
   const mandate = mandateResources(state, agent, account);
+  if (agent.strategy === 'systemic_stabilization') {
+    return systemicStabilizationCommands(
+      state,
+      agent,
+      account,
+      mandate,
+      observedCapacity,
+    );
+  }
+  if (
+    agent.strategy ===
+      'cross_sectional_microstructure_ensemble' &&
+    (
+      account.drawdownBps >=
+        agent.quantModel.killSwitch.drawdownBps ||
+      account.fundingStressBps >=
+        agent.quantModel.killSwitch.fundingStressBps
+    )
+  ) {
+    return activeOrdersOwnedBy(
+      state,
+      agent.accountId,
+    )
+      .filter(
+        (order) =>
+          order.ecologyAgentId === agent.id,
+      )
+      .slice(0, agent.quantModel.maxWorkingOrders)
+      .map((order) => ({
+        type: 'cancel_order',
+        actorId: agent.accountId,
+        brokerId: order.brokerId,
+        orderId: order.id,
+      }));
+  }
   const limitCommands = limitFollowerCommands(
     state,
     agent,
@@ -8801,14 +9919,14 @@ function institutionCommands(
   if (limitCommands.length > 0) {
     return limitCommands;
   }
-  if (
-    accountHasStableLimitFollower(
-      state,
-      agent.accountId,
-    )
-  ) {
-    return [];
-  }
+  const blockedSymbols = stableLimitFollowerSymbols(
+    state,
+    agent.accountId,
+  );
+  const symbols = candidateSymbols.filter(
+    (symbol) => !blockedSymbols.has(symbol),
+  );
+  if (symbols.length === 0) return [];
   if (
     agent.lastOrderMs !== null &&
     state.nowMs <
@@ -8855,6 +9973,7 @@ function institutionCommands(
               agent,
               symbol,
               index,
+              orderContext,
             );
       return {
         symbol,
@@ -8929,7 +10048,9 @@ function institutionCommands(
     side === 'buy'
       ? depth.asks.bestPriceTicks
       : depth.bids.bestPriceTicks;
-  if (!isPositiveInteger(executablePrice)) return [];
+  if (!isPositiveInteger(executablePrice)) {
+    return [];
+  }
   const intensity = clamp(Math.abs(selected.signal) / 10, 0.35, 2.4);
   const selectedShock = recentPublicShock(
     state,
@@ -8953,7 +10074,10 @@ function institutionCommands(
       ? 0.85
       : agent.strategy === 'published_frame_trend'
         ? 0.65
-        : 0.75;
+        : agent.strategy ===
+              'cross_sectional_microstructure_ensemble'
+          ? 1.2
+          : 0.75;
   const shockCapacityUnits = Math.min(
     700,
     Math.floor(
@@ -8989,6 +10113,12 @@ function institutionCommands(
     Math.floor(
       baseQuantity *
         intensity *
+        (
+          agent.strategy ===
+          'cross_sectional_microstructure_ensemble'
+            ? 3.5
+            : 1
+        ) *
         capacityMultiplier *
         behaviorSizeMultiplier(agent.behaviorState),
     ),
@@ -9135,7 +10265,11 @@ function institutionCommands(
  * Produces intents from an explicitly bounded information set: an agent's own
  * account, public depth/trades/frames and catalogued delayed observations.
  */
-export function decideAgentOrders(state, agentId) {
+export function decideAgentOrders(
+  state,
+  agentId,
+  { makerSymbols = null } = {},
+) {
   if (
     state?.agentEcology?.ruleVersion !== AGENT_RULE_VERSION ||
     state.agentEcology.capacityLedger?.ruleVersion !==
@@ -9161,10 +10295,19 @@ export function decideAgentOrders(state, agentId) {
   ) {
     agent.publicFlowMemory = null;
   }
-  const observedCapacity = observeAgentBehavior(state, agent);
+  const observedCapacity = observeAgentBehavior(
+    state,
+    agent,
+    agent.kind === 'maker' ? makerSymbols : null,
+  );
   const commands =
     agent.kind === 'maker'
-      ? makerCommands(state, agent, observedCapacity)
+      ? makerCommands(
+          state,
+          agent,
+          observedCapacity,
+          makerSymbols,
+        )
       : agent.kind === 'retail'
         ? retailCommands(state, agent, observedCapacity)
         : institutionCommands(
@@ -9505,26 +10648,43 @@ function applyObservedAggregate(pending, aggregate) {
 }
 
 function appendObservedTrade(pending, trade) {
-  pending.observedTrades.push(compactObservedTrade(trade));
-  pending.lastTradeId = trade.id;
-  pending.lastTradeMs = trade.virtualMs;
-  pending.lastPriceTicks = trade.priceTicks;
-  pending.minimumPriceTicks = Math.min(
-    pending.minimumPriceTicks,
-    trade.priceTicks,
+  if (pending.observedTradeIds.includes(trade.id)) return;
+  pending.observedTradeIds.push(trade.id);
+  pending.observedTrades.push(
+    compactObservedTrade(trade),
   );
-  pending.maximumPriceTicks = Math.max(
-    pending.maximumPriceTicks,
-    trade.priceTicks,
+  if (
+    pending.observedTradeIds.length >
+    MAX_OBSERVED_TRADES_PER_RESPONSE
+  ) {
+    const overflow =
+      pending.observedTradeIds.length -
+      MAX_OBSERVED_TRADES_PER_RESPONSE;
+    pending.observedTradeIds.splice(0, overflow);
+    pending.observedTrades.splice(0, overflow);
+  }
+  applyObservedAggregate(
+    pending,
+    aggregateTrades(pending.observedTrades),
   );
-  pending.lastCommitSeq = trade.commitSeq;
-  pending.tradeCount += 1;
-  const signedQuantity =
-    trade.side === 'buy' ? trade.quantity : -trade.quantity;
-  pending.netSignedQuantity[trade.symbol] = saturatingSafeAdd(
-    pending.netSignedQuantity[trade.symbol] ?? 0,
-    signedQuantity,
+}
+
+function appendDeferredObservedTrade(pending, trade) {
+  if (pending.deferredObservedTradeIds.includes(trade.id)) return;
+  pending.deferredObservedTradeIds.push(trade.id);
+  pending.deferredObservedTrades.push(
+    compactObservedTrade(trade),
   );
+  if (
+    pending.deferredObservedTradeIds.length >
+    MAX_OBSERVED_TRADES_PER_RESPONSE
+  ) {
+    const overflow =
+      pending.deferredObservedTradeIds.length -
+      MAX_OBSERVED_TRADES_PER_RESPONSE;
+    pending.deferredObservedTradeIds.splice(0, overflow);
+    pending.deferredObservedTrades.splice(0, overflow);
+  }
 }
 
 function behaviorAgentIdFromParentOrderId(
@@ -9861,49 +11021,110 @@ export function recordAgentCommandOutcome(
   recordBehaviorReceipt(behavior, receipt);
 }
 
-function scheduleMakerLimitTouchResponses(state, trade) {
+function prioritizeMakerSymbolAtNextCadence(
+  state,
+  symbol,
+) {
+  for (const agentId of AGENT_IDS) {
+    const agent = state.agentEcology.agents[agentId];
+    if (agent?.kind !== 'maker') continue;
+    const existing = state.eventQueue.find(
+      (event) =>
+        event.type === 'agent_decision' &&
+        event.actorId === agentId,
+    );
+    if (!existing) continue;
+    existing.payload ??= {};
+    existing.payload.prioritySymbols = [
+      ...new Set([
+        ...(existing.payload.prioritySymbols ?? []),
+        symbol,
+      ]),
+    ];
+  }
+}
+
+function scheduleMakerLimitStateResponses(state, trade) {
   if (!state.agentEcology?.enabled) return [];
   const security =
     state.world.market.securities[trade.symbol];
   if (!security) return [];
   const band = securityDailyBand(security);
-  if (
-    trade.priceTicks !== band.limitUpTicks &&
-    trade.priceTicks !== band.limitDownTicks
-  ) {
-    return [];
-  }
-  const relockEvidencePending = AGENT_IDS.some((agentId) => {
-    const agent = state.agentEcology.agents[agentId];
-    const episode = agent?.limitQueueEpisodes?.[trade.symbol];
-    return (
-      agent?.kind === 'maker' &&
-      episode &&
-      ['break', 'failed_recovery'].includes(episode.state)
-    );
-  });
-  if (!relockEvidencePending) return [];
+  const direction =
+    trade.priceTicks === band.limitUpTicks
+      ? 'up'
+      : trade.priceTicks === band.limitDownTicks
+        ? 'down'
+        : null;
   const scheduled = [];
   for (const agentId of AGENT_IDS) {
     const agent = state.agentEcology.agents[agentId];
     if (agent?.kind !== 'maker') continue;
+    const episode =
+      agent.limitQueueEpisodes?.[trade.symbol];
+    const liveLockStates = [
+      'consensus_lock',
+      'stable_lock',
+      'relock',
+    ];
+    const firstBoundaryEvidence = Boolean(
+      direction &&
+        (
+          !episode ||
+          episode.direction !== direction ||
+          episode.limitPriceTicks !== trade.priceTicks ||
+          ['break', 'failed_recovery'].includes(
+            episode.state,
+          )
+        ),
+    );
+    const firstBreakEvidence = Boolean(
+      direction === null &&
+        episode &&
+        liveLockStates.includes(episode.state) &&
+        trade.priceTicks !== episode.limitPriceTicks,
+    );
+    // One settled first touch, or one settled touch after a documented break,
+    // is enough to interrupt this maker's ordinary shard. The first settled
+    // fill away from a live lock does the same for the break transition.
+    // Subsequent fills remain tape evidence, while the episode state and the
+    // one existing event prevent an unbounded per-trade decision loop.
+    if (!firstBoundaryEvidence && !firstBreakEvidence) continue;
     const responseMs =
       Math.max(state.nowMs, trade.virtualMs) +
       // Public tape/limit-state latency is the maker's market-data path.
       // Fundamental-information delay is a separate authority clock and
       // would let slower retail response events erase the touch first.
       Math.max(1, agent.latencyMs);
-    const existing = state.eventQueue.find(
+    const existingIndex = state.eventQueue.findIndex(
       (event) =>
         event.type === 'agent_decision' &&
         event.actorId === agentId,
     );
+    const existing =
+      existingIndex >= 0
+        ? state.eventQueue[existingIndex]
+        : null;
     if (existing) {
+      existing.payload ??= {};
+      existing.payload.prioritySymbols = [
+        ...new Set([
+          ...(existing.payload.prioritySymbols ?? []),
+          trade.symbol,
+        ]),
+      ];
+      existing.payload.urgentBoundarySymbols = [
+        ...new Set([
+          ...(existing.payload.urgentBoundarySymbols ?? []),
+          trade.symbol,
+        ]),
+      ];
       if (existing.scheduledMs <= responseMs) continue;
       existing.scheduledMs = responseMs;
       existing.rngKey =
         `${state.world.world.seed}:${existing.scheduledMs}:` +
         `${existing.phasePriority}:${existing.sequence}`;
+      siftUpEcologyEvent(state.eventQueue, existingIndex);
       scheduled.push(existing);
       continue;
     }
@@ -9916,12 +11137,11 @@ function scheduleMakerLimitTouchResponses(state, trade) {
         payload: {
           agentId,
           trigger: 'cadence',
+          prioritySymbols: [trade.symbol],
+          urgentBoundarySymbols: [trade.symbol],
         },
       }),
     );
-  }
-  if (scheduled.length > 0) {
-    state.eventQueue.sort(compareEvents);
   }
   return scheduled;
 }
@@ -9945,8 +11165,12 @@ export function schedulePublicFlowResponses(
   recordCapacityTrade(state, trade);
   recordSettledBehaviorTrade(state, trade);
   if (!state.agentEcology?.enabled) return [];
+  prioritizeMakerSymbolAtNextCadence(
+    state,
+    trade.symbol,
+  );
   const makerLimitResponses =
-    scheduleMakerLimitTouchResponses(state, trade);
+    scheduleMakerLimitStateResponses(state, trade);
   if (
     state.agentEcology.publicFlow.some(
       (record) => record.tradeId === trade.id,
@@ -9984,20 +11208,13 @@ export function schedulePublicFlowResponses(
       // the fixed deadline.
       if (
         trade.virtualMs + agent.informationDelayMs <=
-          existing.scheduledMs &&
-        existing.observedTradeIds.length <
-          MAX_OBSERVED_TRADES_PER_RESPONSE
+          existing.scheduledMs
       ) {
-        existing.observedTradeIds.push(trade.id);
         appendObservedTrade(existing, trade);
-      } else if (
-        !existing.deferredObservedTradeIds.includes(trade.id) &&
-        existing.deferredObservedTradeIds.length <
-          MAX_OBSERVED_TRADES_PER_RESPONSE
-      ) {
-        existing.deferredObservedTradeIds.push(trade.id);
-        existing.deferredObservedTrades.push(
-          compactObservedTrade(trade),
+      } else {
+        appendDeferredObservedTrade(
+          existing,
+          trade,
         );
       }
       continue;
@@ -10006,9 +11223,11 @@ export function schedulePublicFlowResponses(
       Math.max(
         Math.max(state.nowMs, trade.virtualMs) +
           agent.informationDelayMs,
-        agent.lastObservedTradeMs < 0
+        !isNonNegativeInteger(
+          agent.publicFlowMemory?.processedAtMs,
+        )
           ? 0
-          : agent.lastObservedTradeMs +
+          : agent.publicFlowMemory.processedAtMs +
             MIN_PUBLIC_RESPONSE_INTERVAL_MS,
       );
     const event = scheduleEcologyEvent(state, {
@@ -10065,9 +11284,11 @@ export function scheduleDeferredPublicFlowResponse(
       (trade) =>
         trade.virtualMs + agent.informationDelayMs,
     ),
-    agent.lastObservedTradeMs < 0
+    !isNonNegativeInteger(
+      agent.publicFlowMemory?.processedAtMs,
+    )
       ? 0
-      : agent.lastObservedTradeMs +
+      : agent.publicFlowMemory.processedAtMs +
         MIN_PUBLIC_RESPONSE_INTERVAL_MS,
   );
   const event = scheduleEcologyEvent(state, {

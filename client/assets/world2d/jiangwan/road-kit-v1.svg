@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 512" data-semantic-category="road" role="img" aria-label="江湾道路规则化源资产">
+  <defs>
+    <linearGradient id="wet-road" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#59605f"/>
+      <stop offset="1" stop-color="#333a39"/>
+    </linearGradient>
+    <pattern id="paver" width="64" height="32" patternUnits="userSpaceOnUse">
+      <path d="M0 16h64M32 0v16M0 16v16M64 16v16" fill="none" stroke="#8e8b83" stroke-width="2" opacity=".45"/>
+    </pattern>
+  </defs>
+  <g id="road-dry" data-material="mat_jiangwan_asphalt_v1">
+    <path d="M32 160 512 32l480 128-480 128z" fill="#3f4645" stroke="#26302f" stroke-width="8"/>
+    <path d="m128 160 384-96 384 96-384 96z" fill="none" stroke="#d4b56a" stroke-width="10" stroke-dasharray="72 48"/>
+    <path d="M32 160v64l480 128v-64zM992 160v64L512 352v-64z" fill="#a8a49a"/>
+    <path d="M32 224 512 352l480-128v64L512 416 32 288z" fill="url(#paver)"/>
+  </g>
+  <g id="road-wet" transform="translate(0 40)" opacity=".92">
+    <path d="M96 328 512 224l416 104-416 104z" fill="url(#wet-road)"/>
+    <path d="m320 356 192-48 192 48-192 48z" fill="#8cb6c2" opacity=".22"/>
+  </g>
+</svg>

@@ -1,6 +1,8 @@
 export const CONTRACT_RULE_VERSION =
-  'lzy-synthetic-derivative-contracts-v3';
+  'lzy-synthetic-derivative-contracts-v4';
 export const PREVIOUS_CONTRACT_RULE_VERSION =
+  'lzy-synthetic-derivative-contracts-v3';
+export const INTERMEDIATE_CONTRACT_RULE_VERSION =
   'lzy-synthetic-derivative-contracts-v2';
 export const LEGACY_CONTRACT_RULE_VERSION =
   'lzy-synthetic-derivative-contracts-v1';
@@ -50,7 +52,7 @@ function createEquityBasket({
   });
 }
 
-const PREVIOUS_DERIVATIVE_EQUITY_BASKETS =
+const INTERMEDIATE_DERIVATIVE_EQUITY_BASKETS =
   Object.freeze({
     SYNTH300: createEquityBasket({
       underlyingId: 'SYNTH300',
@@ -82,7 +84,7 @@ const PREVIOUS_DERIVATIVE_EQUITY_BASKETS =
     }),
   });
 
-export const DERIVATIVE_EQUITY_BASKETS = Object.freeze({
+const PREVIOUS_DERIVATIVE_EQUITY_BASKETS = Object.freeze({
   SYNTH300: createEquityBasket({
     underlyingId: 'SYNTH300',
     constituentSetVersion: 'lzy-synth300-constituents-v3',
@@ -119,6 +121,67 @@ export const DERIVATIVE_EQUITY_BASKETS = Object.freeze({
   }),
 });
 
+export const DERIVATIVE_EQUITY_BASKETS = Object.freeze({
+  SYNTH300: createEquityBasket({
+    underlyingId: 'SYNTH300',
+    constituentSetVersion: 'lzy-synth300-constituents-v4',
+    baseLevelTicks: 400_000,
+    constituentSymbols: [
+      'LZA001',
+      'LZA002',
+      'LZA003',
+      'LZB101',
+      'LZC201',
+      'LZD301',
+      'LZE401',
+      'LZF501',
+      'LZG601',
+      'LZH701',
+      'LZI801',
+      'LZJ901',
+      'LZK011',
+      'LZL121',
+      'LZM101',
+      'LZM102',
+      'LZM103',
+      'LZM104',
+      'LZM105',
+      'LZN201',
+      'LZN202',
+      'LZN203',
+      'LZN204',
+      'LZO301',
+      'LZO302',
+      'LZO303',
+      'LZO304',
+      'LZP401',
+      'LZP402',
+      'LZP403',
+      'LZP404',
+      'LZP405',
+    ],
+  }),
+  LZETF50: createEquityBasket({
+    underlyingId: 'LZETF50',
+    constituentSetVersion: 'lzy-lzetf50-constituents-v4',
+    baseLevelTicks: 320,
+    constituentSymbols: [
+      'LZA002',
+      'LZA003',
+      'LZB101',
+      'LZD301',
+      'LZI801',
+      'LZJ901',
+      'LZM101',
+      'LZN201',
+      'LZN202',
+      'LZN203',
+      'LZO301',
+      'LZP401',
+    ],
+  }),
+});
+
 export const DERIVATIVE_EQUITY_BASKET_VERSIONS =
   Object.freeze(
     Object.fromEntries(
@@ -126,6 +189,12 @@ export const DERIVATIVE_EQUITY_BASKET_VERSIONS =
         (underlyingId) => [
           underlyingId,
           Object.freeze({
+            [INTERMEDIATE_DERIVATIVE_EQUITY_BASKETS[
+              underlyingId
+            ].constituentSetVersion]:
+              INTERMEDIATE_DERIVATIVE_EQUITY_BASKETS[
+                underlyingId
+              ],
             [PREVIOUS_DERIVATIVE_EQUITY_BASKETS[
               underlyingId
             ].constituentSetVersion]:
@@ -1560,6 +1629,8 @@ export function migrateContractUniverse(universe) {
     universe?.ruleVersion !==
       PREVIOUS_CONTRACT_RULE_VERSION &&
     universe?.ruleVersion !==
+      INTERMEDIATE_CONTRACT_RULE_VERSION &&
+    universe?.ruleVersion !==
       LEGACY_CONTRACT_RULE_VERSION
   ) {
     throw new Error(
@@ -1571,14 +1642,19 @@ export function migrateContractUniverse(universe) {
     'legacy SYNTH300 spotTicks',
   );
   const savedUnderlyings = universe.underlyings;
-  if (
+  const historicalBasketSet =
     universe.ruleVersion === PREVIOUS_CONTRACT_RULE_VERSION
+      ? PREVIOUS_DERIVATIVE_EQUITY_BASKETS
+      : INTERMEDIATE_DERIVATIVE_EQUITY_BASKETS;
+  if (
+    universe.ruleVersion === PREVIOUS_CONTRACT_RULE_VERSION ||
+    universe.ruleVersion === INTERMEDIATE_CONTRACT_RULE_VERSION
   ) {
     for (const [
       underlyingId,
       previousBasket,
     ] of Object.entries(
-      PREVIOUS_DERIVATIVE_EQUITY_BASKETS,
+      historicalBasketSet,
     )) {
       const savedBasket =
         savedUnderlyings?.[underlyingId]?.basket;
@@ -1598,12 +1674,12 @@ export function migrateContractUniverse(universe) {
   const historicalReferences =
     referencesForSavedBaskets(
       savedUnderlyings,
-      PREVIOUS_DERIVATIVE_EQUITY_BASKETS,
+      historicalBasketSet,
     );
   const priorIdentityByUnderlying =
     Object.fromEntries(
       Object.entries(
-        PREVIOUS_DERIVATIVE_EQUITY_BASKETS,
+        historicalBasketSet,
       ).map(([underlyingId, basket]) => [
         underlyingId,
         equityBasketIdentity(underlyingId, basket),

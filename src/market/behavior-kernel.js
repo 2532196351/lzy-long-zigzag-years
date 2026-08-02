@@ -1531,6 +1531,7 @@ export function observeBehaviorState(
   {
     nowMs,
     symbols,
+    markPrices = symbols,
     publicTrades = [],
     capacityPressureBps = 0,
     fundingStressBps = 0,
@@ -1560,7 +1561,7 @@ export function observeBehaviorState(
   if (evaluatedEpisodes > 0) {
     behavior.memory.revision += 1;
   }
-  refreshBehaviorMarkToMarket(behavior, symbols);
+  refreshBehaviorMarkToMarket(behavior, markPrices);
   behavior.pressure.capacityBps = clamp(
     Math.round(capacityPressureBps),
     0,
@@ -1753,6 +1754,103 @@ export function observeBehaviorState(
   return behavior;
 }
 
+function openExposureMemoryContext(
+  behavior,
+  symbol,
+  nowMs,
+  lastPriceTicks,
+) {
+  const openExposureUnits =
+    behavior.account.settledNetUnits[symbol] ?? 0;
+  const exposureSide =
+    openExposureUnits > 0
+      ? 'buy'
+      : openExposureUnits < 0
+        ? 'sell'
+        : null;
+  const latestOwnFill = exposureSide
+    ? [...behavior.memory.episodes]
+        .reverse()
+        .find(
+          (episode) =>
+            episode.kind === 'own_fill' &&
+            episode.symbol === symbol &&
+            episode.side === exposureSide,
+        )
+    : null;
+  if (!latestOwnFill) {
+    return {
+      openExposureUnits,
+      latestOwnFill: null,
+      memoryInfluenceBps: 0,
+    };
+  }
+  const openExposureCostTicks =
+    behavior.account.openExposureCostTicks[symbol];
+  const unrealizedDirection =
+    latestOwnFill.side === 'buy'
+      ? lastPriceTicks - openExposureCostTicks
+      : openExposureCostTicks - lastPriceTicks;
+  let rawMemoryInfluenceBps = 0;
+  if (unrealizedDirection < 0) {
+    rawMemoryInfluenceBps =
+      latestOwnFill.side === 'buy'
+        ? Math.round(
+            behavior.persona.traits.lossAversionBps *
+              0.08,
+          )
+        : -Math.round(
+            behavior.persona.traits.lossAversionBps *
+              0.08,
+          );
+  } else if (unrealizedDirection > 0) {
+    rawMemoryInfluenceBps =
+      latestOwnFill.side === 'buy'
+        ? -Math.round(
+            behavior.persona.traits.dispositionBps *
+              0.08,
+          )
+        : Math.round(
+            behavior.persona.traits.dispositionBps *
+              0.08,
+          );
+  }
+  const openFractionBps = clamp(
+    Math.round(
+      Math.abs(openExposureUnits) *
+        10_000 /
+        Math.max(1, latestOwnFill.quantity),
+    ),
+    0,
+    10_000,
+  );
+  const ageMs = Math.max(
+    0,
+    nowMs - latestOwnFill.virtualMs,
+  );
+  const decayBps = clamp(
+    10_000 -
+      Math.floor(
+        Math.min(ageMs, MEMORY_EXPOSURE_DECAY_MS) *
+          10_000 /
+          MEMORY_EXPOSURE_DECAY_MS,
+      ),
+    0,
+    10_000,
+  );
+  return {
+    openExposureUnits,
+    latestOwnFill,
+    memoryInfluenceBps: Math.round(
+      Math.round(
+        rawMemoryInfluenceBps * openFractionBps / 10_000,
+      ) *
+        decayBps /
+        10_000,
+    ),
+  };
+}
+
 export function createRetailIntent({
   behavior,
   agentId,
@@ -1765,11 +1863,22 @@ export function createRetailIntent({
   freeUnitsBySymbol,
 }) {
   const candidates = behavior.cognition.attentionSymbols
-    .map((symbol) => ({
-      symbol,
-      belief: behavior.cognition.beliefs[symbol],
-      market: market[symbol],
-    }))
+    .map((symbol) => {
+      const candidateMarket = market[symbol];
+      return {
+        symbol,
+        belief: behavior.cognition.beliefs[symbol],
+        market: candidateMarket,
+        memoryContext: candidateMarket
+          ? openExposureMemoryContext(
+              behavior,
+              symbol,
+              nowMs,
+              candidateMarket.lastPriceTicks,
+            )
+          : null,
+      };
+    })
     .filter(
       (candidate) =>
         candidate.belief &&
@@ -1783,7 +1892,26 @@ export function createRetailIntent({
           Math.abs(left.belief.convictionBps) ||
         left.symbol.localeCompare(right.symbol),
     );
-  const selected = candidates[0];
+  const memoryReviewCandidates = candidates
+    .filter(
+      (candidate) =>
+        candidate.memoryContext
+          ?.memoryInfluenceBps !== 0,
+    )
+    .sort(
+      (left, right) =>
+        right.memoryContext.latestOwnFill.virtualMs -
+          left.memoryContext.latestOwnFill.virtualMs ||
+        left.symbol.localeCompare(right.symbol),
+    );
+  // A recent open gain or loss receives a bounded review slot every third
+  // decision. This makes learning causally reachable without increasing the
+  // actor cadence or allowing memory to dominate every fresh public signal.
+  const selected =
+    decisionSequence % 3 === 0 &&
+    memoryReviewCandidates.length > 0
+      ? memoryReviewCandidates[0]
+      : candidates[0];
   if (!selected) return null;
 
   const traits = behavior.persona.traits;
@@ -1825,79 +1953,12 @@ export function createRetailIntent({
   );
 
   const openExposureUnits =
-    behavior.account.settledNetUnits[selected.symbol];
-  const exposureSide =
-    openExposureUnits > 0
-      ? 'buy'
-      : openExposureUnits < 0
-        ? 'sell'
-        : null;
-  const latestOwnFill = exposureSide
-    ? [...behavior.memory.episodes]
-        .reverse()
-        .find(
-          (episode) =>
-            episode.kind === 'own_fill' &&
-            episode.symbol === selected.symbol &&
-            episode.side === exposureSide,
-        )
-    : null;
-  let memoryInfluenceBps = 0;
-  if (latestOwnFill) {
-    const openExposureCostTicks =
-      behavior.account.openExposureCostTicks[
-        selected.symbol
-      ];
-    const unrealizedDirection =
-      latestOwnFill.side === 'buy'
-        ? selected.market.lastPriceTicks -
-          openExposureCostTicks
-        : openExposureCostTicks -
-          selected.market.lastPriceTicks;
-    let rawMemoryInfluenceBps = 0;
-    if (unrealizedDirection < 0) {
-      rawMemoryInfluenceBps =
-        latestOwnFill.side === 'buy'
-          ? Math.round(traits.lossAversionBps * 0.08)
-          : -Math.round(traits.lossAversionBps * 0.08);
-    } else if (unrealizedDirection > 0) {
-      rawMemoryInfluenceBps =
-        latestOwnFill.side === 'buy'
-          ? -Math.round(traits.dispositionBps * 0.08)
-          : Math.round(traits.dispositionBps * 0.08);
-    }
-    const openFractionBps = clamp(
-      Math.round(
-        Math.abs(openExposureUnits) *
-          10_000 /
-          Math.max(1, latestOwnFill.quantity),
-      ),
-      0,
-      10_000,
-    );
-    const ageMs = Math.max(
-      0,
-      nowMs - latestOwnFill.virtualMs,
-    );
-    const decayBps = clamp(
-      10_000 -
-        Math.floor(
-          Math.min(ageMs, MEMORY_EXPOSURE_DECAY_MS) *
-            10_000 /
-            MEMORY_EXPOSURE_DECAY_MS,
-        ),
-      0,
-      10_000,
-    );
-    memoryInfluenceBps = Math.round(
-      Math.round(
-        rawMemoryInfluenceBps * openFractionBps / 10_000,
-      ) *
-        decayBps /
-        10_000,
-    );
-    scoreBps += memoryInfluenceBps;
-  }
+    selected.memoryContext.openExposureUnits;
+  const latestOwnFill =
+    selected.memoryContext.latestOwnFill;
+  const memoryInfluenceBps =
+    selected.memoryContext.memoryInfluenceBps;
+  scoreBps += memoryInfluenceBps;
 
   const populationParticipationBps = clamp(
     Math.round(

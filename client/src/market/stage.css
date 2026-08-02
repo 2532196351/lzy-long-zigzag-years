@@ -914,6 +914,85 @@
   align-content: start;
 }
 
+.lzy-stage__role-console {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: var(--space-3);
+  border-top: 3px solid var(--color-accent);
+}
+
+.lzy-stage__role-console-heading {
+  display: flex;
+  gap: var(--space-2);
+  align-items: start;
+  justify-content: space-between;
+}
+
+.lzy-stage__role-console-heading h3 {
+  margin: 0;
+  font-size: var(--text-md);
+}
+
+.lzy-stage__role-console > p {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+}
+
+.lzy-stage__role-console [data-stage-role-status][data-active="true"] {
+  border-color: var(--color-positive);
+  color: var(--color-positive);
+}
+
+.lzy-stage__role-console-metrics {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-canvas);
+}
+
+.lzy-stage__role-console-metrics > div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  padding: var(--space-2);
+  border-right: 1px solid var(--color-border);
+}
+
+.lzy-stage__role-console-metrics > div:last-child {
+  border-right: 0;
+}
+
+.lzy-stage__role-console-metrics dt {
+  color: var(--color-text-muted);
+  font-size: var(--text-2xs);
+}
+
+.lzy-stage__role-console-metrics dd {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums lining-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lzy-stage__role-console-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.lzy-stage__role-console-actions button {
+  min-height: 40px;
+  flex: 1 1 128px;
+  padding-inline: var(--space-2);
+}
+
 .lzy-stage__ticket {
   display: grid;
   gap: var(--space-3);
@@ -1587,6 +1666,17 @@
   text-align: right;
 }
 
+.lzy-stage__shareholders tbody th,
+.lzy-stage__shareholders tbody td {
+  white-space: pre-line;
+  line-height: 1.35;
+  vertical-align: top;
+}
+
+.lzy-stage__shareholders tbody th {
+  overflow-wrap: anywhere;
+}
+
 .lzy-stage__shareholders tr[data-stage-player-holder="true"] th,
 .lzy-stage__shareholders tr[data-stage-player-holder="true"] td {
   color: var(--color-accent);
@@ -1603,6 +1693,13 @@
 .lzy-stage__agent-heading {
   margin-bottom: var(--space-2);
   font-weight: 600;
+}
+
+.lzy-stage__agent-order {
+  margin: calc(var(--space-2) * -1) 0 var(--space-2);
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+  text-align: right;
 }
 
 .lzy-stage__agent-list {
@@ -1704,7 +1801,7 @@
 
   .lzy-stage__market-kind-switch--compact {
     width: min(300px, 45%);
-    display: grid;
+    display: none;
     margin: 0 auto;
   }
 
@@ -1860,6 +1957,10 @@
 }
 
 @media (max-width: 679px) {
+  .lzy-stage__market-kind-switch--compact {
+    display: grid;
+  }
+
   .lzy-market-stage {
     padding: var(--space-2);
     padding-bottom: calc(80px + env(safe-area-inset-bottom));
@@ -2666,6 +2767,15 @@
     display: none;
   }
 
+  .lzy-stage__right[data-drawer-mode="ticket"]
+    [data-stage-role-console],
+  .lzy-stage__right[data-drawer-mode="role"]
+    [data-stage-panel="ticket"],
+  .lzy-stage__right[data-drawer-mode="role"]
+    [data-stage-panel="risk"] {
+    display: none;
+  }
+
   .lzy-market-stage[data-order-sheet-open="true"] .lzy-stage__live {
     display: none;
   }
@@ -2811,6 +2921,10 @@
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: var(--space-1);
+  }
+
+  .lzy-stage__mobile-trade-dock[data-role-dock="true"] {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .lzy-market-stage[data-mobile-task="depth"]
@@ -3428,6 +3542,10 @@
 }
 
 @media (min-width: 960px) and (max-width: 1099px) {
+  .market-mode .lzy-stage__canvas-wrap canvas {
+    height: min(24svh, 198px);
+  }
+
   .market-mode
     .lzy-stage__right[data-drawer-mode="ticket"]
     .lzy-stage__ticket-grid {
@@ -3748,6 +3866,15 @@
   display: none !important;
 }
 
+.lzy-market-stage:is(
+    [data-market-mode="futures"],
+    [data-market-mode="options"]
+  )
+  .lzy-stage__right
+  [data-stage-role-console] {
+  display: block;
+}
+
 @media (max-width: 679px) {
   .lzy-market-stage:is(
       [data-market-mode="futures"],
@@ -3815,68 +3942,195 @@
 }
 
 @media (min-width: 680px) {
-  .lzy-market-stage:is(
-      [data-market-mode="futures"],
-      [data-market-mode="options"]
-    )
-    .lzy-stage__grid {
+  .lzy-market-stage .lzy-stage__grid {
     display: grid;
     grid-template-columns:
-      minmax(144px, 0.72fr)
-      minmax(0, 1.2fr)
-      minmax(224px, 1fr);
+      clamp(144px, 17vw, 220px)
+      minmax(0, 1fr)
+      clamp(224px, 28vw, 360px);
     grid-template-rows: minmax(0, 1fr);
     gap: var(--space-1);
     align-items: stretch;
     overflow: hidden;
   }
 
-  .lzy-market-stage:is(
-      [data-market-mode="futures"],
-      [data-market-mode="options"]
-    )
+  .lzy-market-stage
     :is(
-      .lzy-stage__symbols,
-      .lzy-stage__workspace,
-      .lzy-stage__right
-    ) {
+        .lzy-stage__symbols,
+        .lzy-stage__workspace,
+        .lzy-stage__right
+      ) {
     position: static;
     inset: auto;
     grid-row: 1;
-    height: 100%;
     min-height: 0;
-    max-height: calc(100svh - 52px);
-    display: block;
     margin: 0;
-    padding: var(--space-2);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-md);
-    background: var(--lzy-stage-panel);
-    box-shadow: var(--shadow-1);
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+    transform: none;
   }
 
-  .lzy-market-stage:is(
-      [data-market-mode="futures"],
-      [data-market-mode="options"]
-    )
-    .lzy-stage__symbols {
+  .lzy-market-stage .lzy-stage__symbols {
+    display: grid;
     grid-column: 1;
   }
 
-  .lzy-market-stage:is(
-      [data-market-mode="futures"],
-      [data-market-mode="options"]
-    )
-    .lzy-stage__workspace {
+  .lzy-market-stage .lzy-stage__workspace {
+    display: block;
     grid-column: 2;
   }
 
-  .lzy-market-stage:is(
-      [data-market-mode="futures"],
-      [data-market-mode="options"]
-    )
-    .lzy-stage__right {
+  .lzy-market-stage .lzy-stage__center {
+    grid-column: auto;
+  }
+
+  .lzy-market-stage .lzy-stage__right,
+  .lzy-market-stage
+    .lzy-stage__right[data-task-page="funds"] {
     z-index: auto;
+    position: static;
     grid-column: 3;
+    grid-row: 1;
+    max-height: none;
+    display: block;
+    padding: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  .lzy-market-stage .lzy-stage__symbol-list {
+    display: grid;
+    overflow-x: hidden;
+    overflow-y: visible;
+    padding-bottom: 0;
+  }
+
+  .lzy-market-stage .lzy-stage__symbol-list > button {
+    min-width: 0;
+  }
+}
+
+@media (min-width: 1280px) {
+  .lzy-market-stage .lzy-stage__grid {
+    grid-template-columns: 220px minmax(0, 1fr) 360px;
+  }
+}
+
+/*
+ * Compact desktop keeps the same stock/futures/options shell: the left rail
+ * becomes the shared native symbol selector and the remaining quote/trade
+ * columns keep identical bounds.  This avoids squeezing a four-field order
+ * book into a third narrow rail at 680–959px.
+ */
+@media (min-width: 680px) and (max-width: 959px) {
+  .lzy-market-stage .lzy-stage__grid {
+    grid-template-columns:
+      minmax(128px, 18vw)
+      minmax(0, 1fr)
+      minmax(220px, 30vw);
+    align-items: stretch;
+    overflow: hidden;
+  }
+
+  .lzy-market-stage .lzy-stage__symbols {
+    display: grid;
+  }
+
+  .lzy-market-stage .lzy-stage__workspace {
+    grid-column: 2;
+  }
+
+  .lzy-market-stage .lzy-stage__right,
+  .lzy-market-stage
+    .lzy-stage__right[data-task-page="funds"] {
+    position: static;
+    z-index: auto;
+    top: auto;
+    grid-row: 1;
+    grid-column: 3;
+    max-height: none;
+  }
+}
+
+/*
+ * At the narrowest desktop width the native symbol selector in the market
+ * chrome owns selection.  Keep the quote and action columns usable instead
+ * of squeezing a redundant rail between them.
+ */
+@media (min-width: 680px) and (max-width: 799px) {
+  .lzy-market-stage .lzy-stage__grid {
+    grid-template-columns: minmax(390px, 1fr) minmax(260px, 300px);
+  }
+
+  .lzy-market-stage .lzy-stage__symbols {
+    display: none;
+  }
+
+  .lzy-market-stage .lzy-stage__workspace {
+    grid-column: 1;
+  }
+
+  .lzy-market-stage .lzy-stage__right,
+  .lzy-market-stage
+    .lzy-stage__right[data-task-page="funds"] {
+    position: sticky;
+    z-index: 8;
+    top: var(--space-1);
+    grid-column: 2;
+    max-height: calc(100svh - 8px);
+  }
+}
+
+@media (min-width: 800px) and (max-width: 959px) {
+  .market-mode
+    .lzy-stage__right[data-drawer-mode="ticket"]
+    .lzy-stage__ticket-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .market-mode
+    .lzy-stage__right[data-drawer-mode="ticket"]
+    .lzy-stage__price-control {
+    grid-template-columns: 24px minmax(0, 1fr) 24px;
+    gap: 2px;
+  }
+
+  .lzy-stage__book-panel th:nth-child(2),
+  .lzy-stage__book-panel td:nth-child(2),
+  .lzy-stage__book-col-price {
+    width: 28%;
+  }
+
+  .lzy-stage__book-panel th:nth-child(3),
+  .lzy-stage__book-panel td:nth-child(3),
+  .lzy-stage__book-col-quantity {
+    width: 38%;
+  }
+
+  .lzy-market-stage .lzy-stage__book-table th,
+  .lzy-market-stage .lzy-stage__book-table td {
+    padding-inline: 1px;
+    font-size: 8px;
+  }
+}
+
+@media (min-width: 960px) {
+  .market-mode .lzy-stage__symbols,
+  .market-mode .lzy-stage__symbol-list {
+    align-content: start;
+  }
+
+  .market-mode .lzy-stage__symbol-list {
+    grid-auto-rows: minmax(52px, max-content);
+    overflow: visible;
+  }
+
+  .market-mode .lzy-stage__symbol-list > button {
+    min-height: 52px;
   }
 }

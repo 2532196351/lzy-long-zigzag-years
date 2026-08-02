@@ -6,25 +6,56 @@ import {
   snapshotMarket,
   snapshotMarketCommandPatch,
   snapshotRealtimeLevel2,
-} from './simulator.js?v=20260801-01';
+} from './simulator.js?v=20260803-02';
 import {
+  getCompanyCatalog,
   getDerivativesProjection,
+  getEntertainmentProjection,
   getLifeProjection,
-} from '../engine.js?v=20260801-01';
+} from '../engine.js?v=20260803-02';
+import { buildCompanyUniverseV2 } from '../content/company-universe-v2.js?v=20260803-02';
+import { projectOpenWorldCityFromWorld } from '../experience/open-world-city-authority.js?v=20260803-02';
+import { projectWorld2D } from '../world2d/index.js?v=20260803-02';
+import {
+  AUDIT_COLD_TRANSPORT_SCHEMA,
+  validAuditColdReference,
+} from './audit-cold-store.js?v=20260803-02';
 
 const NORMAL_VIRTUAL_RATE = 3;
 const PLAYBACK_VERIFICATION_INTERVAL_MS = 300_000;
 const PLAYBACK_WALL_SLICE_BUDGET_MS_BY_SPEED = Object.freeze({
   1: 12,
   4: 16,
-  16: 64,
+  // A playback task can already be running when a player command reaches the
+  // Worker queue. Keep its cooperative slice below the interaction tail
+  // budget so the queued command still has room for matching and transport.
+  // The remaining virtual debt is retained and resumed by the next wake.
+  16: 12,
 });
 const COMMAND_WALL_SLICE_BUDGET_MS_BY_SPEED = Object.freeze({
   1: 12,
   4: 16,
+  // The simulator prepares the exact phase boundary after this cooperative
+  // catch-up slice, so interaction latency no longer depends on draining a
+  // whole autonomous burst before accepting a player order. Keep the command
+  // slice at the same twelve-millisecond ceiling as ordinary playback; the
+  // zero-delay wake retains accelerated debt without charging it to the next
+  // player acknowledgement.
   16: 12,
 });
-const ORDER_COMMANDS_PER_FULL_VERIFICATION = 64;
+const PLAYBACK_FAIRNESS_DELAY_MS_BY_SPEED = Object.freeze({
+  1: 1,
+  4: 1,
+  // The bounded catch-up slice already returns to WebKit's task queue before
+  // every continuation. Retain one real timer turn so posted player messages
+  // remain dispatchable without charging an extra idle millisecond to every
+  // saturated accelerated slice.
+  16: 1,
+});
+// Every order receives the command-local conservation and audit-chain proof.
+// Complete scans belong to playback-idle periodic work and unconditional
+// pause/save/restore barriers; an acknowledgement must never inherit a
+// history-wide scan merely because it happens to cross a cadence threshold.
 const LEVEL2_MIN_WALL_INTERVAL_MS = 32;
 const NORMAL_VISIBLE_QUOTE_INTERVAL_MS = 9_000;
 const PUBLICATION_CREDIT_SCHEMA =
@@ -61,6 +92,9 @@ const MAX_ADVANCE_VIRTUAL_MS = 300_000;
 const EXTERNAL_PLAYER_ID = 'player';
 const EXTERNAL_PLAYER_BROKER_ID = 'broker_lzy';
 const PUBLIC_WORLD_SCHEMA = 'lzy_world_public_v1';
+const PUBLIC_COMPANY_UNIVERSE_V2 = buildCompanyUniverseV2(
+  getCompanyCatalog(),
+);
 const PUBLIC_RECORD_LIMITS = Object.freeze({
   clues: 83,
   facts: 96,
@@ -103,6 +137,16 @@ const EXTERNAL_WORLD_COMMAND_FIELDS = Object.freeze({
     'actorId',
     'action',
   ]),
+  player_control: new Set([
+    'type',
+    'actorId',
+    'commandId',
+    'baseCommitSeq',
+    'sceneId',
+    'geometryRevision',
+    'controlSeq',
+    'control',
+  ]),
 });
 
 function cloneValue(value) {
@@ -135,6 +179,17 @@ function publicCompany(company) {
     shortName: company.shortName,
     role: company.role,
     description: company.description,
+    lifecycle: company.lifecycle,
+    industry: company.industry,
+    informationTransparencyBps:
+      company.informationTransparencyBps,
+    management: company.management,
+    macroExposures: company.macroExposures,
+    supplierCompanyIds: company.supplierCompanyIds,
+    customerCompanyIds: company.customerCompanyIds,
+    businessModel: company.businessModel,
+    products: company.products,
+    researchPrograms: company.researchPrograms,
     publishedFinancialSnapshot:
       company.publishedFinancialSnapshot,
   };
@@ -183,7 +238,7 @@ function publicLedgerAccount(account) {
   return '其他往来';
 }
 
-export function projectPublicWorldExperience(world) {
+export function projectPublicWorldExperience(world, context = {}) {
   const {
     city: _cityAuthority,
     ...life
@@ -223,6 +278,12 @@ export function projectPublicWorldExperience(world) {
   return {
     publication: 'lzy_world_experience_public_v1',
     life,
+    world2d: projectWorld2D(world),
+    openWorldCity: projectOpenWorldCityFromWorld(
+      world,
+      context,
+    ),
+    entertainment: getEntertainmentProjection(world, context),
     recordTotals,
     recordsTruncated: Object.fromEntries(
       Object.entries(recordTotals).map(([key, count]) => [
@@ -276,7 +337,7 @@ export function projectPublicWorldExperience(world) {
   };
 }
 
-function publicWorldState(world) {
+function publicWorldState(world, context = {}) {
   return cloneValue({
     world: {
       id: world.world.id,
@@ -298,6 +359,7 @@ function publicWorldState(world) {
           ],
         ),
       ),
+      companyUniverseV2: PUBLIC_COMPANY_UNIVERSE_V2,
     },
     economy: world.economy,
     market: {
@@ -314,7 +376,7 @@ function publicWorldState(world) {
       marketDataProducts: world.market.marketDataProducts,
       valuation: world.market.valuation,
     },
-    experience: projectPublicWorldExperience(world),
+    experience: projectPublicWorldExperience(world, context),
   });
 }
 
@@ -631,7 +693,14 @@ function publicWorldEnvelope(
   state,
   { derivatives = null } = {},
 ) {
-  const worldState = publicWorldState(state.world);
+  const worldState = publicWorldState(state.world, {
+    authorityCommitSeq: state.commitSeq,
+    virtualTime: state.nowMs,
+    worldEpoch: state.streamId,
+    availableCashCents:
+      state.accounts?.player?.cashCents ??
+      Math.round(state.world.player.cash * 100),
+  });
   worldState.derivatives =
     derivatives ?? publicDerivativesProjection(state);
   return {
@@ -666,6 +735,50 @@ function publicWorldCommandPatch(state, symbol) {
             state.world.market.securities[symbol],
           ),
         },
+      },
+    }),
+  };
+}
+
+function publicWorldSpatialPatch(state) {
+  return {
+    publication: PUBLIC_WORLD_SCHEMA,
+    publicationMode: 'spatial_delta',
+    commitSeq: state.commitSeq,
+    state: redactPrivatePublication({
+      world: {
+        id: state.world.world.id,
+        tick: state.world.world.tick,
+        calendar: state.world.world.calendar,
+      },
+      experience: {
+        publication: 'lzy_world_experience_public_v1',
+        world2d: projectWorld2D(state.world, {
+          authorityCommitSeq: state.commitSeq,
+        }),
+        openWorldCity: projectOpenWorldCityFromWorld(
+          state.world,
+          {
+            authorityCommitSeq: state.commitSeq,
+            virtualTime: state.nowMs,
+            worldEpoch: state.streamId,
+            availableCashCents: Math.max(
+              0,
+              state.accounts.player.cashCents -
+                state.accounts.player.reservedCashCents,
+            ),
+          },
+        ),
+        entertainment: getEntertainmentProjection(
+          state.world,
+          {
+            authorityCommitSeq: state.commitSeq,
+            virtualTime: state.nowMs,
+            worldEpoch: state.streamId,
+            availableCashCents:
+              state.accounts.player.cashCents,
+          },
+        ),
       },
     }),
   };
@@ -962,9 +1075,87 @@ export function createMarketWorkerController({
   let inFlightQuotePublication = null;
   let pendingLevel2Publication = null;
   let pendingQuotePublication = null;
+  // The Worker and client consume one ordered message stream. Remember the
+  // latest full depth projection that was actually posted so ordinary quote
+  // frames can transport only changed price levels. This is a transport
+  // baseline, never authority and never part of SAVE_BARRIER state.
+  let quoteDepthBaseline = null;
   let deferredFixedEndpointFrames = [];
   let pendingPauseMessage = null;
+  let activePlaybackTaskTrace = null;
+  let lastPlaybackTaskTrace = null;
+  let lastPublicationAckTrace = null;
   let destroyed = false;
+
+  function auditColdStoreForInit(message) {
+    const transport = message.auditColdTransport;
+    if (transport === undefined || transport === null) return null;
+    if (
+      transport.schema !== AUDIT_COLD_TRANSPORT_SCHEMA ||
+      !Array.isArray(transport.verifiedReferences)
+    ) {
+      throw new TypeError('Invalid realtime-audit cold transport.');
+    }
+    const known = new Map();
+    for (const reference of transport.verifiedReferences) {
+      if (!validAuditColdReference(reference)) {
+        throw new TypeError(
+          'Invalid verified realtime-audit cold reference.',
+        );
+      }
+      const previous = known.get(reference.key);
+      if (
+        previous &&
+        (
+          previous.kind !== reference.kind ||
+          previous.digest !== reference.digest ||
+          previous.encodedCharacters !==
+            reference.encodedCharacters
+        )
+      ) {
+        throw new TypeError(
+          'Conflicting verified realtime-audit cold reference.',
+        );
+      }
+      known.set(reference.key, cloneValue(reference));
+    }
+    return {
+      put(record) {
+        if (
+          destroyed ||
+          !validAuditColdReference(record) ||
+          typeof record.value !== 'string' ||
+          record.value.length !== record.encodedCharacters
+        ) {
+          return false;
+        }
+        post({
+          type: 'AUDIT_COLD_RECORD',
+          schema: AUDIT_COLD_TRANSPORT_SCHEMA,
+          record,
+        });
+        known.set(record.key, {
+          schema: record.schema,
+          kind: record.kind,
+          key: record.key,
+          digest: record.digest,
+          encodedCharacters: record.encodedCharacters,
+        });
+        return true;
+      },
+      has(reference) {
+        if (!validAuditColdReference(reference)) return false;
+        const entry = known.get(reference.key);
+        return Boolean(
+          entry &&
+            entry.kind === reference.kind &&
+            entry.digest === reference.digest &&
+            entry.encodedCharacters ===
+              reference.encodedCharacters,
+        );
+      },
+    };
+  }
 
   function noteFullVerification() {
     lastVerifiedVirtualMs = state.nowMs;
@@ -981,7 +1172,20 @@ export function createMarketWorkerController({
   }
 
   function post(message) {
-    if (!destroyed) port.postMessage(message);
+    if (destroyed) return;
+    const startedAt = activePlaybackTaskTrace
+      ? now()
+      : null;
+    port.postMessage(message);
+    if (activePlaybackTaskTrace) {
+      const durationMs = now() - startedAt;
+      activePlaybackTaskTrace.postMs += durationMs;
+      activePlaybackTaskTrace.postCount += 1;
+      activePlaybackTaskTrace.postByType[message?.type ?? 'UNKNOWN'] =
+        (activePlaybackTaskTrace.postByType[
+          message?.type ?? 'UNKNOWN'
+        ] ?? 0) + durationMs;
+    }
   }
 
   function requireState() {
@@ -1152,6 +1356,54 @@ export function createMarketWorkerController({
     );
   }
 
+  function mergePendingTradeDeltas(previous, next) {
+    const byId = new Map();
+    for (const trade of [
+      ...(Array.isArray(previous) ? previous : []),
+      ...(Array.isArray(next) ? next : []),
+    ]) {
+      if (typeof trade?.id !== 'string') continue;
+      byId.set(trade.id, trade);
+    }
+    return [...byId.values()].sort(
+      (left, right) =>
+        Number(left.virtualMs) - Number(right.virtualMs) ||
+        Number(left.sequence) - Number(right.sequence) ||
+        left.id.localeCompare(right.id),
+    );
+  }
+
+  function mergePendingQuoteMarket(previous, next) {
+    if (!previous) return next;
+    if (!next) return previous;
+    const symbols = { ...previous.symbols };
+    for (const [symbol, current] of Object.entries(
+      next.symbols ?? {},
+    )) {
+      const prior = previous.symbols?.[symbol];
+      symbols[symbol] = prior
+        ? {
+            ...prior,
+            ...current,
+            ultraTradeDeltas:
+              mergePendingTradeDeltas(
+                prior.ultraTradeDeltas,
+                current.ultraTradeDeltas,
+              ),
+          }
+        : current;
+    }
+    return {
+      ...previous,
+      ...next,
+      symbols,
+      tradeDeltas: mergePendingTradeDeltas(
+        previous.tradeDeltas,
+        next.tradeDeltas,
+      ),
+    };
+  }
+
   function deferLevel2Publication({
     mutationCount,
     fromExclusiveVirtualMs,
@@ -1269,7 +1521,15 @@ export function createMarketWorkerController({
       pending.current.wallPublishedAt =
         next.wallPublishedAt ??
         pending.current.wallPublishedAt;
-      pending.current.market = next.market;
+      // Credit coalescing may replace several fixed endpoints with one
+      // publication, but every skipped endpoint's settled tape delta remains
+      // part of the recipient information set. Keep the newest quote/depth
+      // fields while losslessly accumulating those bounded deltas.
+      pending.current.market =
+        mergePendingQuoteMarket(
+          pending.current.market,
+          next.market,
+        );
       pending.current.derivativesProjection =
         next.derivativesProjection;
       pending.current.authorityCommitSeq =
@@ -1348,16 +1608,25 @@ export function createMarketWorkerController({
       Number.isSafeInteger(authorityCommitSeq)
         ? authorityCommitSeq
         : state.commitSeq;
-    const market = resync
+    const fullMarket = resync
       ? snapshotMarket(state)
       : preparedMarket ??
         framePublicationWithUltraDeltas(frames);
     const trace = attachPublicationTrace(
-      market,
+      fullMarket,
       frame.virtualMs,
       wallPublishedAt,
       resolvedCommitSeq,
     );
+    const market =
+      publicationCreditEnabled &&
+      creditControlled &&
+      !resync
+        ? compactLevel2DepthTransport(
+            quoteDepthBaseline,
+            fullMarket,
+          )
+        : fullMarket;
     if (
       resync ||
       (
@@ -1400,6 +1669,7 @@ export function createMarketWorkerController({
         derivatives.sequence;
     }
     post(message);
+    quoteDepthBaseline = fullMarket;
     return true;
   }
 
@@ -1667,6 +1937,7 @@ export function createMarketWorkerController({
   ) {
     const market = snapshotMarket(sourceState, {
       framePublication: true,
+      transportOwned: true,
     });
     const visibleThroughMs = Number(
       frames.at(-1)?.virtualMs,
@@ -1681,18 +1952,31 @@ export function createMarketWorkerController({
     // grow with the live window and consumed the 16× command budget.
     market.tradeDeltas = (market.trades ?? []).filter(
       (trade) =>
-        Number(trade.virtualMs) > visibleAfterMs &&
+        // A later authority mutation may settle at the exact millisecond of
+        // the prior visible endpoint. Re-sending that boundary is harmless
+        // because the client deduplicates by trade id; excluding it would
+        // permanently hide same-millisecond fills that committed after the
+        // earlier publication.
+        Number(trade.virtualMs) >= visibleAfterMs &&
         Number(trade.virtualMs) <= visibleThroughMs,
     );
     delete market.trades;
     for (const symbol of Object.keys(market.symbols ?? {})) {
+      const symbolPublication = market.symbols[symbol];
+      if (symbolPublication.level2Depth) {
+        // The top-ten rows are an exact prefix of the same authoritative
+        // depth.  Transport the depth once; the client materializes that
+        // prefix before publishing the frame to the UI.
+        delete symbolPublication.bids;
+        delete symbolPublication.asks;
+      }
       const byId = new Map();
       for (const trade of [
         ...frames.flatMap(
           (frame) =>
             frame?.symbols?.[symbol]?.ultraTradeDeltas ?? [],
         ),
-        ...(market.symbols[symbol].ultraTradeDeltas ?? []),
+        ...(symbolPublication.ultraTradeDeltas ?? []),
       ]) {
         const id =
           typeof trade?.id === 'string'
@@ -1700,7 +1984,7 @@ export function createMarketWorkerController({
             : `${symbol}:${trade?.virtualMs}:${trade?.sequence}`;
         byId.set(id, trade);
       }
-      market.symbols[symbol].ultraTradeDeltas =
+      symbolPublication.ultraTradeDeltas =
         [...byId.values()].sort(
           (left, right) =>
             Number(left.virtualMs) - Number(right.virtualMs) ||
@@ -1746,6 +2030,7 @@ export function createMarketWorkerController({
     let level2MutationCount = 0;
     let level2EligibleEvents = [];
     let firstLevel2MutationMs = state.nowMs;
+    let latestSpatialMotion = null;
     let sharedWallPublishedAt = wallPublishedAt;
     const publicationWallTime = () => {
       sharedWallPublishedAt ??= now();
@@ -1764,6 +2049,13 @@ export function createMarketWorkerController({
           performanceEventTrace.byType[event.type] =
             (performanceEventTrace.byType[event.type] ?? 0) +
             1;
+          performanceEventTrace.durationMs += durationMs;
+          performanceEventTrace.durationByType[event.type] =
+            (
+              performanceEventTrace.durationByType[
+                event.type
+              ] ?? 0
+            ) + durationMs;
           if (
             !performanceEventTrace.slowest ||
             durationMs >
@@ -1791,6 +2083,12 @@ export function createMarketWorkerController({
           level2MutationCount +=
             eligibleEvent.mutationCount;
           level2EligibleEvents.push(eligibleEvent);
+        }
+        if (event.type === 'player_motion_step') {
+          latestSpatialMotion = {
+            scheduledMs: event.scheduledMs,
+            commitSeq: draft.commitSeq,
+          };
         }
         if (event.type !== 'quote_frame') return;
         crossedFrameCount += 1;
@@ -1826,13 +2124,35 @@ export function createMarketWorkerController({
       verifyState,
       reuseVerifiedArchives,
       shouldYield,
+      deferWorldOrderMirrorFlush: !verifyState,
     });
     if (verifyState) noteFullVerification();
+    if (latestSpatialMotion) {
+      post({
+        type: 'WORLD2D_UPDATE',
+        worldPatch: publicWorldSpatialPatch(state),
+        authorityTrace: {
+          schema: 'lzy_world2d_authority_trace_v1',
+          eventType: 'player_motion_step',
+          scheduledMs: latestSpatialMotion.scheduledMs,
+          authorityCommitSeq: latestSpatialMotion.commitSeq,
+        },
+        wallPublishedAt: publicationWallTime(),
+      });
+    }
     if (level2MutationCount > 0) {
+      const affectedSymbols = [
+        ...new Set(
+          level2EligibleEvents.flatMap(
+            (event) => event.symbols,
+          ),
+        ),
+      ].sort();
       emitRealtimeLevel2({
         mutationCount: level2MutationCount,
         fromExclusiveVirtualMs: firstLevel2MutationMs,
         wallPublishedAt: publicationWallTime(),
+        symbols: affectedSymbols,
         eligibleEvents: level2EligibleEvents,
         creditControlled,
       });
@@ -1926,6 +2246,8 @@ export function createMarketWorkerController({
       ? {
           count: 0,
           byType: {},
+          durationMs: 0,
+          durationByType: {},
           slowest: null,
         }
       : null;
@@ -1976,10 +2298,14 @@ export function createMarketWorkerController({
     const nextBoundaryMs =
       (Math.floor(state.nowMs / state.quoteFrameMs) + 1) *
       state.quoteFrameMs;
+    const nextQueuedEvent = state.eventQueue?.[0];
     const nextEventMs =
-      realtimeLevel2Entitled() &&
-      Number.isSafeInteger(state.eventQueue?.[0]?.scheduledMs)
-        ? state.eventQueue[0].scheduledMs
+      (
+        realtimeLevel2Entitled() ||
+        nextQueuedEvent?.type === 'player_motion_step'
+      ) &&
+      Number.isSafeInteger(nextQueuedEvent?.scheduledMs)
+        ? nextQueuedEvent.scheduledMs
         : null;
     const nextTargetMs =
       nextEventMs !== null && nextEventMs < nextBoundaryMs
@@ -2001,7 +2327,8 @@ export function createMarketWorkerController({
       // behind wall time. Continue on the next task turn; the 32ms Level-2
       // paint cadence is a publication limit, not permission to leave
       // deterministic market work asleep.
-      delayMs = 0;
+      delayMs =
+        PLAYBACK_FAIRNESS_DELAY_MS_BY_SPEED[speed];
     } else if (nextTargetMs !== nextBoundaryMs) {
       delayMs = Math.min(
         boundaryDelayMs,
@@ -2011,10 +2338,11 @@ export function createMarketWorkerController({
         ),
       );
     }
-    // A fractional timer can wake one floating-point ulp before its exact
-    // virtual target. Rescheduling that same sub-ulp delay does not advance a
-    // deterministic clock and can busy-spin a real browser timer as well.
-    if (wallMs + delayMs <= wallMs || delayMs < 1) {
+    // Keep sub-millisecond authority boundaries exact. Browsers may clamp the
+    // timer themselves, but rounding every fractional remainder up to a full
+    // millisecond can put a fixed quote endpoint behind its wall mapping. Only
+    // guard the true floating-point no-progress case.
+    if (wallMs + delayMs <= wallMs) {
       delayMs = 1;
     }
     timerId = scheduleTimeout(wake, delayMs);
@@ -2023,6 +2351,16 @@ export function createMarketWorkerController({
   function wake() {
     timerId = null;
     if (!playing || destroyed) return;
+    const startedAt = now();
+    const playbackTaskTrace = {
+      startedAt,
+      postMs: 0,
+      postCount: 0,
+      postByType: {},
+      totalMs: null,
+      nonPostMs: null,
+    };
+    activePlaybackTaskTrace = playbackTaskTrace;
     try {
       syncToWall({
         verifyState: false,
@@ -2039,6 +2377,12 @@ export function createMarketWorkerController({
         requestType: 'PLAY',
         message: errorMessage(error),
       });
+    } finally {
+      playbackTaskTrace.totalMs = now() - startedAt;
+      playbackTaskTrace.nonPostMs =
+        playbackTaskTrace.totalMs - playbackTaskTrace.postMs;
+      lastPlaybackTaskTrace = playbackTaskTrace;
+      activePlaybackTaskTrace = null;
     }
   }
 
@@ -2053,16 +2397,24 @@ export function createMarketWorkerController({
       ...extra,
     };
     const trace = acknowledgement.performanceTrace;
-    if (trace && typeof trace === 'object') {
+    if (
+      trace &&
+      typeof trace === 'object' &&
+      trace.messageBytes !== null
+    ) {
       trace.messageBytes = 0;
       const encoder = new TextEncoder();
-      for (let iteration = 0; iteration < 3; iteration += 1) {
-        const bytes = encoder.encode(
-          JSON.stringify(acknowledgement),
-        ).byteLength;
-        if (trace.messageBytes === bytes) break;
-        trace.messageBytes = bytes;
+      const zeroBytes = encoder.encode(
+        JSON.stringify(acknowledgement),
+      ).byteLength;
+      let exactBytes = zeroBytes;
+      while (true) {
+        const nextBytes =
+          zeroBytes - 1 + String(exactBytes).length;
+        if (nextBytes === exactBytes) break;
+        exactBytes = nextBytes;
       }
+      trace.messageBytes = exactBytes;
     }
     post(acknowledgement);
   }
@@ -2070,7 +2422,17 @@ export function createMarketWorkerController({
   function runWorldCommand(message) {
     requireState();
     const command = externalWorldCommand(message.command);
-    const traced = message.performanceTrace === true;
+    const traceRequest = message.performanceTrace;
+    const traced =
+      traceRequest === true ||
+      (
+        traceRequest !== null &&
+        typeof traceRequest === 'object' &&
+        !Array.isArray(traceRequest)
+      );
+    const measureMessageBytes =
+      traceRequest === true ||
+      traceRequest?.messageBytes !== false;
     const performanceTrace = traced
       ? {
           schema:
@@ -2081,10 +2443,18 @@ export function createMarketWorkerController({
           cloneRoots: 0,
           phases: [],
           publicationCredit: null,
-          messageBytes: 0,
+          messageBytes: measureMessageBytes ? 0 : null,
           realtimeAudit: null,
           catchUpEvents: null,
           projectionParts: null,
+          previousPlaybackTask:
+            lastPlaybackTaskTrace
+              ? cloneValue(lastPlaybackTaskTrace)
+              : null,
+          previousPublicationAck:
+            lastPublicationAckTrace
+              ? cloneValue(lastPublicationAckTrace)
+              : null,
         }
       : null;
     const tracePhase = (name) => {
@@ -2096,6 +2466,10 @@ export function createMarketWorkerController({
     const incrementalOrder =
       command.type === 'submit_order' ||
       command.type === 'cancel_order';
+    const incrementalSpatial =
+      command.type === 'player_control';
+    const incrementalCommand =
+      incrementalOrder || incrementalSpatial;
     const commandSymbol = incrementalOrder
       ? stockCommandSymbol(command)
       : null;
@@ -2105,8 +2479,9 @@ export function createMarketWorkerController({
       // The incremental transaction clones one target book plus eight
       // explicitly named authority roots. This is structural diagnostics,
       // not a traversal that would itself distort the measured command.
-      performanceTrace.cloneRoots =
-        incrementalOrder && commandSymbol
+      performanceTrace.cloneRoots = incrementalSpatial
+        ? 4
+        : incrementalOrder && commandSymbol
           ? 9
           : 1;
     }
@@ -2128,14 +2503,19 @@ export function createMarketWorkerController({
     if (playing) {
       syncToWall({
         rebase: true,
-        verifyState: !incrementalOrder,
-        verifyPeriodically: incrementalOrder,
-        yieldToCommands: incrementalOrder,
+        verifyState: !incrementalCommand,
+        // A playing order first performs a bounded deterministic catch-up and
+        // then its command-local proof.  Periodic full scans remain owned by
+        // playback wakes and barriers so crossing the five-minute audit
+        // cadence cannot turn one otherwise identical order into a long UI
+        // stall.
+        verifyPeriodically: false,
+        yieldToCommands: incrementalCommand,
         wallSliceBudgetMs:
           COMMAND_WALL_SLICE_BUDGET_MS_BY_SPEED[speed],
         performanceTrace,
       });
-    } else if (!incrementalOrder) {
+    } else if (!incrementalCommand) {
       verifyCurrentState();
     }
     try {
@@ -2143,9 +2523,9 @@ export function createMarketWorkerController({
       const transactionParts =
         performanceTrace ? {} : null;
       const transaction = processExternalCommand(state, command, {
-        verification: incrementalOrder ? 'incremental' : 'full',
+        verification: incrementalCommand ? 'incremental' : 'full',
         performanceTrace: transactionParts,
-        reuseVerifiedArchives: incrementalOrder,
+        reuseVerifiedArchives: incrementalCommand,
       });
       if (performanceTrace) {
         performanceTrace.transactionParts =
@@ -2160,21 +2540,7 @@ export function createMarketWorkerController({
             orderCommandsSinceFullVerification;
           performanceTrace.postCommandVerificationMs = 0;
         }
-        if (
-          orderCommandsSinceFullVerification >=
-          ORDER_COMMANDS_PER_FULL_VERIFICATION
-        ) {
-          const verificationStartedAt = now();
-          advanceAndEmit(state.nowMs, {
-            verifyState: true,
-            reuseVerifiedArchives: true,
-          });
-          if (performanceTrace) {
-            performanceTrace.postCommandVerificationMs =
-              now() - verificationStartedAt;
-          }
-        }
-      } else {
+      } else if (!incrementalSpatial) {
         noteFullVerification();
       }
       for (const frame of transaction.quoteFrames) {
@@ -2182,20 +2548,48 @@ export function createMarketWorkerController({
       }
       const receipt = publicReceipt(transaction.receipt);
       if (incrementalOrder) {
-        const eligibleEvent = externalCommandEventTrace(
-          command,
-          receipt,
-          realtimeSymbols,
-        );
-        if (eligibleEvent) {
+        const precedingEligibleEvents =
+          transaction.precedingEvents
+            .map(({ event, result }) =>
+              eligibleEventTrace(event, result, state),
+            )
+            .filter(Boolean);
+        const commandEligibleEvent =
+          externalCommandEventTrace(
+            command,
+            receipt,
+            realtimeSymbols,
+          );
+        const eligibleEvents = commandEligibleEvent
+          ? [
+              ...precedingEligibleEvents,
+              commandEligibleEvent,
+            ]
+          : precedingEligibleEvents;
+        if (eligibleEvents.length > 0) {
+          const eligibleSymbols = [
+            ...new Set(
+              eligibleEvents.flatMap(
+                (event) => event.symbols,
+              ),
+            ),
+          ].sort();
           emitRealtimeLevel2({
-            mutationCount: eligibleEvent.mutationCount,
+            mutationCount: eligibleEvents.reduce(
+              (sum, event) =>
+                sum + event.mutationCount,
+              0,
+            ),
             fromExclusiveVirtualMs: Math.max(
               0,
-              eligibleEvent.virtualMs - 1,
+              Math.min(
+                ...eligibleEvents.map(
+                  (event) => event.virtualMs,
+                ),
+              ) - 1,
             ),
-            symbols: realtimeSymbols,
-            eligibleEvents: [eligibleEvent],
+            symbols: eligibleSymbols,
+            eligibleEvents,
           });
         }
       }
@@ -2232,11 +2626,17 @@ export function createMarketWorkerController({
         };
       } else if (incrementalOrder) {
         commandProjection = {};
-      } else {
+      } else if (incrementalSpatial) {
         commandProjection = {
-          market: snapshotMarket(state, {
-            framePublication: true,
-          }),
+          worldPatch: publicWorldSpatialPatch(state),
+        };
+      } else {
+        const market = snapshotMarket(state, {
+          framePublication: true,
+        });
+        quoteDepthBaseline = market;
+        commandProjection = {
+          market,
           world: publicWorldEnvelope(state),
         };
       }
@@ -2306,11 +2706,13 @@ export function createMarketWorkerController({
       throw new RangeError('ADVANCE_WORLD_DAYS produced an invalid target.');
     }
     advanceAndEmit(targetMs, { creditControlled: false });
+    const market = snapshotMarket(state);
+    quoteDepthBaseline = market;
     acknowledge(message, {
       days: message.days,
       frame: publicQuoteFrame(state.quoteFrames.at(-1)),
       tick: state.world.world.tick,
-      market: snapshotMarket(state),
+      market,
       world: publicWorldEnvelope(state),
     });
   }
@@ -2326,13 +2728,15 @@ export function createMarketWorkerController({
       throw new RangeError('ADVANCE_VIRTUAL_TIME produced an invalid target.');
     }
     advanceAndEmit(targetMs, { creditControlled: false });
+    const market = snapshotMarket(state);
+    quoteDepthBaseline = market;
     acknowledge(message, {
       durationMs: message.durationMs,
       frame: state.quoteFrames.at(-1)
         ? publicQuoteFrame(state.quoteFrames.at(-1))
         : null,
       tick: state.world.world.tick,
-      market: snapshotMarket(state),
+      market,
       world: publicWorldEnvelope(state),
     });
   }
@@ -2344,6 +2748,7 @@ export function createMarketWorkerController({
     const checkpoint = canonicalMarketState(state);
     const commitSeq = checkpoint.commitSeq;
     const market = snapshotMarket(state);
+    quoteDepthBaseline = market;
     post({
       type: 'WORLD_SNAPSHOT',
       requestId: message.requestId ?? null,
@@ -2355,6 +2760,7 @@ export function createMarketWorkerController({
         commitSeq,
         state: checkpoint.world,
       },
+      worldProjection: publicWorldEnvelope(state),
     });
     if (playing) scheduleNextWake();
   }
@@ -2376,16 +2782,29 @@ export function createMarketWorkerController({
   }
 
   function acknowledgeMarketPublication(message) {
+    const startedAt = now();
+    const finishTrace = (outcome) => {
+      lastPublicationAckTrace = {
+        startedAt,
+        totalMs: now() - startedAt,
+        kind: message?.publicationKind ?? null,
+        outcome,
+      };
+    };
     if (
       !publicationCreditEnabled ||
       message.publicationCreditSchema !==
         PUBLICATION_CREDIT_SCHEMA ||
       typeof message.publicationId !== 'string'
     ) {
+      finishTrace('ignored_invalid');
       return;
     }
     if (message.publicationKind === 'level2') {
-      if (message.publicationId !== inFlightLevel2Publication) return;
+      if (message.publicationId !== inFlightLevel2Publication) {
+        finishTrace('ignored_stale');
+        return;
+      }
       inFlightLevel2Publication = null;
       if (inFlightLevel2Projection) {
         acknowledgedLevel2Projection =
@@ -2396,10 +2815,17 @@ export function createMarketWorkerController({
       pendingLevel2Publication = null;
       if (pending) emitRealtimeLevel2(pending);
       completePendingPause();
+      finishTrace(pending ? 'flushed_pending' : 'acknowledged');
       return;
     }
-    if (message.publicationKind !== 'quote_frame') return;
-    if (message.publicationId !== inFlightQuotePublication) return;
+    if (message.publicationKind !== 'quote_frame') {
+      finishTrace('ignored_kind');
+      return;
+    }
+    if (message.publicationId !== inFlightQuotePublication) {
+      finishTrace('ignored_stale');
+      return;
+    }
     inFlightQuotePublication = null;
     if (
       inFlightDerivativesProjection &&
@@ -2422,6 +2848,7 @@ export function createMarketWorkerController({
       });
     }
     completePendingPause();
+    finishTrace(pending ? 'flushed_pending' : 'acknowledged');
   }
 
   function completePendingPause() {
@@ -2436,13 +2863,15 @@ export function createMarketWorkerController({
     }
     const message = pendingPauseMessage;
     pendingPauseMessage = null;
+    const market = snapshotMarket(state, {
+      framePublication: true,
+    });
+    quoteDepthBaseline = market;
     acknowledge(message, {
       frame: state.quoteFrames.at(-1)
         ? publicQuoteFrame(state.quoteFrames.at(-1))
         : null,
-      market: snapshotMarket(state, {
-        framePublication: true,
-      }),
+      market,
     });
     return true;
   }
@@ -2469,11 +2898,15 @@ export function createMarketWorkerController({
           clearWake();
           playing = false;
           speed = 1;
+          const auditColdStore =
+            auditColdStoreForInit(message) ??
+            simulationOptions.auditColdStore;
           state = createMarketSimulation(
             cloneValue(message.world),
             message.savedState ? cloneValue(message.savedState) : null,
             {
               ...simulationOptions,
+              auditColdStore,
               testingAccessOpen:
                 message.testingAccessOpen === true,
             },
@@ -2507,6 +2940,7 @@ export function createMarketWorkerController({
           inFlightQuotePublication = null;
           pendingLevel2Publication = null;
           pendingQuotePublication = null;
+          quoteDepthBaseline = null;
           deferredFixedEndpointFrames = [];
           pendingPauseMessage = null;
           const readyDerivatives =
@@ -2517,12 +2951,14 @@ export function createMarketWorkerController({
               projection:
                 acknowledgedDerivativesProjection,
             });
+          const readyMarket = snapshotMarket(state);
+          quoteDepthBaseline = readyMarket;
           post({
             type: 'READY',
             requestId: message.requestId ?? null,
             requestType: message.type,
             commitSeq: state.commitSeq,
-            market: snapshotMarket(state),
+            market: readyMarket,
             world: publicWorldEnvelope(state, {
               derivatives: readyDerivatives,
             }),

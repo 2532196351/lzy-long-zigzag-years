@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" data-semantic-category="lighting" role="img" aria-label="江湾昼夜灯光规则化源资产">
+  <defs>
+    <radialGradient id="lamp-glow">
+      <stop offset="0" stop-color="#f0d38b" stop-opacity=".9"/>
+      <stop offset=".45" stop-color="#d47a57" stop-opacity=".38"/>
+      <stop offset="1" stop-color="#d47a57" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="day-wash" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8cb6c2" stop-opacity=".42"/>
+      <stop offset="1" stop-color="#f0d38b" stop-opacity=".16"/>
+    </linearGradient>
+  </defs>
+  <g id="day" data-light-state="day">
+    <path d="M64 96h896v400H64z" fill="url(#day-wash)"/>
+    <path d="m160 576 352-104 352 104-352 120z" fill="#f0d38b" opacity=".18"/>
+  </g>
+  <g id="street-lamp" data-material="mat_jiangwan_lighting_v1">
+    <circle cx="512" cy="322" r="286" fill="url(#lamp-glow)"/>
+    <path d="M490 816h44V382h-44zM448 382q64-76 128 0v32H448z" fill="#26312f"/>
+    <path d="m426 816 86-34 86 34-86 34z" fill="#596866"/>
+    <path d="M470 390h84l-18 58h-48z" fill="#f0d38b" stroke="#d47a57" stroke-width="8"/>
+  </g>
+  <g id="night" data-light-state="night" opacity=".24">
+    <path d="M64 96h896v800H64z" fill="#254b54"/>
+  </g>
+</svg>

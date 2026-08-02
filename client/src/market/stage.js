@@ -1,17 +1,22 @@
-import { deriveMarketChartSeries } from './bars.js?v=20260801-01';
+import { deriveMarketChartSeries } from './bars.js?v=20260803-02';
 import {
   deriveAdaptiveIntradayPriceDomain,
   MARKET_CLOCK_ORIGIN_OFFSET_MS,
-} from './chart-domain.js?v=20260801-01';
+} from './chart-domain.js?v=20260803-02';
 import {
   projectMarketIntelligence,
-} from '../experience/market-intelligence.js?v=20260801-01';
+  projectMarketQuote,
+} from '../experience/market-intelligence.js?v=20260803-02';
 import {
   isPublishedDerivativesProjection,
   patchStockFinancingPanel,
   renderDerivativeTerminalTask,
   renderStockFinancingPanel,
-} from '../experience/derivatives-view.js?v=20260801-01';
+} from '../experience/derivatives-view.js?v=20260803-02';
+import {
+  deriveThreeAssetColumnGeometry,
+  projectThreeAssetMarketColumns,
+} from '../experience/market-three-asset-contract.js?v=20260803-02';
 
 const ACTIVE_ORDER_STATUSES = new Set([
   'accepted',
@@ -766,7 +771,88 @@ function marketKindSwitchMarkup(modifier = '') {
   `;
 }
 
-function stageMarkup(reducedMotion) {
+function roleConsoleMarkup(
+  world,
+  { derivativeMode = false } = {},
+) {
+  const roleType = object(world).player?.roleType;
+  if (roleType === 'quant_institution') {
+    return `
+      <section class="lzy-stage__panel lzy-stage__role-console"
+        data-stage-role-console data-stage-panel="role"
+        data-role-console="quant" data-testid="quant-market-console">
+        <div class="lzy-stage__role-console-heading">
+          <div>
+            <span class="lzy-stage__eyebrow">量化策略控制</span>
+            <h3>自动交易组合</h3>
+          </div>
+          <span class="lzy-stage__badge" data-stage-role-status>待同步</span>
+        </div>
+        <p data-stage-role-summary>正在读取策略组合与实盘决策状态。</p>
+        <dl class="lzy-stage__role-console-metrics">
+          <div><dt>策略</dt><dd data-stage-role-strategies>—</dd></div>
+          <div><dt>决策</dt><dd data-stage-role-decisions>—</dd></div>
+          <div><dt>成交量</dt><dd data-stage-role-filled>—</dd></div>
+        </dl>
+        <div class="lzy-stage__role-console-actions">
+          <button type="button" data-stage-role-toggle aria-pressed="true">
+            暂停自动交易
+          </button>
+          <button type="button" data-stage-role-open>策略研究室</button>
+        </div>
+      </section>`;
+  }
+  if (roleType === 'stabilization_fund') {
+    return `
+      <section class="lzy-stage__panel lzy-stage__role-console"
+        data-stage-role-console data-stage-panel="role"
+        data-role-console="stabilization"
+        data-testid="stabilization-market-console">
+        <div class="lzy-stage__role-console-heading">
+          <div>
+            <span class="lzy-stage__eyebrow">市场稳定控制</span>
+            <h3>自动协议与人工干预</h3>
+          </div>
+          <span class="lzy-stage__badge" data-stage-role-status>待同步</span>
+        </div>
+        <p data-stage-role-summary>正在读取市场压力和稳定协议状态。</p>
+        <dl class="lzy-stage__role-console-metrics">
+          <div><dt>目标</dt><dd data-stage-role-strategies>—</dd></div>
+          <div><dt>决策</dt><dd data-stage-role-decisions>—</dd></div>
+          <div><dt>介入量</dt><dd data-stage-role-filled>—</dd></div>
+        </dl>
+        <div class="lzy-stage__role-console-actions">
+          <button type="button" data-stage-role-toggle aria-pressed="true">
+            暂停自动稳定
+          </button>
+          <button type="button"
+            ${
+              derivativeMode
+                ? 'data-stage-role-manual-stock'
+                : 'data-stage-open-ticket="buy"'
+            }
+            data-testid="stabilization-stage-manual-entry">${
+              derivativeMode ? '转到股票手动进场' : '手动进场'
+            }</button>
+          <button type="button" data-stage-role-open>协议控制台</button>
+        </div>
+      </section>`;
+  }
+  return '';
+}
+
+function roleMobileDockMarkup(world) {
+  const roleType = object(world).player?.roleType;
+  if (roleType === 'quant_institution') {
+    return '<button type="button" data-stage-open-role-drawer>策略</button>';
+  }
+  if (roleType === 'stabilization_fund') {
+    return '<button type="button" data-stage-open-role-drawer>稳定</button>';
+  }
+  return '';
+}
+
+function stageMarkup(reducedMotion, world) {
   return `
     <section class="lzy-market-stage" data-testid="market-stage"
       data-reduced-motion="${reducedMotion ? 'true' : 'false'}"
@@ -1089,7 +1175,13 @@ function stageMarkup(reducedMotion) {
           <span data-stage-node="drawer-label">打开订单与风险</span>
           <span aria-hidden="true">⌃</span>
         </button>
-        <div class="lzy-stage__mobile-trade-dock" aria-label="固定交易入口">
+        <div class="lzy-stage__mobile-trade-dock" aria-label="固定交易入口"
+          data-role-dock="${
+            ['quant_institution', 'stabilization_fund'].includes(
+              object(world).player?.roleType,
+            ) ? 'true' : 'false'
+          }">
+          ${roleMobileDockMarkup(world)}
           <button type="button" data-stage-open-ticket="buy">买入</button>
           <button type="button" data-stage-open-ticket="sell">卖出</button>
         </div>
@@ -1099,6 +1191,7 @@ function stageMarkup(reducedMotion) {
           <button class="lzy-stage__drawer-close" type="button"
             data-stage-drawer-close aria-label="关闭订单与风险面板">×</button>
           <div id="lzy-stage-drawer-panels" class="lzy-stage__drawer-panels">
+          ${roleConsoleMarkup(world)}
           <section class="lzy-stage__panel lzy-stage__ticket-panel"
             data-stage-panel="ticket" aria-labelledby="lzy-stage-ticket-title">
             <div class="lzy-stage__panel-heading">
@@ -1303,7 +1396,7 @@ function stageMarkup(reducedMotion) {
               aria-label="当前证券主要股东">
               <div class="lzy-stage__table-wrap">
                 <table>
-                  <caption>按持仓市值排列</caption>
+                  <caption>登记持股、受益所有权与表决权</caption>
                   <thead>
                     <tr><th>序</th><th>股东</th><th>持股</th><th>占比</th></tr>
                   </thead>
@@ -1313,6 +1406,7 @@ function stageMarkup(reducedMotion) {
               <p data-stage-node="shareholder-summary">股东数据连接中。</p>
             </section>
             <h4 class="lzy-stage__agent-heading">市场主体动作</h4>
+            <p class="lzy-stage__agent-order">按持仓市值排列</p>
             <ol class="lzy-stage__agent-list" data-stage-node="agent-list"></ol>
           </section>
         </section>
@@ -1581,6 +1675,59 @@ function isOlderDerivativeProjection(
   );
 }
 
+export function projectMarketStageThreeAssetContract({
+  marketKind,
+  symbol,
+  selectedDerivativeContractIds = {},
+  stockProjection,
+  derivativesProjection,
+  viewportWidthPx,
+} = {}) {
+  const assetClassByMarketKind = {
+    stocks: 'stock',
+    futures: 'future',
+    options: 'option',
+  };
+  const assetClass =
+    assetClassByMarketKind[marketKind] ?? null;
+  const assetId =
+    marketKind === 'stocks'
+      ? symbol
+      : selectedDerivativeContractIds[marketKind];
+  const columns = projectThreeAssetMarketColumns({
+    selection: { assetClass, assetId },
+    stockProjection,
+    derivativesProjection,
+    permissionModeByAssetClass: {
+      stock: 'OPEN',
+      future:
+        derivativesProjection?.access
+          ?.permissionModes?.futures_trading ?? 'LOCKED',
+      option:
+        derivativesProjection?.access
+          ?.permissionModes?.option_buyer ?? 'LOCKED',
+    },
+  });
+  const geometry = deriveThreeAssetColumnGeometry({
+    viewportWidthPx,
+    gapPx: 12,
+  });
+  return {
+    schemaVersion:
+      'lzy_market_stage_three_asset_contract_v1',
+    authority: 'read_only_stage_projection',
+    integrationStatus:
+      columns.status === 'ready'
+        ? 'production_stage_integrated'
+        : 'blocked',
+    sourceModuleIntegrationStatus:
+      columns.integrationStatus,
+    assetClass,
+    columns,
+    geometry,
+  };
+}
+
 /**
  * Mounts the isolated realtime market presentation layer.
  *
@@ -1602,6 +1749,7 @@ export function mountMarketStage(
     onSymbolChange = () => {},
     onMarketKindChange = () => {},
     onDerivativeContractChange = () => {},
+    onRoleConsoleOpen = () => {},
   } = {},
 ) {
   if (!root || typeof root.querySelector !== 'function') {
@@ -1660,6 +1808,7 @@ export function mountMarketStage(
     orderSettledSeq: 0,
     orderSending: false,
     orderAwaitingReceipt: false,
+    orderRowsSignature: null,
     limitTif: 'GTC',
     ticketDirty: false,
     drawerOpen: false,
@@ -1675,7 +1824,7 @@ export function mountMarketStage(
   };
   const capabilities = clientCapabilities(state.client);
 
-  root.innerHTML = stageMarkup(state.reducedMotion);
+  root.innerHTML = stageMarkup(state.reducedMotion, state.world);
   establishStageColumns(root);
   const shell = root.querySelector('[data-testid="market-stage"]');
   const nodes = Object.fromEntries(
@@ -1695,7 +1844,9 @@ export function mountMarketStage(
     '[data-stage-activate-level2]',
   );
   const drawerPanels = [
-    ...nodes.rightDrawer.querySelectorAll('[data-stage-panel="ticket"], [data-stage-panel="risk"]'),
+    ...nodes.rightDrawer.querySelectorAll(
+      '[data-stage-panel="ticket"], [data-stage-panel="risk"], [data-stage-role-console]',
+    ),
   ];
   const taskColumns = [
     root.querySelector('.lzy-stage__symbols'),
@@ -1879,10 +2030,59 @@ export function mountMarketStage(
       selectedEntityForCurrentMode();
     const authority =
       authorityForCurrentMode();
+    const viewportWidthPx =
+      positiveInteger(root.clientWidth) ??
+      positiveInteger(shell.clientWidth) ??
+      positiveInteger(window.innerWidth) ??
+      1;
+    const threeAssetContract =
+      projectMarketStageThreeAssetContract({
+        marketKind: state.marketKind,
+        symbol: state.symbol,
+        selectedDerivativeContractIds:
+          state.selectedDerivativeContractIds,
+        stockProjection: state.snapshot,
+        derivativesProjection:
+          state.derivativesProjection,
+        viewportWidthPx,
+      });
+    const selectedEntityKey =
+      threeAssetContract.columns.columns?.left
+        ?.selectedEntityKey ?? '';
+    const series =
+      threeAssetContract.columns.columns?.center
+        ?.series;
+    const annotateContract = (target) => {
+      if (!target) return;
+      target.dataset.marketThreeAssetContract =
+        threeAssetContract.schemaVersion;
+      target.dataset.marketThreeAssetIntegration =
+        threeAssetContract.integrationStatus;
+      target.dataset.marketThreeAssetClass =
+        threeAssetContract.assetClass ?? '';
+      target.dataset.marketThreeAssetEntity =
+        selectedEntityKey;
+      target.dataset.marketColumnGeometry =
+        threeAssetContract.geometry.mode;
+      target.dataset.marketColumnOrder =
+        threeAssetContract.geometry.columnOrder.join(',');
+      target.dataset.marketTradeAuthority =
+        series?.trade?.priceAuthority ?? '';
+      target.dataset.marketMarkAuthority =
+        series?.mark?.point?.source ??
+        series?.mark?.applicability ?? '';
+      target.dataset.marketTheoreticalAuthority =
+        series?.theoretical?.point?.source ??
+        series?.theoretical?.applicability ?? '';
+      target.dataset.marketSettlementAuthority =
+        series?.settlement?.point?.source ??
+        series?.settlement?.applicability ?? '';
+    };
     shell.dataset.marketMode =
       state.marketKind;
     shell.dataset.marketSelectedEntity =
       selected;
+    annotateContract(shell);
     const host = root.closest(
       '[data-testid="market-stage-host"]',
     );
@@ -1891,6 +2091,7 @@ export function mountMarketStage(
         state.marketKind;
       host.dataset.marketSelectedEntity =
         selected;
+      annotateContract(host);
     }
     taskColumns.forEach((column, index) => {
       if (!column) return;
@@ -1902,6 +2103,15 @@ export function mountMarketStage(
         String(authority.nowMs);
       column.dataset.authorityCommitSeq =
         String(authority.commitSeq);
+      const geometryRole =
+        threeAssetContract.geometry.columnOrder[index];
+      column.dataset.marketGeometryRole = geometryRole;
+      column.dataset.marketExpectedWidthPx = String(
+        threeAssetContract.geometry
+          .columnWidthsPx[geometryRole],
+      );
+      column.dataset.marketThreeAssetEntity =
+        selectedEntityKey;
     });
     updateMarketKindButtons();
   }
@@ -2002,7 +2212,9 @@ export function mountMarketStage(
     const markups = [
       task.selectionHtml,
       task.marketHtml,
-      task.actionHtml,
+      `${roleConsoleMarkup(state.world, {
+        derivativeMode: true,
+      })}${task.actionHtml}`,
     ];
     taskColumns.forEach((column, index) => {
       if (!column) return;
@@ -2018,6 +2230,7 @@ export function mountMarketStage(
       }
     });
     annotateTerminalColumns();
+    updateRoleConsole();
     return true;
   }
 
@@ -2165,8 +2378,15 @@ export function mountMarketStage(
   function updateDrawer() {
     const compact = Boolean(compactQuery?.matches);
     const fundsPage = compact && state.mobileTask === 'funds';
+    const rolePage = compact && state.drawerMode === 'role';
     const open = !compact || state.drawerOpen || fundsPage;
     const expanded = compact && state.drawerOpen;
+    const roleType = object(state.world.player).roleType;
+    const drawerSubject = roleType === 'quant_institution'
+      ? '策略与交易'
+      : roleType === 'stabilization_fund'
+        ? '稳定与交易'
+        : '订单与风险';
     shell.dataset.orderSheetOpen = expanded ? 'true' : 'false';
     nodes.rightDrawer.dataset.drawerOpen = open ? 'true' : 'false';
     nodes.rightDrawer.dataset.drawerMode = state.drawerMode;
@@ -2175,17 +2395,18 @@ export function mountMarketStage(
     nodes.drawerToggle.setAttribute(
       'aria-label',
       expanded
-        ? '打开订单与风险（当前已展开，再按收起）'
-        : '打开订单与风险',
+        ? `打开${drawerSubject}（当前已展开，再按收起）`
+        : `打开${drawerSubject}`,
     );
     setText(
       nodes.drawerLabel,
-      expanded ? '收起订单与风险' : '打开订单与风险',
+      expanded ? `收起${drawerSubject}` : `打开${drawerSubject}`,
     );
     for (const panel of drawerPanels) {
       panel.inert =
         !open ||
-        (fundsPage && panel.dataset.stagePanel !== 'risk');
+        (fundsPage && panel.dataset.stagePanel !== 'risk') ||
+        (rolePage && panel.dataset.stagePanel !== 'role');
     }
   }
 
@@ -2571,26 +2792,9 @@ export function mountMarketStage(
     updateOrderRequestState();
   }
 
-  function updateSymbolControls() {
+  function updateSymbolControls(onlySymbols = null) {
     const symbols = symbolList(state.snapshot, state.world);
-    reconcileRows(
-      nodes.symbolList,
-      symbols,
-      (item) => item,
-      (item, key) => {
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.dataset.stageSymbol = key;
-        button.innerHTML = `
-          <span data-stage-symbol-code></span>
-          <strong data-stage-symbol-name></strong>
-          <span data-stage-symbol-price></span>
-          <span data-stage-symbol-change></span>
-          <span data-stage-symbol-change-percent></span>
-          <small data-stage-symbol-role></small>`;
-        return button;
-      },
-      (button, item) => {
+    const updateButton = (button, item) => {
         const meta = symbolMeta(state.world, item);
         const view = currentView(state.snapshot, item);
         const lastTicks = positiveInteger(view.lastPriceTicks);
@@ -2664,7 +2868,35 @@ export function mountMarketStage(
         setMarketDirection(changeNode, direction);
         setMarketDirection(percentNode, direction);
         setText(button.querySelector('[data-stage-symbol-role]'), meta.role);
+    };
+    if (Array.isArray(onlySymbols)) {
+      const refresh = new Set(onlySymbols);
+      for (const button of nodes.symbolList.querySelectorAll(
+        '[data-stage-symbol]',
+      )) {
+        const item = button.dataset.stageSymbol;
+        if (refresh.has(item)) updateButton(button, item);
+      }
+      return;
+    }
+    reconcileRows(
+      nodes.symbolList,
+      symbols,
+      (item) => item,
+      (item, key) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.dataset.stageSymbol = key;
+        button.innerHTML = `
+          <span data-stage-symbol-code></span>
+          <strong data-stage-symbol-name></strong>
+          <span data-stage-symbol-price></span>
+          <span data-stage-symbol-change></span>
+          <span data-stage-symbol-change-percent></span>
+          <small data-stage-symbol-role></small>`;
+        return button;
       },
+      updateButton,
     );
 
     for (const select of [nodes.mobileSymbolSelect]) {
@@ -2760,6 +2992,26 @@ export function mountMarketStage(
       );
     } catch {
       state.intelligenceBySymbol = new Map();
+    }
+  }
+
+  function refreshRealtimeQuoteProjection(symbol) {
+    const current = object(
+      state.intelligenceBySymbol.get(symbol),
+    );
+    if (Object.keys(current).length === 0) return;
+    try {
+      state.intelligenceBySymbol.set(symbol, {
+        ...current,
+        quote: projectMarketQuote(
+          state.world,
+          state.snapshot,
+          symbol,
+        ),
+      });
+    } catch {
+      // Keep the last complete public projection if a partial transport frame
+      // cannot yet produce a self-contained quote.
     }
   }
 
@@ -3472,10 +3724,26 @@ export function mountMarketStage(
   }
 
   function updateOrders() {
+    const orders = activePlayerOrders(state.snapshot);
+    const signature = orders
+      .map((order) => [
+        order.id,
+        order.symbol,
+        order.side,
+        order.priceTicks,
+        order.remainingQty,
+        order.originalQty,
+        order.submittedMs,
+        order.status,
+        currentView(state.snapshot, order.symbol)
+          .previousCloseTicks,
+      ].join(':'))
+      .concat(capabilities.cancel ? 'cancel:1' : 'cancel:0')
+      .join('|');
+    if (signature === state.orderRowsSignature) return;
     const focusedControl = nodes.orderBody.contains(document.activeElement)
       ? document.activeElement
       : null;
-    const orders = activePlayerOrders(state.snapshot);
     reconcileRows(
       nodes.orderBody,
       orders,
@@ -3528,15 +3796,21 @@ export function mountMarketStage(
           )}`,
         );
         const button = row.querySelector('[data-stage-cancel]');
-        button.dataset.stageCancel = order.id;
-        button.textContent = '撤单';
-        button.setAttribute(
-          'aria-label',
-          `撤销${order.side === 'sell' ? '卖出' : '买入'} ${
-            order.symbol ?? '当前证券'
-          } ${formatPrice(order.priceTicks)} 元委托`,
-        );
-        button.disabled = !capabilities.cancel;
+        if (button.dataset.stageCancel !== order.id) {
+          button.dataset.stageCancel = order.id;
+        }
+        setText(button, '撤单');
+        const cancelLabel = `撤销${
+          order.side === 'sell' ? '卖出' : '买入'
+        } ${order.symbol ?? '当前证券'} ${formatPrice(
+          order.priceTicks,
+        )} 元委托`;
+        if (button.getAttribute('aria-label') !== cancelLabel) {
+          button.setAttribute('aria-label', cancelLabel);
+        }
+        if (button.disabled === capabilities.cancel) {
+          button.disabled = !capabilities.cancel;
+        }
       },
     );
     if (!orders.length) {
@@ -3550,6 +3824,7 @@ export function mountMarketStage(
     if (focusedControl && !nodes.orderBody.contains(focusedControl)) {
       nodes.submitOrder.focus();
     }
+    state.orderRowsSignature = signature;
   }
 
   function agentItems() {
@@ -3679,11 +3954,19 @@ export function mountMarketStage(
         );
         setText(
           row.querySelector('[data-stage-cell="holder"]'),
-          holder.name.trim(),
+          `${holder.name.trim()}${
+            holder.beneficialOwner
+              ? `\n受益：${holder.beneficialOwner}`
+              : ''
+          }`,
         );
         setText(
           row.querySelector('[data-stage-cell="holding"]'),
-          formatNumber(Math.max(0, integer(holder.quantity))),
+          `${formatNumber(Math.max(0, integer(holder.quantity)))}${
+            finite(holder.lockedUnits) > 0
+              ? `\n锁定 ${formatNumber(Math.max(0, integer(holder.lockedUnits)))}`
+              : ''
+          }`,
         );
         const ownershipBps = Math.max(
           0,
@@ -3691,7 +3974,15 @@ export function mountMarketStage(
         );
         setText(
           row.querySelector('[data-stage-cell="ownership"]'),
-          `${(ownershipBps / 100).toFixed(2)}%`,
+          `${(ownershipBps / 100).toFixed(2)}%${
+            Number.isFinite(Number(holder.votingRightsBps))
+              ? `\n表决 ${(Math.max(0, finite(holder.votingRightsBps)) / 100).toFixed(2)}%`
+              : ''
+          }${
+            finite(holder.pledgedUnits) > 0
+              ? `\n质押 ${formatNumber(Math.max(0, integer(holder.pledgedUnits)))}`
+              : ''
+          }`,
         );
       },
     );
@@ -3712,12 +4003,25 @@ export function mountMarketStage(
       0,
       integer(shareholders.othersUnits),
     );
+    const registeredUnits = Math.max(
+      0,
+      integer(
+        shareholders.registeredUnits ??
+          shareholders.accountedUnits,
+      ),
+    );
+    const votingRightsBpsTotal = Math.max(
+      0,
+      integer(shareholders.votingRightsBpsTotal),
+    );
     setText(
       nodes.shareholderSummary,
       holders.length
         ? `总股本 ${formatNumber(outstandingUnits)} 股 · 其余 ${formatNumber(
             othersUnits,
-          )} 股`
+          )} 股 · 名册 ${formatNumber(registeredUnits)} 股 · 表决权口径 ${(
+            votingRightsBpsTotal / 100
+          ).toFixed(2)}%`
         : '股东数据连接中。',
     );
   }
@@ -4022,6 +4326,66 @@ export function mountMarketStage(
     setText(
       nodes.mobileActiveCount,
       formatNumber(capacity.activeOrderCount ?? activePlayerOrders(state.snapshot).length),
+    );
+  }
+
+  function updateRoleConsole() {
+    const consoleNode = root.querySelector('[data-stage-role-console]');
+    if (!consoleNode) return;
+    const runtime = object(state.snapshot.playerRoleAutomation);
+    const roleState = object(object(state.world.player).roleState);
+    const quant = consoleNode.dataset.roleConsole === 'quant';
+    const configuration = quant
+      ? object(roleState.strategyLab)
+      : object(roleState.stabilityDesk);
+    const enabled = configuration.automationEnabled === true;
+    const latest = array(runtime.recentDecisions).at(-1);
+    const status = consoleNode.querySelector('[data-stage-role-status]');
+    const summary = consoleNode.querySelector('[data-stage-role-summary]');
+    const strategies = consoleNode.querySelector(
+      '[data-stage-role-strategies]',
+    );
+    const decisions = consoleNode.querySelector('[data-stage-role-decisions]');
+    const filled = consoleNode.querySelector('[data-stage-role-filled]');
+    const toggle = consoleNode.querySelector('[data-stage-role-toggle]');
+    setText(status, enabled ? '自动运行' : '自动暂停');
+    status.dataset.active = enabled ? 'true' : 'false';
+    if (quant) {
+      const selected = array(configuration.selectedStrategyIds);
+      setText(strategies, `${formatNumber(selected.length)} 个组合`);
+      setText(
+        summary,
+        latest
+          ? `${latest.symbol ?? '全市场'} · ${latest.status === 'no_action' ? '本轮未触发' : `${latest.side === 'sell' ? '卖出' : '买入'}决策`} · 风险模式 ${configuration.riskMode ?? '—'}`
+          : '策略只读取公开估值、质量、价格与盘口热状态。',
+      );
+    } else {
+      const targetLabel = {
+        balanced: '均衡',
+        systemic: '系统性风险',
+        liquidity: '流动性修复',
+      }[configuration.targetMode] ?? '—';
+      setText(strategies, targetLabel);
+      setText(
+        summary,
+        latest
+          ? `${latest.symbol ?? '全市场'} · ${latest.status === 'no_action' ? '保持观察' : `${latest.side === 'sell' ? '退出' : '介入'}决策`}`
+          : '平静市场不进场；达到协议阈值才提交真实订单。',
+      );
+    }
+    setText(decisions, formatNumber(runtime.totalDecisions ?? 0));
+    setText(filled, formatNumber(runtime.totalFilledQuantity ?? 0));
+    toggle.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+    toggle.disabled = !capabilities.submit;
+    setText(
+      toggle,
+      enabled
+        ? quant
+          ? '暂停自动交易'
+          : '暂停自动稳定'
+        : quant
+          ? '启动自动交易'
+          : '启动自动稳定',
     );
   }
 
@@ -4994,6 +5358,7 @@ export function mountMarketStage(
       });
       return;
     }
+    updateRoleConsole();
     updateHeader();
     updateSymbolControls();
     updatePrice();
@@ -5228,7 +5593,12 @@ export function mountMarketStage(
       ) {
         return;
       }
+      const startedAt =
+        window.performance?.now?.() ?? Date.now();
       drawChart();
+      root.dataset.stageChartPaintMs = String(
+        (window.performance?.now?.() ?? Date.now()) - startedAt,
+      );
     });
   }
 
@@ -5260,6 +5630,8 @@ export function mountMarketStage(
           ) {
             return;
           }
+          const startedAt =
+            window.performance?.now?.() ?? Date.now();
           const compact = Boolean(
             compactQuery?.matches,
           );
@@ -5280,6 +5652,9 @@ export function mountMarketStage(
           lastSupplementalPaintAt =
             window.performance?.now?.() ??
             Date.now();
+          root.dataset.stageSupplementalPaintMs = String(
+            lastSupplementalPaintAt - startedAt,
+          );
         });
     }, delayMs);
   }
@@ -5377,20 +5752,42 @@ export function mountMarketStage(
       }
       return derivativeChanged;
     }
+    const realtimeUpdate = object(value.realtimeUpdate);
+    const scopedRealtimeSymbols = Object.keys(
+      object(object(realtimeUpdate.market).symbols),
+    );
+    const hasScopedRealtimeAuthority =
+      realtimeUpdate.type === 'LEVEL2_UPDATE' &&
+      scopedRealtimeSymbols.length > 0;
     state.snapshot = nextSnapshot;
-    for (const symbol of Object.keys(
-      object(nextSnapshot.symbols),
+    for (const symbol of (
+      hasScopedRealtimeAuthority
+        ? scopedRealtimeSymbols
+        : Object.keys(object(nextSnapshot.symbols))
     )) {
       state.chartCache.delete(`${symbol}:ultra`);
       state.chartCache.delete(`${symbol}:intraday`);
     }
-    refreshIntelligenceProjection();
     if (state.marketKind !== 'stocks') {
-      renderCurrentDerivative({
-        preserveDrafts: true,
-      });
+      if (derivativeChanged) {
+        renderCurrentDerivative({
+          preserveDrafts: true,
+        });
+      }
       return true;
     }
+    if (
+      hasScopedRealtimeAuthority &&
+      !scopedRealtimeSymbols.includes(state.symbol)
+    ) {
+      // A Level-2 packet for another stock still advances the local snapshot
+      // and watchlist, but it cannot change the selected ticket, book, tape or
+      // chart. Avoid repainting that entire right/centre column at millisecond
+      // cadence while a player is clicking it.
+      updateSymbolControls(scopedRealtimeSymbols);
+      return true;
+    }
+    refreshRealtimeQuoteProjection(state.symbol);
     updateHeader();
     updatePrice();
     updateSymbolControls();
@@ -5793,6 +6190,37 @@ export function mountMarketStage(
     }
   }
 
+  async function toggleRoleAutomation(button) {
+    const roleType = object(state.world.player).roleType;
+    const quant = roleType === 'quant_institution';
+    const stabilization = roleType === 'stabilization_fund';
+    if (!quant && !stabilization) return;
+    const roleState = object(object(state.world.player).roleState);
+    const configuration = quant
+      ? object(roleState.strategyLab)
+      : object(roleState.stabilityDesk);
+    button.disabled = true;
+    const accepted = await invoke('action', {
+      type: 'world_action',
+      actorId: PLAYER_ID,
+      action: {
+        type: 'role_action',
+        command: quant
+          ? 'configure_quant_automation'
+          : 'configure_stabilization_automation',
+        automationEnabled: configuration.automationEnabled !== true,
+      },
+    });
+    button.disabled = false;
+    if (accepted) {
+      publish(
+        configuration.automationEnabled === true
+          ? '自动协议已请求暂停。'
+          : '自动协议已请求启动。',
+      );
+    }
+  }
+
   function onClick(event) {
     const noticeDismiss = event.target.closest('[data-stage-dismiss-notice]');
     if (noticeDismiss && root.contains(noticeDismiss)) {
@@ -5819,6 +6247,38 @@ export function mountMarketStage(
         ticketOpener.dataset.stageOpenTicket === 'sell' ? 'sell' : 'buy',
         ticketOpener,
       );
+      return;
+    }
+    const roleDrawer = event.target.closest('[data-stage-open-role-drawer]');
+    if (roleDrawer && root.contains(roleDrawer)) {
+      state.drawerMode = 'role';
+      state.drawerOpen = true;
+      state.drawerTrigger = roleDrawer;
+      updateDrawer();
+      return;
+    }
+    const roleConsoleOpen = event.target.closest('[data-stage-role-open]');
+    if (roleConsoleOpen && root.contains(roleConsoleOpen)) {
+      onRoleConsoleOpen();
+      return;
+    }
+    const roleToggle = event.target.closest('[data-stage-role-toggle]');
+    if (roleToggle && root.contains(roleToggle)) {
+      toggleRoleAutomation(roleToggle);
+      return;
+    }
+    const roleManualStock = event.target.closest(
+      '[data-stage-role-manual-stock]',
+    );
+    if (roleManualStock && root.contains(roleManualStock)) {
+      if (setMarketKind('stocks')) {
+        openTicket(
+          'buy',
+          root.querySelector(
+            '[data-testid="stabilization-stage-manual-entry"]',
+          ) ?? roleManualStock,
+        );
+      }
       return;
     }
     const mobileTask = event.target.closest('[data-stage-mobile-task]');

@@ -5,7 +5,7 @@ import {
   createOrderBook,
   previewBookExecution,
   submitToBook,
-} from '../market/order-book.js?v=20260801-01';
+} from '../market/order-book.js?v=20260803-02';
 import {
   ACCESS_THRESHOLD_CENTS,
   assertAccessState,
@@ -16,7 +16,7 @@ import {
   enablePermission,
   observeEligibility,
   restoreAccess,
-} from './eligibility.js?v=20260801-01';
+} from './eligibility.js?v=20260803-02';
 import {
   CONTRACT_RULE_VERSION,
   allContracts,
@@ -28,7 +28,7 @@ import {
   equityBasketByIdentity,
   migrateContractUniverse,
   sameEquityBasketIdentity,
-} from './contracts.js?v=20260801-01';
+} from './contracts.js?v=20260803-02';
 import {
   FINANCING_INITIAL_RATIO_BPS,
   FINANCING_LIQUIDATION_RATIO_BPS,
@@ -42,7 +42,7 @@ import {
   markAccountEquity,
   securitiesLendingRiskState,
   settleFutureVariation,
-} from './risk.js?v=20260801-01';
+} from './risk.js?v=20260803-02';
 import {
   actorOpenContractLimitReason,
   actorOrderInvariantErrors,
@@ -50,15 +50,20 @@ import {
   createDerivativeActorCatalog,
   derivativeActorAccountSpecs,
   deriveActorCommands,
+  migrateDerivativeActorCatalog,
   updateActorCapacity,
-} from './actors.js?v=20260801-01';
+} from './actors.js?v=20260803-02';
 import {
   impliedVolatility,
   noArbitrageBounds,
   priceEuropeanOption,
   resolveOptionCarryInputs,
   surfaceVolatilityPpm,
-} from './pricing.js?v=20260801-01';
+} from './pricing.js?v=20260803-02';
+import {
+  constrainDerivativeActorCommands,
+  PROFESSIONAL_ECOLOGY_CONTROL_VERSION,
+} from '../market/professional-ecology-control.js?v=20260803-02';
 
 export const DERIVATIVES_RULE_VERSION =
   'lzy-derivatives-market-v4';
@@ -84,6 +89,13 @@ const MAX_DERIVATIVE_SERIES_MINUTE_BARS = 480;
 const MAX_DERIVATIVE_SERIES_DAILY_BARS = 365;
 const FULL_CADENCE_AUDIT_INTERVAL_MS = 60_000;
 const MAX_ACTOR_QUIESCENCE_CERTIFICATE_MS = 120_000;
+const PROFESSIONAL_ECOLOGY_STATE_SCHEMA =
+  'lzy_derivative_professional_ecology_v1';
+const PROFESSIONAL_ECOLOGY_POLICY_SCHEMA =
+  'lzy_derivative_professional_actor_policy_v1';
+const PROFESSIONAL_ECOLOGY_CONTROL_SCHEMA =
+  'lzy_derivative_actor_control_v1';
+const MAX_PROFESSIONAL_SUBMIT_COMMANDS = 512;
 const PLAYER_FACILITY_COLLATERAL_SHAPE_VERSION =
   'lzy-two-finance-collateral-shape-v1';
 const CREDIT_FACILITY_CAPACITY_CENTS = 1_000_000_000;
@@ -261,6 +273,20 @@ function sealIncrementalQuiescentAuthority(
   shallowFreezeDerivativeAuthority(
     state.market.seriesByContract,
   );
+  for (const policy of Object.values(
+    state.market.professionalEcology?.policiesByActorId ?? {},
+  )) {
+    shallowFreezeDerivativeAuthority(
+      policy.allowedContractTypes,
+    );
+    shallowFreezeDerivativeAuthority(policy);
+  }
+  shallowFreezeDerivativeAuthority(
+    state.market.professionalEcology?.policiesByActorId,
+  );
+  shallowFreezeDerivativeAuthority(
+    state.market.professionalEcology,
+  );
   shallowFreezeDerivativeAuthority(state.market);
   shallowFreezeDerivativeAuthority(
     state.historyCompaction,
@@ -327,6 +353,17 @@ function createActorCadenceDraft(state) {
     accounts.player.facilityCollateralShapeTracker =
       state.accounts.player
         .facilityCollateralShapeTracker;
+  }
+  if (
+    state.accounts.player
+      ?.facilityCollateralShape !== undefined
+  ) {
+    // The collateral shape is sealed authority. Actor cadence may advance its
+    // timestamp, but an unchanged classification must keep the (potentially
+    // large) security partition by identity instead of cloning every listed
+    // security on every derivative cadence.
+    accounts.player.facilityCollateralShape =
+      state.accounts.player.facilityCollateralShape;
   }
   const clonedBookIds = new Set();
   const context = {
@@ -2870,6 +2907,382 @@ function worldSynchronizationChangesRiskInputs(
   );
 }
 
+function synchronizationReferenceInputsAreUnchanged(
+  state,
+  command,
+) {
+  for (const [underlyingId, spotTicks] of Object.entries(
+    command.underlyingSpots ?? {},
+  )) {
+    if (
+      state.universe.underlyings[underlyingId]
+        ?.spotTicks !== spotTicks
+    ) {
+      return false;
+    }
+  }
+  for (const [
+    underlyingId,
+    versionedReferences,
+  ] of Object.entries(
+    command.underlyingBasketSpots ?? {},
+  )) {
+    if (
+      !versionedReferences ||
+      typeof versionedReferences !== 'object' ||
+      Array.isArray(versionedReferences)
+    ) {
+      return false;
+    }
+    for (const [
+      constituentSetVersion,
+      reference,
+    ] of Object.entries(versionedReferences)) {
+      const current =
+        state.universe.equityBasketReferences?.[
+          underlyingId
+        ]?.[constituentSetVersion];
+      if (
+        current?.spotTicks !== reference?.spotTicks ||
+        !sameEquityBasketIdentity(
+          current?.basketIdentity,
+          reference?.basketIdentity,
+        )
+      ) {
+        return false;
+      }
+    }
+  }
+  for (const [underlyingId, carryRateBps] of
+    Object.entries(
+      command.underlyingCarryRateBps ?? {},
+    )) {
+    if (
+      state.universe.underlyings[underlyingId]
+        ?.carryRateBps !== carryRateBps
+    ) {
+      return false;
+    }
+  }
+  for (const [underlyingId, riskFreeRateBps] of
+    Object.entries(
+      command.underlyingRiskFreeRateBps ?? {},
+    )) {
+    if (
+      state.universe.underlyings[underlyingId]
+        ?.riskFreeRateBps !== riskFreeRateBps
+    ) {
+      return false;
+    }
+  }
+  for (const [securityId, referencePriceTicks] of
+    Object.entries(
+      command.securityReferencePrices ?? {},
+    )) {
+    if (
+      state.market.securityReferencePrices[
+        securityId
+      ] !== referencePriceTicks
+    ) {
+      return false;
+    }
+  }
+  return (
+    (
+      command.regimeSignalBps === undefined ||
+      command.regimeSignalBps ===
+        state.market.regimeSignalBps
+    ) &&
+    (
+      command.jumpRiskBps === undefined ||
+      command.jumpRiskBps ===
+        state.market.jumpRiskBps
+    ) &&
+    (
+      command.liquidityRiskBps === undefined ||
+      command.liquidityRiskBps ===
+        state.market.liquidityRiskBps
+    )
+  );
+}
+
+function synchronizationCollateralAuthorityIsUnchanged(
+  state,
+  command,
+) {
+  const incoming =
+    command.playerFacilityCollateralAuthority;
+  if (incoming === undefined) return true;
+  const player = state.accounts.player;
+  return (
+    validFacilityCollateralAuthority(incoming, {
+      atMs: state.nowMs,
+      playerCashCents: player.cashCents,
+      playerExternalCollateralCents:
+        player.externalCollateralCents,
+      playerFacilityEligibleCollateralCents:
+        player.facilityEligibleCollateralCents,
+      playerFinancingDebtCents:
+        player.financing.cashDebtCents,
+    }) &&
+    sameFacilityCollateralTracker(
+      player.facilityCollateralShapeTracker,
+      incoming.tracker,
+    ) &&
+    sameFacilityCollateralShape(
+      player.facilityCollateralShape,
+      incoming.shape,
+    )
+  );
+}
+
+function canUseExternalReservationSync(
+  state,
+  command,
+  authoritySeal,
+) {
+  const player = state.accounts.player;
+  const reserved =
+    command.playerExternalReservedCashCents;
+  return (
+    command.type === 'SYNC_WORLD' &&
+    command.atMs === state.nowMs &&
+    command.testingAccessOpen !== true &&
+    Number.isSafeInteger(reserved) &&
+    reserved >= 0 &&
+    reserved !==
+      (player.externalReservedCashCents ?? 0) &&
+    player.cashCents >=
+      player.reservedInitialMarginCents + reserved &&
+    command.playerCashCents === player.cashCents &&
+    command.playerExternalCollateralCents ===
+      player.externalCollateralCents &&
+    command.playerFacilityEligibleCollateralCents ===
+      player.facilityEligibleCollateralCents &&
+    command.totalEquivalentAssetCents ===
+      state.access.lastTotalEquivalentAssetCents &&
+    state.nowMs - authoritySeal.lastFullAuditAtMs <
+      FULL_CADENCE_AUDIT_INTERVAL_MS &&
+    synchronizationReferenceInputsAreUnchanged(
+      state,
+      command,
+    ) &&
+    synchronizationCollateralAuthorityIsUnchanged(
+      state,
+      command,
+    )
+  );
+}
+
+function auditIncrementalExternalReservationSync({
+  before,
+  after,
+  receipt,
+  reservedCashCents,
+}) {
+  const errors = [];
+  if (
+    after.ruleVersion !== before.ruleVersion ||
+    after.worldId !== before.worldId ||
+    after.worldSeed !== before.worldSeed ||
+    after.worldStartedAtMs !== before.worldStartedAtMs ||
+    after.nowMs !== before.nowMs
+  ) {
+    errors.push('INVALID_RESERVATION_SYNC_IDENTITY');
+  }
+  if (
+    after.commitSeq !== before.commitSeq + 1 ||
+    after.nextReceiptSequence !==
+      before.nextReceiptSequence + 1 ||
+    after.nextOrderSequence !==
+      before.nextOrderSequence ||
+    after.nextTradeSequence !==
+      before.nextTradeSequence ||
+    receipt.commitSeq !== after.commitSeq ||
+    receipt.atMs !== after.nowMs ||
+    after.receipts.at(-1) !== receipt
+  ) {
+    errors.push('INVALID_RESERVATION_SYNC_COMMIT');
+  }
+  for (const root of [
+    'access',
+    'universe',
+    'actors',
+    'books',
+    'market',
+    'clearing',
+  ]) {
+    if (after[root] !== before[root]) {
+      errors.push(
+        `UNEXPECTED_RESERVATION_SYNC_ROOT_CHANGE:${root}`,
+      );
+    }
+  }
+  if (
+    after.initialTotalCashCents !==
+      before.initialTotalCashCents ||
+    !sameOwnFieldsExcept(
+      before.accounts.player,
+      after.accounts.player,
+      new Set(['externalReservedCashCents']),
+    ) ||
+    after.accounts.player.externalReservedCashCents !==
+      reservedCashCents ||
+    after.accounts.player.risk !==
+      before.accounts.player.risk ||
+    before.accounts.player.cashCents <
+      before.accounts.player.reservedInitialMarginCents +
+        reservedCashCents
+  ) {
+    errors.push('INVALID_RESERVATION_SYNC_PLAYER_ACCOUNT');
+  }
+  const beforeAccountIds = Object.keys(
+    before.accounts,
+  ).sort();
+  const afterAccountIds = Object.keys(
+    after.accounts,
+  ).sort();
+  if (
+    !sameStringArray(beforeAccountIds, afterAccountIds) ||
+    beforeAccountIds.some(
+      (accountId) =>
+        accountId !== 'player' &&
+        after.accounts[accountId] !==
+          before.accounts[accountId],
+    )
+  ) {
+    errors.push('UNEXPECTED_RESERVATION_SYNC_ACCOUNT_CHANGE');
+  }
+  const archivedReceiptDelta =
+    before.receipts.length >= MAX_RECEIPTS ? 1 : 0;
+  const retainedBeforeReceipts = before.receipts.slice(
+    Math.max(
+      0,
+      before.receipts.length -
+        (MAX_RECEIPTS - 1),
+    ),
+  );
+  if (
+    after.receipts.length !==
+      Math.min(MAX_RECEIPTS, before.receipts.length + 1) ||
+    after.receipts
+      .slice(0, -1)
+      .some(
+        (record, index) =>
+          record !== retainedBeforeReceipts[index],
+      ) ||
+    after.historyCompaction.archivedReceiptCount !==
+      before.historyCompaction.archivedReceiptCount +
+        archivedReceiptDelta ||
+    after.historyCompaction.archivedTradeCount !==
+      before.historyCompaction.archivedTradeCount ||
+    after.historyCompaction.archivedOrderCount !==
+      before.historyCompaction.archivedOrderCount ||
+    after.historyCompaction.archivedContractCount !==
+      before.historyCompaction.archivedContractCount ||
+    after.historyCompaction.archivedBookCount !==
+      before.historyCompaction.archivedBookCount ||
+    after.historyCompaction.lastCompactedAtMs !==
+      (
+        archivedReceiptDelta > 0
+          ? after.nowMs
+          : before.historyCompaction.lastCompactedAtMs
+      )
+  ) {
+    errors.push('INVALID_RESERVATION_SYNC_HISTORY');
+  }
+  if (
+    receipt.type !== 'SYNC_WORLD' ||
+    receipt.status !== 'applied' ||
+    receipt.reason !== null ||
+    receipt.observationCount !== 0 ||
+    receipt.carryObservationCount !== 0 ||
+    receipt.riskFreeObservationCount !== 0 ||
+    receipt.securityReferenceObservationCount !== 0 ||
+    receipt.riskInputsChanged !== true ||
+    receipt.testingAccessOpened !== false ||
+    receipt.qualificationStatus !==
+      before.access.qualification.status
+  ) {
+    errors.push('INVALID_RESERVATION_SYNC_RECEIPT');
+  }
+  return { ok: errors.length === 0, errors };
+}
+
+function reduceExternalReservationSync(
+  state,
+  command,
+  authoritySeal,
+  inputAuditMode,
+) {
+  const reservedCashCents =
+    command.playerExternalReservedCashCents;
+  const draft = {
+    ...state,
+    accounts: {
+      ...state.accounts,
+      player: {
+        ...state.accounts.player,
+        externalReservedCashCents:
+          reservedCashCents,
+      },
+    },
+    historyCompaction: {
+      ...state.historyCompaction,
+    },
+    receipts: [...state.receipts],
+  };
+  const receipt = appendReceipt(
+    draft,
+    {
+      type: 'SYNC_WORLD',
+      status: 'applied',
+      reason: null,
+      observationCount: 0,
+      carryObservationCount: 0,
+      riskFreeObservationCount: 0,
+      securityReferenceObservationCount: 0,
+      riskInputsChanged: true,
+      testingAccessOpened: false,
+      qualificationStatus:
+        state.access.qualification.status,
+    },
+    command,
+  );
+  const audit = auditIncrementalExternalReservationSync({
+    before: state,
+    after: draft,
+    receipt,
+    reservedCashCents,
+  });
+  if (!audit.ok) {
+    throw new Error(
+      `Derivative external reservation incremental invariant failed: ${audit.errors.join('; ')}`,
+    );
+  }
+  sealIncrementalQuiescentAuthority(
+    draft,
+    authoritySeal.lastFullAuditAtMs,
+  );
+  recordDerivativeReducerDiagnostics(draft, {
+    commandType: command.type,
+    inputAuditMode,
+    auditMode: 'incremental',
+    riskMode: 'external_reservation_only',
+    riskRefreshPasses: 0,
+    dirtyBookCount: 0,
+    commandCount: 0,
+    draftMode: 'reservation_sync_cow',
+    actorPreviewIndexMode: 'not_applicable',
+    actorPreviewOrderScans: 0,
+    actorPreviewCertificateMode: 'not_applicable',
+    actorPreviewCertifiedThroughMs: draft.nowMs,
+    historyCompactionMode: 'receipt_only',
+    sealMode: 'incremental_known_nodes',
+  });
+  return { state: draft, receipt };
+}
+
 function syncWorld(state, command, context = {}) {
   if (
     command.testingAccessOpen !== undefined &&
@@ -3971,6 +4384,208 @@ function canUseQuiescentCadenceDraft(
   );
 }
 
+function recordActorDecisionSpotReferences(
+  state,
+  actor,
+) {
+  if (
+    !Object.hasOwn(
+      actor,
+      'lastObservedSpotTicksByUnderlying',
+    )
+  ) {
+    return;
+  }
+  const nextReferences = Object.fromEntries(
+    Object.values(state.universe.underlyings).map(
+      (underlying) => [
+        underlying.id,
+        underlying.spotTicks,
+      ],
+    ),
+  );
+  const previousReferences =
+    actor.lastObservedSpotTicksByUnderlying;
+  if (
+    previousReferences &&
+    Object.keys(previousReferences).length ===
+      Object.keys(nextReferences).length &&
+    Object.entries(nextReferences).every(
+      ([underlyingId, spotTicks]) =>
+        previousReferences[underlyingId] === spotTicks,
+    )
+  ) {
+    return;
+  }
+  actor.lastObservedSpotTicksByUnderlying =
+    nextReferences;
+}
+
+function createProfessionalEcologyState() {
+  return {
+    schemaVersion: PROFESSIONAL_ECOLOGY_STATE_SCHEMA,
+    ruleVersion: PROFESSIONAL_ECOLOGY_CONTROL_VERSION,
+    authority: 'controller_policy_only',
+    integrationStatus: 'production_replacement_gate',
+    executionMode: 'replace_existing_actor_batch',
+    policiesByActorId: {},
+  };
+}
+
+function professionalActorPolicyReason(
+  state,
+  actorId,
+  policy,
+) {
+  if (
+    !policy ||
+    typeof policy !== 'object' ||
+    Array.isArray(policy) ||
+    policy.schemaVersion !==
+      PROFESSIONAL_ECOLOGY_POLICY_SCHEMA ||
+    typeof policy.controlId !== 'string' ||
+    policy.controlId.length === 0 ||
+    typeof policy.enabled !== 'boolean' ||
+    !Number.isSafeInteger(policy.intensityBps) ||
+    policy.intensityBps < 0 ||
+    policy.intensityBps > BPS ||
+    !Number.isSafeInteger(policy.maxSubmitCommands) ||
+    policy.maxSubmitCommands < 0 ||
+    policy.maxSubmitCommands >
+      MAX_PROFESSIONAL_SUBMIT_COMMANDS ||
+    !Number.isSafeInteger(policy.maxContractsPerOrder) ||
+    policy.maxContractsPerOrder < 1 ||
+    !Number.isSafeInteger(policy.maxBatchNotionalCents) ||
+    policy.maxBatchNotionalCents < 1 ||
+    !Array.isArray(policy.allowedContractTypes) ||
+    policy.allowedContractTypes.length === 0 ||
+    new Set(policy.allowedContractTypes).size !==
+      policy.allowedContractTypes.length ||
+    policy.allowedContractTypes.some(
+      (type) => type !== 'future' && type !== 'option',
+    )
+  ) {
+    return 'PROFESSIONAL_ACTOR_POLICY_INVALID';
+  }
+  const actor = state.actors?.[actorId];
+  if (!actor || actor.accountId !== actorId) {
+    return 'PROFESSIONAL_ACTOR_UNKNOWN';
+  }
+  return null;
+}
+
+function setProfessionalActorControl(state, command) {
+  if (
+    command.source !==
+      'controller_professional_ecology_policy'
+  ) {
+    return rejected(
+      'SET_PROFESSIONAL_ACTOR_CONTROL',
+      'CONTROLLER_AUTHORITY_REQUIRED',
+    );
+  }
+  const actorId = command.actorId;
+  const policy = {
+    schemaVersion: PROFESSIONAL_ECOLOGY_POLICY_SCHEMA,
+    controlId: command.policy?.controlId,
+    enabled: command.policy?.enabled,
+    intensityBps: command.policy?.intensityBps,
+    maxSubmitCommands:
+      command.policy?.maxSubmitCommands,
+    maxContractsPerOrder:
+      command.policy?.maxContractsPerOrder,
+    maxBatchNotionalCents:
+      command.policy?.maxBatchNotionalCents,
+    allowedContractTypes: Array.isArray(
+      command.policy?.allowedContractTypes,
+    )
+      ? [...command.policy.allowedContractTypes]
+      : command.policy?.allowedContractTypes,
+  };
+  const reason = professionalActorPolicyReason(
+    state,
+    actorId,
+    policy,
+  );
+  if (reason) {
+    return rejected(
+      'SET_PROFESSIONAL_ACTOR_CONTROL',
+      reason,
+    );
+  }
+  state.market.professionalEcology
+    .policiesByActorId[actorId] = policy;
+  return {
+    type: 'SET_PROFESSIONAL_ACTOR_CONTROL',
+    status: 'applied',
+    reason: null,
+    actorId,
+    integrationStatus: 'production_replacement_gate',
+    executionMode: 'replace_existing_actor_batch',
+    policy: cloneJson(policy),
+  };
+}
+
+function controlledProfessionalActorBatch(
+  state,
+  actorId,
+  candidateCommands,
+) {
+  const policy = state.market.professionalEcology
+    ?.policiesByActorId?.[actorId];
+  if (!policy?.enabled) {
+    return {
+      commands: candidateCommands,
+      evidence: null,
+    };
+  }
+  const batch = constrainDerivativeActorCommands({
+    state,
+    actorId,
+    atMs: state.nowMs,
+    candidateCommands,
+    control: {
+      schemaVersion: PROFESSIONAL_ECOLOGY_CONTROL_SCHEMA,
+      controlId: policy.controlId,
+      active: true,
+      observedCommitSeq: state.commitSeq,
+      issuedAtMs: state.nowMs,
+      expiresAtMs: state.nowMs,
+      intensityBps: policy.intensityBps,
+      maxSubmitCommands: policy.maxSubmitCommands,
+      maxContractsPerOrder: policy.maxContractsPerOrder,
+      maxBatchNotionalCents:
+        policy.maxBatchNotionalCents,
+      allowedContractTypes: [
+        ...policy.allowedContractTypes,
+      ],
+    },
+  });
+  return {
+    commands: batch.commands,
+    evidence: {
+      actorId,
+      controlId: policy.controlId,
+      status: batch.status,
+      executionMode: batch.executionMode,
+      reasonCodes: [...batch.reasonCodes],
+      ...batch.controlProof,
+    },
+  };
+}
+
+function professionalEcologyCycleSummary(actorBatches = []) {
+  return {
+    schemaVersion: PROFESSIONAL_ECOLOGY_STATE_SCHEMA,
+    ruleVersion: PROFESSIONAL_ECOLOGY_CONTROL_VERSION,
+    authority: 'controller_policy_before_derivatives_reducer',
+    integrationStatus: 'production_replacement_gate',
+    executionMode: 'replace_existing_actor_batch',
+    controlledActorCount: actorBatches.length,
+    actorBatches,
+  };
+}
+
 function actorCycle(state, context = {}) {
   const actorIds = Object.keys(state.actors).sort(
     (left, right) =>
@@ -3998,6 +4613,8 @@ function actorCycle(state, context = {}) {
         rejectionReasons: {},
       },
       facilityActions: [],
+      professionalEcology:
+        professionalEcologyCycleSummary(),
       lastActorCycleAtMs:
         state.market.lastActorCycleAtMs,
       nextActorCycleAtMs:
@@ -4009,6 +4626,10 @@ function actorCycle(state, context = {}) {
       const actor = state.actors[actorId];
       actor.lastDecisionAtMs = state.nowMs;
       actor.decisionCount += 1;
+      recordActorDecisionSpotReferences(
+        state,
+        actor,
+      );
     }
     state.market.lastActorCycleAtMs = state.nowMs;
     state.market.nextActorCycleAtMs =
@@ -4029,6 +4650,8 @@ function actorCycle(state, context = {}) {
         rejectionReasons: {},
       },
       facilityActions: [],
+      professionalEcology:
+        professionalEcologyCycleSummary(),
       lastActorCycleAtMs:
         state.market.lastActorCycleAtMs,
       nextActorCycleAtMs:
@@ -4062,11 +4685,12 @@ function actorCycle(state, context = {}) {
   };
   let commandCount = 0;
   const tradesBefore = state.market.trades.length;
+  const professionalActorBatches = [];
   const facilityActions =
     rebalanceInstitutionalFacilities(state);
   for (const actorId of actorIds) {
     const actor = state.actors[actorId];
-    const commands = deriveActorCommands(
+    const candidateCommands = deriveActorCommands(
       state,
       actorId,
       state.nowMs,
@@ -4083,6 +4707,17 @@ function actorCycle(state, context = {}) {
         ),
       },
     );
+    const controlled = controlledProfessionalActorBatch(
+      state,
+      actorId,
+      candidateCommands,
+    );
+    if (controlled.evidence) {
+      professionalActorBatches.push(
+        controlled.evidence,
+      );
+    }
+    const commands = controlled.commands;
     for (const command of commands) {
       const receipt =
         command.type === 'CANCEL_ORDER'
@@ -4106,6 +4741,7 @@ function actorCycle(state, context = {}) {
     }
     actor.lastDecisionAtMs = state.nowMs;
     actor.decisionCount += 1;
+    recordActorDecisionSpotReferences(state, actor);
   }
   state.market.lastActorCycleAtMs = state.nowMs;
   state.market.nextActorCycleAtMs =
@@ -4121,6 +4757,10 @@ function actorCycle(state, context = {}) {
       state.market.trades.length - tradesBefore,
     commandSummary,
     facilityActions,
+    professionalEcology:
+      professionalEcologyCycleSummary(
+        professionalActorBatches,
+      ),
     lastActorCycleAtMs:
       state.market.lastActorCycleAtMs,
     nextActorCycleAtMs:
@@ -4162,6 +4802,8 @@ function actorCycleNoopReceipt(state, command) {
       rejectionReasons: {},
     },
     facilityActions: [],
+    professionalEcology:
+      professionalEcologyCycleSummary(),
     lastActorCycleAtMs:
       state.market.lastActorCycleAtMs,
     nextActorCycleAtMs:
@@ -4291,7 +4933,7 @@ function settleDay(state) {
       );
     const settlementPriceTicks =
       lastTrade?.priceTicks ??
-      state.market.settlementPriceTicks[contract.id];
+      futuresTheoreticalPriceTicks(state, contract);
     const variation = settleFutureVariation({
       accounts: state.accounts,
       contract,
@@ -4316,7 +4958,7 @@ function settleDay(state) {
               contractBasketIdentity(contract),
           }
         : {
-            source: 'prior_settlement_fallback',
+            source: 'cost_of_carry_settlement_reference',
             tradeId: null,
             lastIncludedTradeSequence,
             atMs: state.nowMs,
@@ -5544,6 +6186,8 @@ function routeCommand(state, command, context = {}) {
       return submitOrder(state, command, context);
     case 'CANCEL_ORDER':
       return cancelOrder(state, command, context);
+    case 'SET_PROFESSIONAL_ACTOR_CONTROL':
+      return setProfessionalActorControl(state, command);
     case 'RUN_ACTOR_CYCLE':
       return actorCycle(state, context);
     case 'ADVANCE_MARKET_CADENCE':
@@ -5633,7 +6277,13 @@ function cadenceHasPostActorRiskMutations(
 function hasTimeSensitiveRiskExposure(state) {
   return Object.values(state.accounts).some((account) =>
     Object.values(account.positions ?? {}).some(
-      (position) => position.quantity !== 0,
+      (position) =>
+        position.quantity !== 0 &&
+        Boolean(
+          state.universe.options?.[
+            position.contractId
+          ],
+        ),
     ),
   );
 }
@@ -5955,6 +6605,20 @@ function auditIncrementalQuiescentCadence({
     for (const actorId of beforeActorIds) {
       const prior = before.actors[actorId];
       const current = after.actors[actorId];
+      const observesSpotReferences = Object.hasOwn(
+        prior,
+        'lastObservedSpotTicksByUnderlying',
+      );
+      const expectedSpotReferences = observesSpotReferences
+        ? Object.fromEntries(
+            Object.values(after.universe.underlyings).map(
+              (underlying) => [
+                underlying.id,
+                underlying.spotTicks,
+              ],
+            ),
+          )
+        : null;
       if (
         !sameOwnFieldsExcept(
           prior,
@@ -5962,11 +6626,21 @@ function auditIncrementalQuiescentCadence({
           new Set([
             'lastDecisionAtMs',
             'decisionCount',
+            ...(observesSpotReferences
+              ? ['lastObservedSpotTicksByUnderlying']
+              : []),
           ]),
         ) ||
         current.lastDecisionAtMs !== after.nowMs ||
         current.decisionCount !==
-          prior.decisionCount + 1
+          prior.decisionCount + 1 ||
+        (
+          observesSpotReferences &&
+          !samePrimitiveMap(
+            current.lastObservedSpotTicksByUnderlying,
+            expectedSpotReferences,
+          )
+        )
       ) {
         errors.push(
           `UNEXPECTED_INCREMENTAL_ACTOR_CHANGE:${actorId}`,
@@ -6248,6 +6922,8 @@ export function createDerivativesState({
       nextActorCycleAtMs: nowMs,
       trades: [],
       seriesByContract: {},
+      professionalEcology:
+        createProfessionalEcologyState(),
     },
     clearing: {
       creditPoolCents: CREDIT_FACILITY_CAPACITY_CENTS,
@@ -6328,6 +7004,20 @@ export function reduceDerivatives(state, command) {
     assertSealedDerivativeAuthorityUnchanged(
       state,
       authoritySeal,
+    );
+  }
+  if (
+    canUseExternalReservationSync(
+      state,
+      command,
+      authoritySeal,
+    )
+  ) {
+    return reduceExternalReservationSync(
+      state,
+      command,
+      authoritySeal,
+      inputAuditMode,
     );
   }
   if (actorCycleNotDue(state, command)) {
@@ -6864,14 +7554,30 @@ function migrateDerivativeClearingState(state) {
         DERIVATIVE_ACTOR_CADENCE_MS;
 }
 
+function migrateProfessionalEcologyState(state) {
+  if (state.market.professionalEcology === undefined) {
+    state.market.professionalEcology =
+      createProfessionalEcologyState();
+    return true;
+  }
+  return false;
+}
+
 function migrateDerivativeContractNetwork(state) {
   migrateDerivativeClearingState(state);
+  const actorCatalogMigrated =
+    migrateDerivativeActorCatalog(state.actors);
   const sourceRuleVersion = state.ruleVersion;
   const sourceContractRuleVersion =
     state.universe?.ruleVersion;
   const universeMigrated =
     migrateContractUniverse(state.universe);
-  let migrated = universeMigrated;
+  const professionalEcologyMigrated =
+    migrateProfessionalEcologyState(state);
+  let migrated =
+    universeMigrated ||
+    actorCatalogMigrated ||
+    professionalEcologyMigrated;
   const migratingLegacyBasketState = [
     PREVIOUS_BASKET_DERIVATIVES_RULE_VERSION,
     LEGACY_DERIVATIVES_RULE_VERSION,
@@ -7338,7 +8044,11 @@ function optionGreekProjections(state, player) {
   return { diagnostics, exposures };
 }
 
-function positionMarkProjections(state, player) {
+function positionMarkProjections(
+  state,
+  player,
+  priceAuthoritiesByContract,
+) {
   const projected = {};
   for (const position of Object.values(player.positions)) {
     if (position.quantity === 0) continue;
@@ -7347,26 +8057,17 @@ function positionMarkProjections(state, player) {
       position.contractId,
     );
     if (!contract) continue;
-    const lastTrade =
-      state.market.lastTradePriceTicks[contract.id];
-    const settlement =
-      state.market.settlementPriceTicks[contract.id];
-    const hasLastTrade =
-      Number.isSafeInteger(lastTrade) && lastTrade > 0;
-    const hasSettlement =
-      Number.isSafeInteger(settlement) &&
-      settlement > 0;
-    const markPriceTicks = hasLastTrade
-      ? lastTrade
-      : hasSettlement
-        ? settlement
+    const authority =
+      priceAuthoritiesByContract[contract.id];
+    const projectedMark = authority?.mark;
+    const markPriceTicks =
+      Number.isSafeInteger(projectedMark?.priceTicks) &&
+      projectedMark.priceTicks > 0
+        ? projectedMark.priceTicks
         : position.lastSettlementPriceTicks ??
           position.averageOpenPriceTicks;
-    const markSource = hasLastTrade
-      ? 'matched_trade'
-      : hasSettlement
-        ? 'clearing_settlement'
-        : 'position_basis';
+    const markSource =
+      projectedMark?.source ?? 'position_basis';
     const basisTicks =
       contract.type === 'future'
         ? position.lastSettlementPriceTicks ??
@@ -7428,6 +8129,7 @@ function futuresTheoreticalPriceTicks(state, contract) {
 function priceAuthorityProjections(
   state,
   optionDiagnostics,
+  books,
 ) {
   const latestTradeByContract = new Map();
   for (const trade of state.market.trades) {
@@ -7462,16 +8164,43 @@ function priceAuthorityProjections(
       const hasSettlement =
         Number.isSafeInteger(settlementPriceTicks) &&
         settlementPriceTicks > 0;
-      const markPriceTicks = lastTrade
-        ? lastTrade.priceTicks
-        : hasSettlement
-          ? settlementPriceTicks
-          : theoreticalPriceTicks;
-      const markSource = lastTrade
-        ? 'matched_trade'
-        : hasSettlement
-          ? 'clearing_settlement'
-          : 'theoretical_reference_no_trade';
+      const executableBook = books[contract.id];
+      const bestBid = executableBook?.bids?.[0];
+      const bestAsk = executableBook?.asks?.[0];
+      const hasExecutableMidpoint = Boolean(
+        Number.isSafeInteger(bestBid?.priceTicks) &&
+          Number.isSafeInteger(bestAsk?.priceTicks) &&
+          bestBid.priceTicks > 0 &&
+          bestAsk.priceTicks > bestBid.priceTicks,
+      );
+      const executableMidpointTicks =
+        hasExecutableMidpoint
+          ? Math.max(
+              contract.tickSize,
+              Math.round(
+                (
+                  bestBid.priceTicks +
+                  bestAsk.priceTicks
+                ) /
+                  2 /
+                  contract.tickSize,
+              ) * contract.tickSize,
+            )
+          : null;
+      const markPriceTicks = hasExecutableMidpoint
+        ? executableMidpointTicks
+        : lastTrade
+          ? lastTrade.priceTicks
+          : hasSettlement
+            ? settlementPriceTicks
+            : theoreticalPriceTicks;
+      const markSource = hasExecutableMidpoint
+        ? 'executable_midpoint'
+        : lastTrade
+          ? 'matched_trade'
+          : hasSettlement
+            ? 'clearing_settlement'
+            : 'theoretical_reference_no_trade';
       return [
         contract.id,
         {
@@ -7501,12 +8230,14 @@ function priceAuthorityProjections(
           mark: {
             priceTicks: markPriceTicks,
             source: markSource,
-            asOfMs: lastTrade
-              ? lastTrade.atMs
-              : hasSettlement
-                ? settlementSource?.atMs ??
-                  state.market.lastSettlementAtMs
-                : null,
+            asOfMs: hasExecutableMidpoint
+              ? state.nowMs
+              : lastTrade
+                ? lastTrade.atMs
+                : hasSettlement
+                  ? settlementSource?.atMs ??
+                    state.market.lastSettlementAtMs
+                  : state.nowMs,
           },
           theoretical: {
             priceTicks: theoreticalPriceTicks,
@@ -7537,10 +8268,17 @@ export function snapshotDerivatives(state, depth = 5) {
   const institutionalOutstandingCents =
     creditAvailability.outstandingCents -
     playerOutstandingCents;
+  const books = Object.fromEntries(
+    Object.entries(state.books).map(([contractId, book]) => [
+      contractId,
+      aggregateBook(book, depth),
+    ]),
+  );
   const priceAuthoritiesByContract =
     priceAuthorityProjections(
       state,
       optionGreeks.diagnostics,
+      books,
     );
   return cloneJson({
     publication: 'lzy_derivatives_public_v1',
@@ -7555,17 +8293,22 @@ export function snapshotDerivatives(state, depth = 5) {
         ]),
       ),
     },
+    professionalEcology: {
+      schemaVersion: PROFESSIONAL_ECOLOGY_STATE_SCHEMA,
+      ruleVersion: PROFESSIONAL_ECOLOGY_CONTROL_VERSION,
+      authority: 'controller_policy_only',
+      integrationStatus: 'production_replacement_gate',
+      executionMode: 'replace_existing_actor_batch',
+      policiesByActorId:
+        state.market.professionalEcology
+          .policiesByActorId,
+    },
     contracts: {
       underlyings: state.universe.underlyings,
       futures: state.universe.futures,
       options: state.universe.options,
     },
-    books: Object.fromEntries(
-      Object.entries(state.books).map(([contractId, book]) => [
-        contractId,
-        aggregateBook(book, depth),
-      ]),
-    ),
+    books,
     lastTradePriceTicks:
       state.market.lastTradePriceTicks,
     settlementPriceTicks:
@@ -7710,6 +8453,7 @@ export function snapshotDerivatives(state, depth = 5) {
       positionMarks: positionMarkProjections(
         state,
         player,
+        priceAuthoritiesByContract,
       ),
       openOrders: Object.values(state.books).flatMap(
         (book) =>
@@ -7955,6 +8699,41 @@ function derivativeSeriesAuditErrors(state) {
   return errors;
 }
 
+function professionalEcologyAuditErrors(state) {
+  const ecology = state.market?.professionalEcology;
+  if (
+    !ecology ||
+    ecology.schemaVersion !==
+      PROFESSIONAL_ECOLOGY_STATE_SCHEMA ||
+    ecology.ruleVersion !==
+      PROFESSIONAL_ECOLOGY_CONTROL_VERSION ||
+    ecology.authority !== 'controller_policy_only' ||
+    ecology.integrationStatus !==
+      'production_replacement_gate' ||
+    ecology.executionMode !==
+      'replace_existing_actor_batch' ||
+    !ecology.policiesByActorId ||
+    typeof ecology.policiesByActorId !== 'object' ||
+    Array.isArray(ecology.policiesByActorId)
+  ) {
+    return ['INVALID_PROFESSIONAL_ECOLOGY_STATE'];
+  }
+  const errors = [];
+  for (const [actorId, policy] of Object.entries(
+    ecology.policiesByActorId,
+  )) {
+    const reason = professionalActorPolicyReason(
+      state,
+      actorId,
+      policy,
+    );
+    if (reason) {
+      errors.push(`${reason}:${actorId}`);
+    }
+  }
+  return errors;
+}
+
 export function auditDerivativesState(state) {
   const errors = [];
   if (
@@ -7979,6 +8758,7 @@ export function auditDerivativesState(state) {
   );
   errors.push(...contractAudit.errors);
   errors.push(...derivativeSeriesAuditErrors(state));
+  errors.push(...professionalEcologyAuditErrors(state));
   for (const contract of allContracts(
     state.universe ?? {},
   )) {

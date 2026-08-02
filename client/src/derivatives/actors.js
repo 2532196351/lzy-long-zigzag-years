@@ -3,14 +3,14 @@ import {
   priceEuropeanOption,
   resolveOptionCarryInputs,
   surfaceVolatilityPpm,
-} from './pricing.js?v=20260801-01';
+} from './pricing.js?v=20260803-02';
 import {
   contractReferenceSpotTicks,
-} from './contracts.js?v=20260801-01';
-import { markAccountEquity } from './risk.js?v=20260801-01';
+} from './contracts.js?v=20260803-02';
+import { markAccountEquity } from './risk.js?v=20260803-02';
 
 export const ACTOR_RULE_VERSION =
-  'lzy-derivative-actors-v1';
+  'lzy-derivative-actors-v2';
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
 const BPS = 10_000;
@@ -97,7 +97,7 @@ const ACTOR_TEMPLATES = Object.freeze({
     openingCashCents: 2_400_000_000,
     capacityCents: 1_800_000_000,
     baseOrderContracts: 3,
-    maximumOpenContracts: 60,
+    maximumOpenContracts: 120,
     carryRateBps: 260,
     inventorySkewTicks: 2,
     minimumHalfSpreadTicks: 40,
@@ -182,8 +182,11 @@ const ACTOR_TEMPLATES = Object.freeze({
     openingCashCents: 300_000_000,
     capacityCents: 160_000_000,
     baseOrderContracts: 1,
-    maximumOpenContracts: 40,
+    maximumOpenContracts: 120,
     jumpRiskThresholdBps: 450,
+    spotShockThresholdBps: 600,
+    maximumShockOrderContracts: 4,
+    lastObservedSpotTicksByUnderlying: Object.freeze({}),
   }),
 });
 
@@ -220,11 +223,7 @@ function actorManagesContract(state, actor, contractId) {
     case 'surface_and_delta_inventory':
       return Boolean(option || future);
     case 'convex_tail_risk_demand':
-      return Boolean(
-        option &&
-          option.kind === 'put' &&
-          option.underlyingId === 'SYNTH300',
-      );
+      return Boolean(option);
     default:
       return false;
   }
@@ -594,12 +593,58 @@ function order(
   };
 }
 
+function bestCounterpartyLevel(
+  state,
+  contractId,
+  takerSide,
+  excludeOwnerId,
+) {
+  const wantedSide =
+    takerSide === 'buy' ? 'sell' : 'buy';
+  let priceTicks = null;
+  let quantity = 0;
+  for (const candidate of Object.values(
+    state.books?.[contractId]?.orders ?? {},
+  )) {
+    if (
+      candidate.side !== wantedSide ||
+      candidate.ownerId === excludeOwnerId ||
+      !activeOrder(candidate)
+    ) {
+      continue;
+    }
+    const better =
+      priceTicks === null ||
+      (takerSide === 'buy'
+        ? candidate.priceTicks < priceTicks
+        : candidate.priceTicks > priceTicks);
+    if (better) {
+      priceTicks = candidate.priceTicks;
+      quantity = candidate.remainingQty;
+    } else if (candidate.priceTicks === priceTicks) {
+      quantity += candidate.remainingQty;
+    }
+  }
+  return priceTicks === null
+    ? null
+    : { priceTicks, quantity };
+}
+
 function futuresFairTicks(state, actor, contract) {
   const underlying =
     state.universe.underlyings[contract.underlyingId];
   const spotTicks = referenceSpotTicks(state, contract);
+  // Futures carry is settled on the natural-day boundary.  Recomputing the
+  // same standing curve from the continuously advancing millisecond clock can
+  // move a large-notional contract across one exchange tick after only a few
+  // seconds, even though spot, funding and inventory are unchanged.  That
+  // causes a full cancel/reinsert of otherwise identical GTC liquidity and
+  // destroys queue priority.  Mark carry at the current settlement-day open;
+  // intraday spot/rate/inventory changes still reprice immediately, while pure
+  // elapsed milliseconds roll once at the next lawful daily settlement.
+  const carryMarkMs = Math.floor(state.nowMs / DAY_MS) * DAY_MS;
   const remainingYears =
-    Math.max(0, contract.expiryMs - state.nowMs) /
+    Math.max(0, contract.expiryMs - carryMarkMs) /
     (365 * DAY_MS);
   const carryRateBps =
     underlying.carryRateBps ??
@@ -1123,6 +1168,25 @@ function basisCommands(state, actor, atMs) {
           ) {
             const side =
               traded > fair ? 'sell' : 'buy';
+            const counterparty = bestCounterpartyLevel(
+              state,
+              contract.id,
+              side,
+              actor.accountId,
+            );
+            const executable = Boolean(
+              counterparty &&
+                (
+                  side === 'buy'
+                    ? counterparty.priceTicks <= traded
+                    : counterparty.priceTicks >= traded
+                ),
+            );
+            // An IOC is a real executable attempt, not a polling message.  If
+            // the dislocation remains in the last print but no counterparty is
+            // presently reachable at that price, wait for the public book to
+            // change instead of creating one doomed order every three seconds.
+            if (!executable) return [];
             return [
               order(
                 actor,
@@ -1228,31 +1292,259 @@ function hedgerCommands(state, actor, atMs) {
     actor.targetShortContracts + existing,
   );
   if (remaining === 0) return [];
-  const fair = futuresFairTicks(state, actor, contract);
+  const executableBid = bestCounterpartyLevel(
+    state,
+    contract.id,
+    'sell',
+    actor.accountId,
+  );
+  if (!executableBid) {
+    const fair = futuresFairTicks(
+      state,
+      actor,
+      contract,
+    );
+    return [
+      order(
+        actor,
+        atMs,
+        contract,
+        'sell',
+        ceilToTick(
+          fair + contract.tickSize * 4,
+          contract.tickSize,
+        ),
+        Math.min(
+          remaining,
+          actorOrderQuantity(state, actor),
+        ),
+      ),
+    ];
+  }
   return [
     order(
       actor,
       atMs,
       contract,
       'sell',
-      ceilToTick(
-        fair + contract.tickSize * 4,
-        contract.tickSize,
-      ),
+      executableBid.priceTicks,
       Math.min(
         remaining,
         actorOrderQuantity(state, actor),
+        executableBid.quantity,
+        1,
       ),
+      'IOC',
     ),
   ];
 }
 
+function latestSpotImpulse(
+  state,
+  actor,
+  underlyingId,
+  atMs,
+) {
+  const actorReferenceTicks =
+    actor.lastObservedSpotTicksByUnderlying?.[
+      underlyingId
+    ];
+  const currentSpotTicks =
+    state.universe.underlyings[underlyingId]
+      ?.spotTicks;
+  if (
+    Number.isSafeInteger(actorReferenceTicks) &&
+    actorReferenceTicks > 0 &&
+    Number.isSafeInteger(currentSpotTicks) &&
+    currentSpotTicks > 0
+  ) {
+    return {
+      previousSpotTicks: actorReferenceTicks,
+      spotTicks: currentSpotTicks,
+      moveBps: Math.round(
+        (currentSpotTicks - actorReferenceTicks) *
+          BPS /
+          actorReferenceTicks,
+      ),
+    };
+  }
+  const observations =
+    state.market.referenceObservations ?? [];
+  let latest = null;
+  let prior = null;
+  for (let index = observations.length - 1;
+    index >= 0;
+    index -= 1) {
+    const observation = observations[index];
+    if (observation.underlyingId !== underlyingId) {
+      continue;
+    }
+    if (!latest) {
+      latest = observation;
+      continue;
+    }
+    if (observation.atMs < latest.atMs) {
+      prior = observation;
+      break;
+    }
+  }
+  if (
+    !latest ||
+    !prior ||
+    latest.atMs !== atMs ||
+    prior.spotTicks <= 0
+  ) {
+    return null;
+  }
+  return {
+    previousSpotTicks: prior.spotTicks,
+    spotTicks: latest.spotTicks,
+    moveBps: Math.round(
+      (latest.spotTicks - prior.spotTicks) *
+        BPS /
+        prior.spotTicks,
+    ),
+  };
+}
+
+function shockOptionDemandCommands(state, actor, atMs) {
+  const commands = [];
+  for (const underlying of Object.values(
+    state.universe.underlyings,
+  )) {
+    const impulse = latestSpotImpulse(
+      state,
+      actor,
+      underlying.id,
+      atMs,
+    );
+    const absoluteMoveBps = Math.abs(
+      impulse?.moveBps ?? 0,
+    );
+    if (
+      !impulse ||
+      absoluteMoveBps <
+        (actor.spotShockThresholdBps ?? 600)
+    ) {
+      continue;
+    }
+    const kind = impulse.moveBps > 0 ? 'call' : 'put';
+    const contract = Object.values(
+      state.universe.options,
+    )
+      .filter(
+        (candidate) =>
+          candidate.status === 'active' &&
+          candidate.expiryMs > atMs &&
+          candidate.underlyingId === underlying.id &&
+          candidate.kind === kind,
+      )
+      .sort(
+        (left, right) =>
+          left.expiryMs - right.expiryMs ||
+          Math.abs(
+            left.strikeTicks -
+              impulse.previousSpotTicks,
+          ) -
+            Math.abs(
+              right.strikeTicks -
+                impulse.previousSpotTicks,
+            ) ||
+          left.id.localeCompare(right.id),
+      )[0];
+    if (!contract) continue;
+    const executableAsk = bestCounterpartyLevel(
+      state,
+      contract.id,
+      'buy',
+      actor.accountId,
+    );
+    if (!executableAsk) continue;
+    const shockVolatilityPpm = Math.min(
+      1_500_000,
+      contract.baseVolatilityPpm +
+        Math.min(500_000, absoluteMoveBps * 100),
+    );
+    const model = priceEuropeanOption({
+      kind: contract.kind,
+      spotTicks: impulse.spotTicks,
+      strikeTicks: contract.strikeTicks,
+      timeToExpiryMs: Math.max(
+        0,
+        contract.expiryMs - atMs,
+      ),
+      volatilityPpm: shockVolatilityPpm,
+      ...resolveOptionCarryInputs({
+        contract,
+        underlying,
+      }),
+    });
+    const maximumWillingnessTicks =
+      ceilToTick(
+        model.priceTicks + contract.tickSize * 2,
+        contract.tickSize,
+      );
+    if (
+      executableAsk.priceTicks >
+      maximumWillingnessTicks
+    ) {
+      continue;
+    }
+    const existingLong = Math.max(
+      0,
+      state.accounts[actor.accountId].positions[
+        contract.id
+      ]?.quantity ?? 0,
+    );
+    const targetQuantity = Math.min(
+      actor.maximumShockOrderContracts ?? 4,
+      1 +
+        Math.floor(
+          (
+            absoluteMoveBps -
+            (actor.spotShockThresholdBps ?? 600)
+          ) /
+            500,
+        ),
+    );
+    const quantity = Math.min(
+      executableAsk.quantity,
+      actorOrderQuantity(state, actor),
+      Math.max(0, targetQuantity - existingLong),
+    );
+    if (quantity <= 0) continue;
+    commands.push({
+      ...order(
+        actor,
+        atMs,
+        contract,
+        'buy',
+        executableAsk.priceTicks,
+        quantity,
+        'IOC',
+      ),
+      observedUnderlyingMoveBps: impulse.moveBps,
+      observedPreviousSpotTicks:
+        impulse.previousSpotTicks,
+      observedSpotTicks: impulse.spotTicks,
+      executionPurpose:
+        'event_driven_convexity_demand',
+    });
+  }
+  return commands;
+}
+
 function tailRiskCommands(state, actor, atMs) {
+  const shockCommands = shockOptionDemandCommands(
+    state,
+    actor,
+    atMs,
+  );
   if (
     state.market.jumpRiskBps <
     actor.jumpRiskThresholdBps
   ) {
-    return [];
+    return shockCommands;
   }
   const option = Object.values(state.universe.options)
     .filter(
@@ -1266,7 +1558,7 @@ function tailRiskCommands(state, actor, atMs) {
         left.expiryMs - right.expiryMs ||
         left.strikeTicks - right.strikeTicks,
     )[0];
-  if (!option) return [];
+  if (!option) return shockCommands;
   const spotTicks = referenceSpotTicks(state, option);
   const model = priceEuropeanOption({
     kind: option.kind,
@@ -1283,6 +1575,7 @@ function tailRiskCommands(state, actor, atMs) {
     }),
   });
   return [
+    ...shockCommands,
     order(
       actor,
       atMs,
@@ -1308,6 +1601,40 @@ export function createDerivativeActorCatalog() {
       },
     ]),
   );
+}
+
+export function migrateDerivativeActorCatalog(actors) {
+  if (
+    !actors ||
+    typeof actors !== 'object' ||
+    Array.isArray(actors)
+  ) {
+    throw new TypeError(
+      'Derivative actor catalog must be an object',
+    );
+  }
+  let migrated = false;
+  const canonical = createDerivativeActorCatalog();
+  for (const [actorId, template] of Object.entries(
+    canonical,
+  )) {
+    if (!actors[actorId]) {
+      actors[actorId] = template;
+      migrated = true;
+      continue;
+    }
+    const actor = actors[actorId];
+    for (const [key, value] of Object.entries(template)) {
+      if (actor[key] !== undefined) continue;
+      actor[key] = cloneJson(value);
+      migrated = true;
+    }
+    if (actor.ruleVersion !== ACTOR_RULE_VERSION) {
+      actor.ruleVersion = ACTOR_RULE_VERSION;
+      migrated = true;
+    }
+  }
+  return migrated;
 }
 
 export function derivativeActorAccountSpecs() {
@@ -1467,6 +1794,34 @@ export function actorOrderInvariantErrors(state) {
     }
     accountIds.add(actor.accountId);
     if (!account) continue;
+    const spotReferences =
+      actor.lastObservedSpotTicksByUnderlying;
+    if (spotReferences !== undefined) {
+      if (
+        !spotReferences ||
+        typeof spotReferences !== 'object' ||
+        Array.isArray(spotReferences)
+      ) {
+        errors.push(
+          `INVALID_ACTOR_SPOT_REFERENCE:${actor.id}:catalog`,
+        );
+      } else {
+        for (const [underlyingId, spotTicks] of
+          Object.entries(spotReferences)) {
+          if (
+            !state.universe?.underlyings?.[
+              underlyingId
+            ] ||
+            !Number.isSafeInteger(spotTicks) ||
+            spotTicks <= 0
+          ) {
+            errors.push(
+              `INVALID_ACTOR_SPOT_REFERENCE:${actor.id}:${underlyingId}`,
+            );
+          }
+        }
+      }
+    }
     const contractIds = new Set(
       Object.keys(account.positions ?? {}),
     );

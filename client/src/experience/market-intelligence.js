@@ -533,10 +533,10 @@ function quoteProjection(
     currentVolumes && currentVolumes.every((value) => value !== null)
       ? currentVolumes
       : null;
-  const sessionVolumeShares = completeCurrentVolumes
+  const retainedSessionVolumeShares = completeCurrentVolumes
     ? completeCurrentVolumes.reduce((sum, value) => sum + value, 0)
     : null;
-  const sessionTurnoverCents = bars
+  const retainedSessionTurnoverCents = bars
     ? bars.reduce((sum, rawBar) => {
         const bar = object(rawBar);
         const turnover =
@@ -545,6 +545,22 @@ function quoteProjection(
         return turnover === null || sum === null ? null : sum + turnover;
       }, 0)
     : null;
+  const authoritativeSessionVolumeShares = nonNegativeInteger(
+    marketView.sessionVolumeShares,
+  );
+  const authoritativeSessionTurnoverCents = nonNegativeInteger(
+    marketView.sessionTurnoverCents,
+  );
+  const hasCompleteCurrentSessionAuthority =
+    nonNegativeInteger(marketView.sessionStartMs) === dayStart &&
+    authoritativeSessionVolumeShares !== null &&
+    authoritativeSessionTurnoverCents !== null;
+  const sessionVolumeShares = hasCompleteCurrentSessionAuthority
+    ? authoritativeSessionVolumeShares
+    : retainedSessionVolumeShares;
+  const sessionTurnoverCents = hasCompleteCurrentSessionAuthority
+    ? authoritativeSessionTurnoverCents
+    : retainedSessionTurnoverCents;
   const dailyBars = archivedDailyBars(
     marketView,
     marketSnapshot,
@@ -649,6 +665,34 @@ function quoteProjection(
       turnover: '当日成交量 ÷ 流通股本',
     },
   };
+}
+
+export function projectMarketQuote(
+  world,
+  marketSnapshot,
+  symbol,
+) {
+  const security = object(
+    object(object(world).market).securities,
+  )[symbol];
+  if (!security) {
+    throw new TypeError(
+      `A listed security is required for ${String(symbol)}.`,
+    );
+  }
+  const market = object(marketSnapshot);
+  const currentTick = Math.max(
+    0,
+    nonNegativeInteger(market.worldTick) ??
+      nonNegativeInteger(object(object(world).world).tick, 0),
+  );
+  return quoteProjection(
+    security,
+    object(object(market.symbols)[symbol]),
+    market,
+    symbol,
+    currentTick,
+  );
 }
 
 function publishedFinancial(company) {
@@ -1177,6 +1221,17 @@ function shareholderProjection(marketView, company, industryId, currentTick) {
       kind: string(holder.kind, 'holder'),
       quantity: nonNegativeInteger(holder.quantity, 0),
       ownershipBps: nonNegativeInteger(holder.ownershipBps),
+      votingRightsBps:
+        nonNegativeInteger(holder.votingRightsBps),
+      beneficialOwner:
+        string(holder.beneficialOwner) || null,
+      holderNature:
+        string(holder.holderNature) || null,
+      controlChain: uniqueStrings(array(holder.controlChain)),
+      lockedUnits:
+        nonNegativeInteger(holder.lockedUnits, 0),
+      pledgedUnits:
+        nonNegativeInteger(holder.pledgedUnits, 0),
       isPlayer: Boolean(holder.isPlayer),
       title: `${company.shortName ?? company.name} · ${holder.name}`,
       summary:
@@ -1205,6 +1260,8 @@ function shareholderProjection(marketView, company, industryId, currentTick) {
         company.symbol,
         holder.name,
         holder.kind,
+        holder.beneficialOwner,
+        holder.holderNature,
         '股东',
         '持有人',
       ]),
@@ -1216,12 +1273,69 @@ function shareholderProjection(marketView, company, industryId, currentTick) {
     );
 }
 
+function businessNetworkProjection(
+  rawSignal,
+  companiesById,
+) {
+  const signal = object(rawSignal);
+  const metrics = [
+    ['demandBps', '客户需求传导'],
+    ['inputAvailabilityBps', '投入可得性'],
+    ['unitCostBps', '供应成本压力'],
+    ['collectionBps', '回款质量'],
+    ['fundingAvailabilityBps', '融资可得性'],
+    ['fundingCostBps', '融资成本压力'],
+    ['investmentIncomeBps', '投资收益传导'],
+  ]
+    .map(([key, label]) => {
+      const value = finite(signal[key]);
+      return value === null
+        ? null
+        : { key, label, valueBps: Math.round(value) };
+    })
+    .filter(Boolean);
+  const causes = array(signal.causes)
+    .map((cause) => {
+      const counterparty = companiesById.get(
+        string(cause?.counterpartyCompanyId),
+      );
+      if (!counterparty) return null;
+      return {
+        counterpartyName: string(
+          counterparty.shortName,
+          counterparty.name,
+        ),
+        relationship: string(cause.relationship),
+        sourceMetric: string(cause.sourceMetric),
+        impactBps: integer(cause.impactBps, 0),
+        lagDays: positiveInteger(cause.lagDays, 1),
+      };
+    })
+    .filter(Boolean)
+    .sort(
+      (left, right) =>
+        Math.abs(right.impactBps) -
+          Math.abs(left.impactBps) ||
+        left.counterpartyName.localeCompare(
+          right.counterpartyName,
+          'zh-CN',
+        ),
+    );
+  return {
+    authority: string(signal.authority),
+    asOfTick: nonNegativeInteger(signal.asOfTick),
+    metrics,
+    causes,
+  };
+}
+
 function supplyDemandProjection(
   company,
   industry,
   factRecords,
   clueRecords,
   currentTick,
+  companiesById,
 ) {
   const businessKind = object(company.businessModel).kind;
   if (
@@ -1290,6 +1404,12 @@ function supplyDemandProjection(
       factRecordIds: latest ? [latest.id] : [],
       clueRecordIds: clueRecords.map((record) => record.id),
       companyId: company.id,
+      businessNetwork: businessNetworkProjection(
+        value.businessNetworkSignal ??
+          company.publishedFinancialSnapshot?.value
+            ?.businessNetworkSignal,
+        companiesById,
+      ),
     };
   }
   const operatingFacts = factRecords.filter((record) =>
@@ -1337,6 +1457,12 @@ function supplyDemandProjection(
     factRecordIds: operatingFacts.map((record) => record.id),
     clueRecordIds: clueRecords.map((record) => record.id),
     companyId: company.id,
+    businessNetwork: businessNetworkProjection(
+      latestValue.businessNetworkSignal ??
+        company.publishedFinancialSnapshot?.value
+          ?.businessNetworkSignal,
+      companiesById,
+    ),
   };
 }
 
@@ -1738,6 +1864,13 @@ export function projectMarketIntelligence(
       company,
     ]),
   );
+  const companyUniverse = object(
+    world.entities.companyUniverseV2,
+  );
+  const companyExtensions = object(companyUniverse.companies);
+  const universeRelationships = array(
+    companyUniverse.relationships,
+  );
   const companyIndustryArchetypes = new Map();
   for (const [id, company] of companiesById) {
     companyIndustryArchetypes.set(id, industryForCompany(company));
@@ -1843,6 +1976,55 @@ export function projectMarketIntelligence(
       const companyInterpretations = interpretations.filter(
         (record) => record.companyId === company.id,
       );
+      const extension = object(companyExtensions[company.id]);
+      const standing = object(extension.standing);
+      const history = object(extension.history);
+      const business = object(extension.business);
+      const financialMechanism = object(
+        extension.financialMechanism,
+      );
+      const governance = object(extension.governance);
+      const stakeholderGroups = object(
+        extension.stakeholderGroups,
+      );
+      const relationshipNetwork = {
+        incoming: universeRelationships.filter(
+          (edge) => edge?.toCompanyId === company.id,
+        ).map((edge) => ({
+          ...edge,
+          counterpartyCompany: (() => {
+            const counterparty = companiesById.get(
+              edge.fromCompanyId,
+            );
+            return counterparty
+              ? {
+                  id: counterparty.id,
+                  name: counterparty.name,
+                  shortName: counterparty.shortName,
+                  symbol: counterparty.symbol,
+                  role: counterparty.role,
+                }
+              : null;
+          })(),
+        })),
+        outgoing: universeRelationships.filter(
+          (edge) => edge?.fromCompanyId === company.id,
+        ).map((edge) => {
+          const counterparty = companiesById.get(edge.toCompanyId);
+          return {
+            ...edge,
+            counterpartyCompany: counterparty
+              ? {
+                  id: counterparty.id,
+                  name: counterparty.name,
+                  shortName: counterparty.shortName,
+                  symbol: counterparty.symbol,
+                  role: counterparty.role,
+                }
+              : null,
+          };
+        }),
+      };
       const shareholders = shareholderProjection(
         marketView,
         {
@@ -1893,12 +2075,35 @@ export function projectMarketIntelligence(
           factsWithRaw,
           clues,
           currentTick,
+          companiesById,
         ),
         connections: {
           upstreamIndustryIds: [...industry.upstream],
           downstreamIndustryIds: [...industry.downstream],
           ...companyConnections(company, companiesById),
         },
+        worldStanding: standing,
+        history,
+        business,
+        operatingProducts: array(company.products).map((entry) => ({
+          name: string(entry?.name, '未命名产品'),
+          status: string(entry?.status, 'undisclosed'),
+        })),
+        researchPrograms: array(company.researchPrograms).map(
+          (entry) => ({
+            name: string(entry?.name, '未命名研究计划'),
+            stage: string(entry?.stage, 'undisclosed'),
+          }),
+        ),
+        canonicalBusinessModel: object(company.businessModel),
+        financialMechanism,
+        governance,
+        stakeholderGroups,
+        relationshipNetwork,
+        staticContentAuthority:
+          extension.identity?.id === company.id
+            ? 'additive_public_company_extension'
+            : 'canonical_company_only',
       };
     })
     .filter(Boolean);

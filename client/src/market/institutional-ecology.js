@@ -11,10 +11,10 @@
 
 import {
   evaluateProfitSeekingOrder,
-} from './behavior-kernel.js?v=20260801-01';
+} from './behavior-kernel.js?v=20260803-02';
 
 export const INSTITUTIONAL_ECOLOGY_RULE_VERSION =
-  'lzy-institutional-ecology-contract-0.3.2';
+  'lzy-institutional-ecology-contract-0.4.0';
 export const INSTITUTIONAL_VALUATION_INPUT_VERSION =
   'lzy-enterprise-valuation-observation-0.2.1';
 export const ECOLOGY_FRAME_MS = 3_000;
@@ -480,6 +480,21 @@ function valuationPolicyFor(participant) {
       debtPenaltyPpm: 660_000,
       crowdingMarginPpm: 160_000,
     },
+    market_stabilization: {
+      mode: 'systemic_mandate_value_risk_guard',
+      methodWeightsPpm: {
+        earnings: 260_000,
+        book: 340_000,
+        freeCashFlow: 310_000,
+        distribution: 90_000,
+      },
+      horizonMs: 63_072_000_000,
+      observationDelayMs: 900,
+      forwardWeightPpm: 480_000,
+      noiseBandPpm: 12_000,
+      debtPenaltyPpm: 760_000,
+      crowdingMarginPpm: 80_000,
+    },
     attention_momentum_new_buyers: {
       mode: 'noisy_short_horizon_public_value',
       methodWeightsPpm: {
@@ -555,6 +570,7 @@ function valuationPolicyFor(participant) {
     discretionary_industry: 740_000,
     broker_execution: 0,
     strategic_capital: 580_000,
+    market_stabilization: 720_000,
     attention_momentum_new_buyers: 160_000,
     disposition_limit_sellers: 480_000,
     household_liquidity_need: 650_000,
@@ -570,6 +586,7 @@ function valuationPolicyFor(participant) {
     discretionary_industry: 820_000,
     broker_execution: 0,
     strategic_capital: 650_000,
+    market_stabilization: 760_000,
     attention_momentum_new_buyers: 120_000,
     disposition_limit_sellers: 360_000,
     household_liquidity_need: 520_000,
@@ -585,6 +602,7 @@ function valuationPolicyFor(participant) {
     discretionary_industry: 540,
     broker_execution: 0,
     strategic_capital: 480,
+    market_stabilization: 420,
     attention_momentum_new_buyers: 900,
     disposition_limit_sellers: 720,
     household_liquidity_need: 820,
@@ -600,6 +618,7 @@ function valuationPolicyFor(participant) {
     discretionary_industry: 780_000,
     broker_execution: 0,
     strategic_capital: 850_000,
+    market_stabilization: 560_000,
     attention_momentum_new_buyers: 250_000,
     disposition_limit_sellers: 380_000,
     household_liquidity_need: 280_000,
@@ -615,6 +634,7 @@ function valuationPolicyFor(participant) {
     discretionary_industry: 760_000,
     broker_execution: 0,
     strategic_capital: 880_000,
+    market_stabilization: 780_000,
     attention_momentum_new_buyers: 250_000,
     disposition_limit_sellers: 470_000,
     household_liquidity_need: 620_000,
@@ -1020,6 +1040,53 @@ function createInstitutions({
       liability: {
         ...commonLiability,
         clientCapitalStabilityPpm: 540_000,
+      },
+    }),
+    institutionTemplate({
+      id: 'inst_market_stabilization',
+      archetype: 'market_stabilization',
+      decisionPipeline: 'systemic_breadth_liquidity_stabilization',
+      symbols,
+      actorBindings,
+      capitalScalePpm,
+      cashCents: 20_000_000_000,
+      holdingUnits: 180_000,
+      maxGrossCents: 40_000_000_000,
+      maxOrderUnits: 120_000,
+      maxPositionUnits: 1_200_000,
+      maxParticipationPpm: 120_000,
+      liquidityReservePpm: 550_000,
+      authorizationCents: 9_000_000_000,
+      authorizationLevel: 'multi_entity_public_stability_mandate',
+      model: {
+        name: 'systemic_breadth_liquidity_stabilization',
+        constituents: [
+          '中央汇金',
+          '中国证金',
+          '证金资管',
+          '社保基金',
+          '中国国新',
+          '中国诚通',
+        ],
+        activation: {
+          minimumDistressedBreadthPpm: 350_000,
+          minimumWeightedDeclinePpm: 15_000,
+          distressedReturnPpm: -35_000,
+          severeReturnPpm: -70_000,
+        },
+        priceWriteAuthority: 'none',
+        executionAuthority: 'finite_orders_only',
+        guaranteedFloor: false,
+        learning: {
+          aggressivenessPpm: 460_000,
+          explorationPpm: 0,
+        },
+      },
+      liability: {
+        ...commonLiability,
+        redemptionNoticeMs: 315_360_000_000,
+        clientLiquidityFloorPpm: 550_000,
+        clientCapitalStabilityPpm: 980_000,
       },
     }),
   ];
@@ -3527,6 +3594,129 @@ function strategicDecision(participant) {
   });
 }
 
+function marketStabilizationDecision(state, participant, frame) {
+  const activation = participant.model.activation;
+  const observations = state.symbols.map((symbol) => {
+    const returnPpm = priceChangePpm(state, symbol, 1);
+    const weightPpm = Math.max(
+      0,
+      Number(frame.indexWeightsPpm?.[symbol]) || 0,
+    );
+    const distressed =
+      returnPpm <= activation.distressedReturnPpm;
+    const severe =
+      returnPpm <= activation.severeReturnPpm;
+    return {
+      symbol,
+      returnPpm,
+      weightPpm,
+      distressed,
+      severe,
+      averageDailyVolume:
+        frame.averageDailyVolume?.[symbol] ?? 0,
+    };
+  });
+  const distressed = observations.filter(
+    (observation) => observation.distressed,
+  );
+  const totalWeightPpm = Math.max(
+    1,
+    observations.reduce(
+      (sum, observation) => sum + observation.weightPpm,
+      0,
+    ),
+  );
+  const distressedBreadthPpm = Math.round(
+    distressed.length * PPM /
+      Math.max(1, observations.length),
+  );
+  const weightedReturnPpm = Math.round(
+    observations.reduce(
+      (sum, observation) =>
+        sum +
+        observation.returnPpm *
+          observation.weightPpm,
+      0,
+    ) /
+      totalWeightPpm,
+  );
+  const active =
+    distressedBreadthPpm >=
+      activation.minimumDistressedBreadthPpm &&
+    weightedReturnPpm <=
+      -activation.minimumWeightedDeclinePpm;
+  const reason = {
+    model: participant.model.name,
+    inputs: {
+      distressedBreadthPpm,
+      distressedCount: distressed.length,
+      severeCount: distressed.filter(
+        (observation) => observation.severe,
+      ).length,
+      weightedReturnPpm,
+      activation: cloneJson(activation),
+      constituents: cloneJson(
+        participant.model.constituents,
+      ),
+    },
+    mandateBoundary: {
+      priceWriteAuthority:
+        participant.model.priceWriteAuthority,
+      executionAuthority:
+        participant.model.executionAuthority,
+      guaranteedFloor:
+        participant.model.guaranteedFloor,
+    },
+  };
+  if (!active || distressed.length === 0) {
+    return neutralDecision(participant, {
+      ...reason,
+      blockedBy: 'SYSTEMIC_THRESHOLD_NOT_MET',
+    });
+  }
+  const selected = [...distressed].sort(
+    (left, right) =>
+      Number(right.severe) - Number(left.severe) ||
+      right.weightPpm - left.weightPpm ||
+      left.returnPpm - right.returnPpm ||
+      right.averageDailyVolume -
+        left.averageDailyVolume ||
+      left.symbol.localeCompare(right.symbol),
+  )[0];
+  const stressPpm = clamp(
+    Math.max(
+      -weightedReturnPpm,
+      distressedBreadthPpm,
+    ),
+    1,
+    PPM,
+  );
+  return decisionFromSignal(state, participant, frame, {
+    symbol: selected.symbol,
+    scorePpm: stressPpm,
+    preferredSide: 'buy',
+    quantityMultiplierPpm: clamp(
+      Math.round(
+        250_000 +
+          distressedBreadthPpm * 0.5,
+      ),
+      250_000,
+      750_000,
+    ),
+    strategicBenefitBps: clamp(
+      Math.round(
+        80 +
+          distressedBreadthPpm / 2_500 +
+          Math.max(0, -weightedReturnPpm) /
+            1_000,
+      ),
+      80,
+      1_200,
+    ),
+    reason,
+  });
+}
+
 function institutionDecision(state, participant, frame) {
   switch (participant.archetype) {
     case 'quant_trend':
@@ -3547,6 +3737,12 @@ function institutionDecision(state, participant, frame) {
       return brokerDecision(state, participant, frame);
     case 'strategic_capital':
       return strategicDecision(participant);
+    case 'market_stabilization':
+      return marketStabilizationDecision(
+        state,
+        participant,
+        frame,
+      );
     default:
       throw new Error(`unknown institutional archetype: ${participant.archetype}`);
   }

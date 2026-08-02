@@ -336,12 +336,28 @@ function nextBoundary(currentTick, interval) {
   return Math.floor(currentTick / interval) * interval + interval;
 }
 
+function cityRoleFamily(roleType) {
+  if (
+    [
+      'institution',
+      'quant_institution',
+      'stabilization_fund',
+    ].includes(roleType)
+  ) {
+    return 'institution';
+  }
+  if (roleType === 'private_whale') return 'household';
+  return roleType;
+}
+
 function roleModel(roleType) {
-  return CITY_ROLE_MODELS[roleType] ?? CITY_ROLE_MODELS.household;
+  return CITY_ROLE_MODELS[cityRoleFamily(roleType)] ??
+    CITY_ROLE_MODELS.household;
 }
 
 function rolePlaces(roleType) {
   const role = roleModel(roleType);
+  const roleFamily = cityRoleFamily(roleType);
   const common = [
     {
       id: 'city_retail_arcade',
@@ -390,7 +406,7 @@ function rolePlaces(roleType) {
     },
   ];
 
-  if (roleType === 'operator') {
+  if (roleFamily === 'operator') {
     return [
       {
         id: role.primaryPlaceId,
@@ -434,7 +450,7 @@ function rolePlaces(roleType) {
     ];
   }
 
-  if (roleType === 'institution') {
+  if (roleFamily === 'institution') {
     return [
       {
         id: role.primaryPlaceId,
@@ -1092,9 +1108,9 @@ export function accrueCityObligation(
   const obligation = {
     id: `city_obligation_${sequence}`,
     type:
-      roleType === 'operator'
+      cityRoleFamily(roleType) === 'operator'
         ? 'operating_responsibility'
-        : roleType === 'institution'
+        : cityRoleFamily(roleType) === 'institution'
           ? 'institutional_operations'
           : 'life_responsibility',
     creditorId: 'city_services_clearing',
@@ -1347,7 +1363,9 @@ export function auditCityLifeState(
     fail('invalid city life places');
   }
   if (
-    ['operator', 'institution'].includes(city.roleType) &&
+    ['operator', 'institution'].includes(
+      cityRoleFamily(city.roleType),
+    ) &&
     city.places.some((place) => place.kind === 'residence')
   ) {
     fail('organization cannot use a personal residence');

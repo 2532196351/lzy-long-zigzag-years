@@ -8,9 +8,12 @@ import {
   migrateEmbeddedWorldStateForRestore,
   migrateLegacyMarketHistoryForRealtime,
   openTestingTradingAccess,
+  settleOpenWorldCityCompletion,
+  synchronizeEmbeddedDerivativeReservations,
   synchronizeEmbeddedDerivatives,
-} from '../engine.js?v=20260801-01';
+} from '../engine.js?v=20260803-02';
 import {
+  activeOrdersForOwner,
   aggregateBook,
   assertBookIntegrity,
   cancelInBook,
@@ -23,7 +26,7 @@ import {
   orderBookTransactionChanges,
   previewBookExecution,
   submitToBook,
-} from './order-book.js?v=20260801-01';
+} from './order-book.js?v=20260803-02';
 import {
   agentEcologyInvariantErrors,
   createAgentCatalog,
@@ -33,30 +36,57 @@ import {
   recordAgentCommandOutcome,
   refreshDelayedFundamentals,
   scheduleAgentDecisions,
+  scheduleNextAgentDecision,
   scheduleDeferredPublicFlowResponse,
   schedulePublicFlowResponses,
-} from './agents.js?v=20260801-01';
+} from './agents.js?v=20260803-02';
 import {
   NATURAL_DAY_MS,
   aggregateBars,
   appendFillInPlace,
   closeFrameInPlace,
   createBarSeries,
-} from './bars.js?v=20260801-01';
+} from './bars.js?v=20260803-02';
 import {
   deriveFixedIntradayTimeDomain,
   INTRADAY_WINDOW_MS,
   MARKET_CLOCK_ORIGIN_OFFSET_MS,
-} from './chart-domain.js?v=20260801-01';
-import { deriveIssuerValuation } from './valuation.js?v=20260801-01';
+} from './chart-domain.js?v=20260803-02';
+import { deriveIssuerValuation } from './valuation.js?v=20260803-02';
 import {
   advanceWorldlineState,
   archiveWorldlineSourceEvidence,
-} from '../worldline.js?v=20260801-01';
+} from '../worldline.js?v=20260803-02';
+import {
+  quantStrategyDefinition,
+} from '../role-strategies.js?v=20260803-02';
+import {
+  acceptWorld2DControl,
+  auditWorldSpatialState,
+  normalizeWorldSpatialState,
+  priorSpatialControlReceipt,
+  stepWorld2DMotion,
+  WORLD2D_MOTION_STEP_MS,
+  world2dMotionEventDescriptor,
+} from '../world2d/index.js?v=20260803-02';
+import {
+  markEntertainmentProjectionChanged,
+} from '../experience/entertainment-world.js?v=20260803-02';
+import { reduceDerivatives } from '../derivatives/engine.js?v=20260803-02';
+import {
+  createCumulativeTurnoverState,
+  projectCumulativeTurnover,
+  reduceCumulativeTurnover,
+} from './turnover-truth.js?v=20260803-02';
+import {
+  projectFundamentalRelationshipNetwork,
+} from './fundamental-network-projection.js?v=20260803-02';
 
 export const LEGACY_MARKET_RULE_VERSION =
   'lzy-realtime-market-0.4.0';
 export const MARKET_RULE_VERSION = 'lzy-realtime-market-0.5.0';
+const TURNOVER_PRODUCTION_INTEGRATION_SCHEMA =
+  'lzy_turnover_production_integration_v1';
 const QUOTE_FRAME_MS = 3_000;
 const WORLD_DAY_MS = NATURAL_DAY_MS;
 const MAX_VISIBLE_FRAMES = 240;
@@ -79,6 +109,8 @@ const REALTIME_AUDIT_LOSSLESS_PAYLOAD_VERSION = 1;
 const REALTIME_AUDIT_PACKED_PAYLOAD_VERSION = 2;
 const REALTIME_AUDIT_BLOCK_PAYLOAD_ENCODING =
   'lzy_realtime_audit_lz4_json_base64_v1';
+const REALTIME_AUDIT_COLD_RECORD_SCHEMA =
+  'lzy_realtime_audit_cold_record_v1';
 const REALTIME_AUDIT_PACKED_KEYS = Object.freeze([
   'version',
   'commitSeq',
@@ -97,6 +129,15 @@ const REALTIME_AUDIT_PACKED_KEYS = Object.freeze([
   'parentOrderId',
   'ecologyAgentId',
   'ecologyIntentKind',
+  'automationKind',
+  'automationDecisionId',
+  'automationStrategyIds',
+  'orderContextVersion',
+  'orderContextRegime',
+  'orderContextSymbol',
+  'orderContextArrivalBudgetUnits',
+  'orderContextDepthBudgetUnits',
+  'orderContextMechanismSources',
   'filledQuantity',
   'remainingQuantity',
   'cancelledQuantity',
@@ -181,6 +222,7 @@ const REALTIME_AUDIT_SLOT_SOURCE =
   'realtime_audit_archive_slot';
 const MAX_AGENT_NONTRADE_RECEIPTS = 128;
 const MAX_PLAYER_REJECTED_RECEIPTS = 64;
+const MAX_PLAYER_AUTOMATION_NONTRADE_RECEIPTS = 64;
 const MAX_LIVE_QUIET_DERIVATIVE_CADENCE_RECEIPTS = 32;
 const DERIVATIVE_CADENCE_RECEIPT_ARCHIVE_FORMAT =
   'derivative-cadence-receipt-ranges-v1';
@@ -189,6 +231,11 @@ const DERIVATIVE_CADENCE_RECEIPT_ID_PREFIX =
 const MAX_QUEUED_AGENT_EVENTS = 48;
 const MAX_AGENT_COMMANDS_PER_BATCH = 128;
 const MAX_PUBLIC_AGENT_ACTIONS_PER_ACTIVITY = 4;
+const MAX_MAKER_SYMBOLS_PER_CADENCE = 8;
+const PLAYER_ROLE_AUTOMATION_SCHEMA =
+  'lzy-player-role-automation-v1';
+const MAX_PLAYER_AUTOMATION_DECISIONS = 24;
+const PLAYER_AUTOMATION_CADENCE_MS = 30_000;
 const PUBLIC_MARKET_SCHEMA = 'lzy_market_public_v1';
 const PUBLIC_MARKET_COMMAND_PATCH_SCHEMA =
   'lzy_market_command_patch_v1';
@@ -226,6 +273,8 @@ const LEGACY_EIGHT_STOCK_CHECKPOINT_SYMBOLS =
   ]);
 const CHECKPOINT_EVENT_TYPES = Object.freeze([
   'command',
+  'player_motion_step',
+  'open_world_city_completion',
   'agent_command_batch',
   'agent_decision',
   'derivative_actor_cycle',
@@ -238,6 +287,7 @@ const CHECKPOINT_COMMAND_TYPES = Object.freeze([
   'submit_order',
   'cancel_order',
   'world_action',
+  'player_control',
 ]);
 const terminalOrderIndexes = new WeakMap();
 const orderIndexes = new WeakMap();
@@ -246,14 +296,21 @@ const recentActivityIndexes = new WeakMap();
 const minuteBarProjectionCaches = new WeakMap();
 const archivedMinuteDayProjectionCaches = new WeakMap();
 const archivedMinuteBarIndexes = new WeakMap();
+const archivedUltraFillIndexes = new WeakMap();
 const shareholderProjectionCaches = new WeakMap();
 const marketProjectionDiagnostics = new WeakMap();
+const marketProgressionDiagnostics = new WeakMap();
 const worldBalanceMirrorStates = new WeakMap();
 const deferredWorldOrderMirrorSymbols = new WeakMap();
 const deferredBarFillTransactions = new WeakMap();
 const verifiedAccountAuthoritySeals = new WeakMap();
 const verifiedRealtimeAuditPayloadSummaries = new WeakMap();
 const verifiedRealtimeAuditBlocks = new WeakSet();
+const realtimeAuditColdStores = new WeakMap();
+const authorizedPlayerAutomationCommands = new WeakSet();
+const INTERNAL_PROCESS_NEXT_EVENT_AUTHORITY = Symbol(
+  'lzy.internal-process-next-event-authority',
+);
 const LIQUIDITY_LAYER_SCALAR_FIELDS = new Set([
   'layerKey',
   'symbol',
@@ -289,6 +346,7 @@ export const MARKET_PHASE_PRIORITY = Object.freeze({
   SESSION: 10,
   CANCEL_EXPIRE: 20,
   PLAYER_COMMAND: 30,
+  PLAYER_MOTION: 35,
   BROKER_ROUTE: 40,
   PUBLIC_FLOW_RESPONSE: 50,
   MAKER_QUOTE: 60,
@@ -398,8 +456,37 @@ function moneyFromCents(value) {
   return value / 100;
 }
 
+function listingRuleFromIdentity(security = {}) {
+  const identity = security.listingIdentity;
+  const board = {
+    MAIN: 'main',
+    STAR: 'star',
+    CHINEXT: 'chinext',
+  }[identity?.board];
+  if (!board) return null;
+  const riskDesignation = identity.riskDesignation;
+  if (
+    riskDesignation !== 'NONE' &&
+    riskDesignation !== 'ST' &&
+    riskDesignation !== 'STAR_ST'
+  ) {
+    return null;
+  }
+  return {
+    board,
+    dailyLimitBps:
+      riskDesignation === 'NONE'
+        ? board === 'main'
+          ? 1_000
+          : 2_000
+        : 500,
+  };
+}
+
 function listingRule(symbol, security = {}) {
-  const canonical = DEFAULT_LISTING_RULES[symbol];
+  const canonical =
+    DEFAULT_LISTING_RULES[symbol] ??
+    listingRuleFromIdentity(security);
   if (canonical) return canonical;
   const fallback = {
     board: 'main',
@@ -424,7 +511,9 @@ function savedListingFieldErrors(world) {
   for (const [symbol, security] of Object.entries(
     world?.market?.securities ?? {},
   )) {
-    const canonical = DEFAULT_LISTING_RULES[symbol];
+    const canonical =
+      DEFAULT_LISTING_RULES[symbol] ??
+      listingRuleFromIdentity(security);
     if (
       !isPositiveInteger(security?.previousCloseTicks)
     ) {
@@ -468,6 +557,683 @@ function securityPriceBand(security) {
       Math.min(previousCloseTicks - 1, rawLower),
     ),
   };
+}
+
+function playerRoleAutomationKind(world) {
+  if (world?.player?.roleType === 'quant_institution') return 'quant';
+  if (world?.player?.roleType === 'stabilization_fund') {
+    return 'stabilization';
+  }
+  return 'none';
+}
+
+function playerRoleAutomationConfiguration(world) {
+  const kind = playerRoleAutomationKind(world);
+  if (kind === 'quant') {
+    return world.player.roleState?.strategyLab ?? null;
+  }
+  if (kind === 'stabilization') {
+    return world.player.roleState?.stabilityDesk ?? null;
+  }
+  return null;
+}
+
+function createPlayerRoleAutomation(world) {
+  const kind = playerRoleAutomationKind(world);
+  const configuration = playerRoleAutomationConfiguration(world);
+  return {
+    schemaVersion: PLAYER_ROLE_AUTOMATION_SCHEMA,
+    kind,
+    configRevision:
+      Number.isSafeInteger(configuration?.revision)
+        ? configuration.revision
+        : 0,
+    nextDecisionAtMs: kind === 'none' ? null : 0,
+    lastDecisionAtMs: null,
+    totalDecisions: 0,
+    totalOrderAttempts: 0,
+    totalFilledQuantity: 0,
+    recentDecisions: [],
+  };
+}
+
+function hydratePlayerRoleAutomation(state) {
+  const expectedKind = playerRoleAutomationKind(state.world);
+  const runtime = state.playerRoleAutomation;
+  if (
+    !runtime ||
+    runtime.schemaVersion !== PLAYER_ROLE_AUTOMATION_SCHEMA ||
+    runtime.kind !== expectedKind
+  ) {
+    state.playerRoleAutomation = createPlayerRoleAutomation(state.world);
+    return true;
+  }
+  return false;
+}
+
+function synchronizePlayerRoleAutomationConfiguration(state) {
+  hydratePlayerRoleAutomation(state);
+  const runtime = state.playerRoleAutomation;
+  const configuration = playerRoleAutomationConfiguration(state.world);
+  const revision = Number.isSafeInteger(configuration?.revision)
+    ? configuration.revision
+    : 0;
+  if (runtime.configRevision !== revision) {
+    runtime.configRevision = revision;
+    runtime.nextDecisionAtMs =
+      runtime.kind === 'none' ? null : state.nowMs;
+  }
+  return runtime;
+}
+
+function clampInteger(value, minimum, maximum) {
+  const number = Math.round(Number(value) || 0);
+  return Math.min(maximum, Math.max(minimum, number));
+}
+
+function playerAvailableCashCents(state) {
+  const account = state.accounts.player;
+  return Math.max(
+    0,
+    account.cashCents -
+      account.reservedCashCents -
+      derivativeReservedPlayerCashCents(state),
+  );
+}
+
+function playerFreeHoldings(state, symbol) {
+  const account = state.accounts.player;
+  return Math.max(
+    0,
+    (account.holdings[symbol] ?? 0) -
+      (account.reservedHoldings[symbol] ?? 0),
+  );
+}
+
+function hotSymbolFactors(state, symbol) {
+  const security = state.world.market.securities[symbol];
+  const band = securityPriceBand(security);
+  const lastPriceTicks = cents(security.lastPrice);
+  const valuation = security.valuation;
+  const midpointTicks = Number.isSafeInteger(valuation?.midpointTicks)
+    ? valuation.midpointTicks
+    : lastPriceTicks;
+  const momentum = clampInteger(
+    (lastPriceTicks - band.previousCloseTicks) * 10_000 /
+      Math.max(1, band.previousCloseTicks),
+    -10_000,
+    10_000,
+  );
+  const valuationSignal = clampInteger(
+    (midpointTicks - lastPriceTicks) * 10_000 /
+      Math.max(1, lastPriceTicks),
+    -10_000,
+    10_000,
+  );
+  const expectedGrowthBps = Number.isSafeInteger(
+    valuation?.metrics?.expectedGrowthBps,
+  )
+    ? valuation.metrics.expectedGrowthBps
+    : 0;
+  const confidenceBps = Number.isSafeInteger(valuation?.confidenceBps)
+    ? valuation.confidenceBps
+    : 5_000;
+  const quality = clampInteger(
+    expectedGrowthBps * 0.65 + (confidenceBps - 5_000) * 0.35,
+    -10_000,
+    10_000,
+  );
+  const depth = aggregateBook(state.books[symbol], 5);
+  const bidQuantity = depth.bids.reduce(
+    (sum, level) => sum + level.quantity,
+    0,
+  );
+  const askQuantity = depth.asks.reduce(
+    (sum, level) => sum + level.quantity,
+    0,
+  );
+  const totalDepth = bidQuantity + askQuantity;
+  const orderImbalance = totalDepth > 0
+    ? clampInteger(
+        (bidQuantity - askQuantity) * 10_000 / totalDepth,
+        -10_000,
+        10_000,
+      )
+    : 0;
+  return {
+    symbol,
+    band,
+    lastPriceTicks,
+    depth,
+    factors: {
+      valuation: valuationSignal,
+      quality,
+      momentum,
+      meanReversion: -momentum,
+      orderImbalance,
+    },
+  };
+}
+
+function quantDefinitionScore(definition, factors) {
+  const weights = definition?.factors ?? {};
+  const grossWeight = Object.values(weights).reduce(
+    (sum, weight) => sum + Math.abs(Number(weight) || 0),
+    0,
+  );
+  if (grossWeight === 0) return 0;
+  return clampInteger(
+    Object.entries(weights).reduce(
+      (sum, [factor, weight]) =>
+        sum + (factors[factor] ?? 0) * (Number(weight) || 0),
+      0,
+    ) / grossWeight,
+    -10_000,
+    10_000,
+  );
+}
+
+function quantSignalForSymbol(lab, hotState) {
+  const attribution = [];
+  let weightedScore = 0;
+  let weightedLevel = 0;
+  let maximumOrderBps = 0;
+  let maximumParticipationBps = 0;
+  for (const strategyId of lab.selectedStrategyIds) {
+    const definition = quantStrategyDefinition(lab, strategyId);
+    if (!definition) continue;
+    const weight = lab.strategyWeightsBps[strategyId] ?? 0;
+    const builtInState = lab.strategies?.[strategyId];
+    const level = clampInteger(
+      builtInState?.level ?? definition.level ?? 1,
+      1,
+      5,
+    );
+    const scoreBps = quantDefinitionScore(
+      definition,
+      hotState.factors,
+    );
+    weightedScore += scoreBps * weight;
+    weightedLevel += level * weight;
+    maximumOrderBps = Math.max(
+      maximumOrderBps,
+      definition.execution?.maxOrderBps ?? 0,
+    );
+    maximumParticipationBps = Math.max(
+      maximumParticipationBps,
+      definition.execution?.maxParticipationBps ?? 0,
+    );
+    attribution.push({ strategyId, weightBps: weight, scoreBps, level });
+  }
+  return {
+    scoreBps: clampInteger(weightedScore / 10_000, -10_000, 10_000),
+    averageLevel: Math.max(1, weightedLevel / 10_000),
+    maximumOrderBps,
+    maximumParticipationBps,
+    attribution,
+  };
+}
+
+function quantOrderQuantity(
+  state,
+  hotState,
+  side,
+  signal,
+  riskMode,
+) {
+  const opposite = side === 'buy'
+    ? hotState.depth.asks[0]
+    : hotState.depth.bids[0];
+  const riskOrderBps = {
+    conservative: 20,
+    balanced: 50,
+    aggressive: 100,
+  }[riskMode] ?? 50;
+  const levelOrderBps = Math.round(
+    riskOrderBps * (1 + (signal.averageLevel - 1) * 0.18),
+  );
+  const orderBps = clampInteger(
+    signal.maximumOrderBps > 0
+      ? Math.min(levelOrderBps, signal.maximumOrderBps)
+      : levelOrderBps,
+    1,
+    500,
+  );
+  const participationBps = clampInteger(
+    signal.maximumParticipationBps || 1_000,
+    25,
+    2_500,
+  );
+  let capacity;
+  if (side === 'buy') {
+    const cashBudget = Math.floor(
+      playerAvailableCashCents(state) * orderBps / 10_000,
+    );
+    capacity = Math.floor(
+      cashBudget / Math.max(1, opposite?.priceTicks ?? hotState.lastPriceTicks),
+    );
+  } else {
+    capacity = Math.floor(
+      playerFreeHoldings(state, hotState.symbol) * orderBps / 10_000,
+    );
+  }
+  if (capacity < 1) return 0;
+  if (!opposite) return Math.min(capacity, 1_000);
+  return Math.max(
+    1,
+    Math.min(
+      capacity,
+      Math.max(1, Math.floor(opposite.quantity * participationBps / 10_000)),
+    ),
+  );
+}
+
+function evaluateQuantAutomationDecision(state) {
+  const lab = state.world.player.roleState?.strategyLab;
+  if (!lab?.automationEnabled || !Array.isArray(lab.selectedStrategyIds)) {
+    return null;
+  }
+  const candidates = Object.keys(state.books)
+    .sort()
+    .map((symbol) => {
+      const hotState = hotSymbolFactors(state, symbol);
+      const signal = quantSignalForSymbol(lab, hotState);
+      const side = signal.scoreBps < 0 ? 'sell' : 'buy';
+      return {
+        hotState,
+        signal,
+        side,
+        quantity: quantOrderQuantity(
+          state,
+          hotState,
+          side,
+          signal,
+          lab.riskMode,
+        ),
+      };
+    })
+    .filter((candidate) => candidate.quantity > 0)
+    .sort(
+      (left, right) =>
+        Math.abs(right.signal.scoreBps) -
+          Math.abs(left.signal.scoreBps) ||
+        left.hotState.symbol.localeCompare(right.hotState.symbol),
+    );
+  let selected = candidates[0] ?? null;
+  if (!selected && playerAvailableCashCents(state) > 0) {
+    const symbol = Object.keys(state.books).sort()[0];
+    const hotState = hotSymbolFactors(state, symbol);
+    const signal = quantSignalForSymbol(lab, hotState);
+    selected = {
+      hotState,
+      signal: { ...signal, scoreBps: 1 },
+      side: 'buy',
+      quantity: 1,
+    };
+  }
+  if (!selected) return null;
+  const { hotState, signal, side, quantity } = selected;
+  const opposite = side === 'buy'
+    ? hotState.depth.asks[0]
+    : hotState.depth.bids[0];
+  const priceTicks = clampInteger(
+    opposite?.priceTicks ?? hotState.lastPriceTicks,
+    hotState.band.limitDownTicks,
+    hotState.band.limitUpTicks,
+  );
+  return {
+    kind: 'quant',
+    symbol: hotState.symbol,
+    side,
+    scoreBps: signal.scoreBps,
+    strategyIds: signal.attribution.map((entry) => entry.strategyId),
+    attribution: signal.attribution,
+    command: {
+      type: 'submit_order',
+      actorId: 'player',
+      brokerId: 'broker_lzy',
+      symbol: hotState.symbol,
+      side,
+      orderType: 'limit',
+      priceTicks,
+      quantity,
+      tif: 'IOC',
+      source: 'player_role_automation',
+      automationKind: 'quant',
+      automationStrategyIds: signal.attribution.map(
+        (entry) => entry.strategyId,
+      ),
+    },
+  };
+}
+
+function marketStressSnapshot(state) {
+  const rows = Object.keys(state.books).sort().map((symbol) => {
+    const hotState = hotSymbolFactors(state, symbol);
+    const returnBps = clampInteger(
+      (hotState.lastPriceTicks - hotState.band.previousCloseTicks) * 10_000 /
+        Math.max(1, hotState.band.previousCloseTicks),
+      -10_000,
+      10_000,
+    );
+    const bid = hotState.depth.bids[0];
+    const ask = hotState.depth.asks[0];
+    const spreadBps = bid && ask
+      ? clampInteger(
+          (ask.priceTicks - bid.priceTicks) * 10_000 /
+            Math.max(1, hotState.lastPriceTicks),
+          0,
+          10_000,
+        )
+      : 0;
+    return { hotState, returnBps, spreadBps };
+  });
+  const total = Math.max(1, rows.length);
+  const decliners = rows.filter((row) => row.returnBps < 0).length;
+  return {
+    rows,
+    weightedReturnBps: Math.round(
+      rows.reduce((sum, row) => sum + row.returnBps, 0) / total,
+    ),
+    breadthBps: -Math.round(decliners * 10_000 / total),
+    liquidityStressBps: Math.round(
+      rows.reduce((sum, row) => sum + row.spreadBps, 0) / total,
+    ),
+  };
+}
+
+function evaluateStabilizationAutomationDecision(state) {
+  const desk = state.world.player.roleState?.stabilityDesk;
+  if (!desk?.automationEnabled) return null;
+  const stress = marketStressSnapshot(state);
+  const broadStress =
+    stress.weightedReturnBps <= desk.weightedReturnTriggerBps ||
+    (
+      stress.breadthBps <= desk.breadthTriggerBps &&
+      stress.weightedReturnBps < 0
+    ) ||
+    (
+      stress.liquidityStressBps >= desk.liquidityStressTriggerBps &&
+      stress.weightedReturnBps < 0
+    );
+  let side = 'buy';
+  let selected = null;
+  if (broadStress) {
+    selected = [...stress.rows].sort(
+      (left, right) =>
+        left.returnBps - right.returnBps ||
+        right.spreadBps - left.spreadBps ||
+        left.hotState.symbol.localeCompare(right.hotState.symbol),
+    )[0] ?? null;
+  } else if (stress.weightedReturnBps >= 200) {
+    side = 'sell';
+    selected = stress.rows.find(
+      (row) =>
+        (desk.interventionInventoryBySymbol?.[
+          row.hotState.symbol
+        ] ?? 0) > 0,
+    ) ?? null;
+  }
+  if (!selected) return null;
+  const hotState = selected.hotState;
+  const opposite = side === 'buy'
+    ? hotState.depth.asks[0]
+    : hotState.depth.bids[0];
+  const priceTicks = clampInteger(
+    opposite?.priceTicks ?? hotState.lastPriceTicks,
+    hotState.band.limitDownTicks,
+    hotState.band.limitUpTicks,
+  );
+  let quantity;
+  if (side === 'buy') {
+    const budgetBps = clampInteger(
+      Math.round(desk.intensityBps * 50 / 10_000),
+      5,
+      50,
+    );
+    quantity = Math.floor(
+      playerAvailableCashCents(state) * budgetBps /
+        10_000 /
+        Math.max(1, priceTicks),
+    );
+  } else {
+    quantity = Math.min(
+      playerFreeHoldings(state, hotState.symbol),
+      desk.interventionInventoryBySymbol?.[hotState.symbol] ?? 0,
+    );
+  }
+  if (quantity < 1) return null;
+  if (opposite) {
+    quantity = Math.max(
+      1,
+      Math.min(
+        quantity,
+        Math.max(
+          1,
+          Math.floor(opposite.quantity * desk.intensityBps / 10_000),
+        ),
+      ),
+    );
+  } else {
+    quantity = Math.min(quantity, 1_000);
+  }
+  return {
+    kind: 'stabilization',
+    symbol: hotState.symbol,
+    side,
+    scoreBps: selected.returnBps,
+    strategyIds: [`stability_${desk.targetMode}`],
+    marketStress: {
+      weightedReturnBps: stress.weightedReturnBps,
+      breadthBps: stress.breadthBps,
+      liquidityStressBps: stress.liquidityStressBps,
+    },
+    command: {
+      type: 'submit_order',
+      actorId: 'player',
+      brokerId: 'broker_lzy',
+      symbol: hotState.symbol,
+      side,
+      orderType: 'limit',
+      priceTicks,
+      quantity,
+      tif: 'IOC',
+      source: 'player_role_automation',
+      automationKind: 'stabilization',
+      automationStrategyIds: [`stability_${desk.targetMode}`],
+    },
+  };
+}
+
+export function evaluatePlayerRoleAutomationDecision(state) {
+  if (!state?.world?.player || !state?.accounts?.player) {
+    throw new Error('A realtime market simulation is required.');
+  }
+  const kind = playerRoleAutomationKind(state.world);
+  if (kind === 'quant') return evaluateQuantAutomationDecision(state);
+  if (kind === 'stabilization') {
+    return evaluateStabilizationAutomationDecision(state);
+  }
+  return null;
+}
+
+function playerAutomationCadenceMs(state) {
+  const lab = state.world.player.roleState?.strategyLab;
+  if (playerRoleAutomationKind(state.world) !== 'quant' || !lab) {
+    return PLAYER_AUTOMATION_CADENCE_MS;
+  }
+  const cadences = lab.selectedStrategyIds
+    .map((strategyId) => quantStrategyDefinition(lab, strategyId)?.cadenceMs)
+    .filter((value) => Number.isSafeInteger(value));
+  return Math.max(
+    PLAYER_AUTOMATION_CADENCE_MS,
+    Math.min(PLAYER_AUTOMATION_CADENCE_MS, ...cadences),
+  );
+}
+
+function automationAttribution(command) {
+  if (!authorizedPlayerAutomationCommands.has(command)) return {};
+  return {
+    automationKind: command.automationKind,
+    automationDecisionId: command.automationDecisionId,
+    automationStrategyIds: [...(command.automationStrategyIds ?? [])],
+  };
+}
+
+function appendPlayerAutomationDecision(runtime, decision) {
+  runtime.recentDecisions.push(decision);
+  if (runtime.recentDecisions.length > MAX_PLAYER_AUTOMATION_DECISIONS) {
+    runtime.recentDecisions.splice(
+      0,
+      runtime.recentDecisions.length - MAX_PLAYER_AUTOMATION_DECISIONS,
+    );
+  }
+}
+
+function runPlayerRoleAutomation(
+  state,
+  { deferMarketMirror = false } = {},
+) {
+  const runtime = synchronizePlayerRoleAutomationConfiguration(state);
+  if (
+    runtime.kind === 'none' ||
+    runtime.nextDecisionAtMs === null ||
+    state.nowMs < runtime.nextDecisionAtMs
+  ) {
+    return null;
+  }
+  const configuration = playerRoleAutomationConfiguration(state.world);
+  runtime.nextDecisionAtMs = state.nowMs + playerAutomationCadenceMs(state);
+  if (configuration?.automationEnabled !== true) return null;
+  runtime.totalDecisions += 1;
+  runtime.lastDecisionAtMs = state.nowMs;
+  const decisionId = `player_auto_${runtime.kind}_${String(
+    runtime.totalDecisions,
+  ).padStart(8, '0')}`;
+  const decision = evaluatePlayerRoleAutomationDecision(state);
+  if (!decision) {
+    appendPlayerAutomationDecision(runtime, {
+      id: decisionId,
+      virtualMs: state.nowMs,
+      kind: runtime.kind,
+      status: 'no_action',
+      symbol: null,
+      side: null,
+      scoreBps: null,
+      strategyIds: [],
+      orderId: null,
+      filledQuantity: 0,
+      reason: 'NO_ELIGIBLE_SIGNAL',
+    });
+    return null;
+  }
+  decision.command.automationDecisionId = decisionId;
+  authorizedPlayerAutomationCommands.add(decision.command);
+  runtime.totalOrderAttempts += 1;
+  const receipt = handleSubmitOrder(state, decision.command, {
+    deferBatchMaintenance: deferMarketMirror,
+  });
+  const filledQuantity = Number.isSafeInteger(receipt.filledQuantity)
+    ? receipt.filledQuantity
+    : 0;
+  runtime.totalFilledQuantity += filledQuantity;
+  if (runtime.kind === 'stabilization' && filledQuantity > 0) {
+    const desk = state.world.player.roleState.stabilityDesk;
+    const previous = desk.interventionInventoryBySymbol[decision.symbol] ?? 0;
+    desk.interventionInventoryBySymbol[decision.symbol] = Math.max(
+      0,
+      previous + (decision.side === 'buy' ? filledQuantity : -filledQuantity),
+    );
+  }
+  appendPlayerAutomationDecision(runtime, {
+    id: decisionId,
+    virtualMs: state.nowMs,
+    kind: runtime.kind,
+    status: receipt.status,
+    symbol: decision.symbol,
+    side: decision.side,
+    scoreBps: decision.scoreBps,
+    strategyIds: [...decision.strategyIds],
+    orderId: receipt.orderId ?? null,
+    filledQuantity,
+    reason: receipt.reason ?? null,
+  });
+  markAccountRisk(state);
+  if (deferMarketMirror) {
+    markDeferredWorldOrderMirror(state, decision.symbol);
+  }
+  return receipt;
+}
+
+function playerRoleAutomationInvariantErrors(state) {
+  const runtime = state.playerRoleAutomation;
+  const expectedKind = playerRoleAutomationKind(state.world);
+  const configuration = playerRoleAutomationConfiguration(state.world);
+  const expectedRevision = Number.isSafeInteger(configuration?.revision)
+    ? configuration.revision
+    : 0;
+  if (
+    !runtime ||
+    runtime.schemaVersion !== PLAYER_ROLE_AUTOMATION_SCHEMA ||
+    runtime.kind !== expectedKind ||
+    runtime.configRevision !== expectedRevision ||
+    !Number.isSafeInteger(runtime.totalDecisions) ||
+    runtime.totalDecisions < 0 ||
+    !Number.isSafeInteger(runtime.totalOrderAttempts) ||
+    runtime.totalOrderAttempts < 0 ||
+    runtime.totalOrderAttempts > runtime.totalDecisions ||
+    !Number.isSafeInteger(runtime.totalFilledQuantity) ||
+    runtime.totalFilledQuantity < 0 ||
+    !Array.isArray(runtime.recentDecisions) ||
+    runtime.recentDecisions.length > MAX_PLAYER_AUTOMATION_DECISIONS ||
+    (expectedKind === 'none'
+      ? runtime.nextDecisionAtMs !== null
+      : !Number.isSafeInteger(runtime.nextDecisionAtMs) ||
+        runtime.nextDecisionAtMs < 0) ||
+    (runtime.lastDecisionAtMs !== null &&
+      (!Number.isSafeInteger(runtime.lastDecisionAtMs) ||
+        runtime.lastDecisionAtMs < 0 ||
+        runtime.lastDecisionAtMs > state.nowMs))
+  ) {
+    return ['INVALID_PLAYER_ROLE_AUTOMATION'];
+  }
+  const errors = [];
+  let priorVirtualMs = -1;
+  for (const decision of runtime.recentDecisions) {
+    if (
+      !decision ||
+      typeof decision.id !== 'string' ||
+      !Number.isSafeInteger(decision.virtualMs) ||
+      decision.virtualMs < priorVirtualMs ||
+      decision.virtualMs > state.nowMs ||
+      decision.kind !== expectedKind ||
+      !Array.isArray(decision.strategyIds) ||
+      decision.strategyIds.length > 8 ||
+      !Number.isSafeInteger(decision.filledQuantity) ||
+      decision.filledQuantity < 0
+    ) {
+      errors.push(`INVALID_PLAYER_AUTOMATION_DECISION:${decision?.id ?? 'unknown'}`);
+    }
+    priorVirtualMs = decision?.virtualMs ?? priorVirtualMs;
+  }
+  const interventionInventory =
+    state.world.player.roleState?.stabilityDesk
+      ?.interventionInventoryBySymbol;
+  if (
+    expectedKind === 'stabilization' &&
+    (!interventionInventory ||
+      Array.isArray(interventionInventory) ||
+      Object.entries(interventionInventory).some(
+        ([symbol, quantity]) =>
+          !state.books[symbol] ||
+          !Number.isSafeInteger(quantity) ||
+          quantity < 0 ||
+          quantity > (state.accounts.player.holdings[symbol] ?? 0),
+      ))
+  ) {
+    errors.push('INVALID_STABILIZATION_INTERVENTION_INVENTORY');
+  }
+  return errors;
 }
 
 function hydrateSecurityListingFields(world) {
@@ -528,6 +1294,226 @@ function hashText(input) {
   return (hash >>> 0).toString(16).padStart(8, '0');
 }
 
+function configureRealtimeAuditColdStore(state, store) {
+  if (store === undefined || store === null) return;
+  if (
+    typeof store !== 'object' ||
+    typeof store.put !== 'function' ||
+    (
+      store.has !== undefined &&
+      typeof store.has !== 'function'
+    ) ||
+    (
+      store.get !== undefined &&
+      typeof store.get !== 'function'
+    )
+  ) {
+    throw new TypeError(
+      'auditColdStore must provide put and optional has/get functions.',
+    );
+  }
+  realtimeAuditColdStores.set(state, store);
+}
+
+function validRealtimeAuditColdReference(reference, kind) {
+  return Boolean(
+    reference?.schema === REALTIME_AUDIT_COLD_RECORD_SCHEMA &&
+      reference.kind === kind &&
+      typeof reference.key === 'string' &&
+      reference.key.length > 0 &&
+      typeof reference.digest === 'string' &&
+      /^[0-9a-f]{8}$/.test(reference.digest) &&
+      Number.isSafeInteger(reference.encodedCharacters) &&
+      reference.encodedCharacters > 0,
+  );
+}
+
+function realtimeAuditColdRecordValue(
+  state,
+  reference,
+  kind,
+) {
+  if (!validRealtimeAuditColdReference(reference, kind)) {
+    throw new Error('INVALID_REALTIME_AUDIT_COLD_REFERENCE');
+  }
+  const store = realtimeAuditColdStores.get(state);
+  if (
+    !store ||
+    (typeof store.has === 'function' && !store.has(reference)) ||
+    typeof store.get !== 'function'
+  ) {
+    throw new Error('MISSING_REALTIME_AUDIT_COLD_RECORD');
+  }
+  const value = store.get(reference);
+  if (
+    typeof value !== 'string' ||
+    value.length !== reference.encodedCharacters ||
+    hashText(value) !== reference.digest
+  ) {
+    throw new Error('INVALID_REALTIME_AUDIT_COLD_RECORD');
+  }
+  return value;
+}
+
+function realtimeAuditColdReferenceKnown(
+  state,
+  reference,
+  kind,
+) {
+  if (!validRealtimeAuditColdReference(reference, kind)) {
+    return false;
+  }
+  const store = realtimeAuditColdStores.get(state);
+  try {
+    return Boolean(store?.has?.(reference));
+  } catch {
+    return false;
+  }
+}
+
+function realtimeAuditColdStoreCanRead(state) {
+  return typeof realtimeAuditColdStores.get(state)?.get === 'function';
+}
+
+function externalizeRealtimeAuditPayload(state, block) {
+  const value = block?.compressedLosslessPayloads;
+  const store = realtimeAuditColdStores.get(state);
+  if (typeof value !== 'string' || !store) return false;
+  const digest = hashText(value);
+  const key = [
+    state.world.world.id,
+    'audit-payload',
+    block.id,
+    digest,
+  ].join(':');
+  const record = {
+    schema: REALTIME_AUDIT_COLD_RECORD_SCHEMA,
+    kind: 'payload',
+    key,
+    digest,
+    encodedCharacters: value.length,
+    value,
+  };
+  let accepted;
+  try {
+    accepted = store.put(record);
+  } catch {
+    return false;
+  }
+  if (accepted === false) return false;
+  block.compressedLosslessPayloads = {
+    schema: record.schema,
+    kind: record.kind,
+    key: record.key,
+    digest: record.digest,
+    encodedCharacters: record.encodedCharacters,
+  };
+  return true;
+}
+
+function realtimeAuditBlockSummary(block, coldBlock = null) {
+  return {
+    id: block.id,
+    bundleCount: block.bundleCount,
+    chainCount: block.chainCount,
+    receiptCount: block.receiptCount,
+    fromTradeId: block.fromTradeId,
+    toTradeId: block.toTradeId,
+    fromTradeSequence: block.fromTradeSequence,
+    toTradeSequence: block.toTradeSequence,
+    fromCommitSeq: block.fromCommitSeq,
+    toCommitSeq: block.toCommitSeq,
+    digest: block.digest,
+    losslessPayloads: [],
+    losslessBundleCount: block.losslessBundleCount,
+    losslessChainCount: block.losslessChainCount,
+    losslessReceiptCount: block.losslessReceiptCount,
+    losslessPayloadDigest: block.losslessPayloadDigest,
+    ...(coldBlock ? { coldBlock } : {}),
+  };
+}
+
+function isRealtimeAuditColdBlockReference(block) {
+  return Boolean(
+    block &&
+      validRealtimeAuditColdReference(
+        block.coldBlock,
+        'block',
+      ),
+  );
+}
+
+function sameRealtimeAuditBlockSummary(reference, block) {
+  const expected = realtimeAuditBlockSummary(block);
+  return Object.entries(expected).every(([key, value]) =>
+    Array.isArray(value)
+      ? Array.isArray(reference[key]) &&
+        reference[key].length === 0
+      : reference[key] === value,
+  );
+}
+
+function resolveRealtimeAuditColdBlock(state, reference) {
+  if (!isRealtimeAuditColdBlockReference(reference)) {
+    return reference;
+  }
+  const value = realtimeAuditColdRecordValue(
+    state,
+    reference.coldBlock,
+    'block',
+  );
+  let block;
+  try {
+    block = JSON.parse(value);
+  } catch {
+    throw new Error('INVALID_REALTIME_AUDIT_COLD_BLOCK');
+  }
+  if (
+    !block ||
+    typeof block !== 'object' ||
+    Array.isArray(block) ||
+    !sameRealtimeAuditBlockSummary(reference, block)
+  ) {
+    throw new Error('INVALID_REALTIME_AUDIT_COLD_BLOCK');
+  }
+  return block;
+}
+
+function externalizeRealtimeAuditBlock(state, block) {
+  const store = realtimeAuditColdStores.get(state);
+  if (!store) return block;
+  const value = JSON.stringify(block);
+  const digest = hashText(value);
+  const key = [
+    state.world.world.id,
+    'audit-block',
+    block.id,
+    digest,
+  ].join(':');
+  const record = {
+    schema: REALTIME_AUDIT_COLD_RECORD_SCHEMA,
+    kind: 'block',
+    key,
+    digest,
+    encodedCharacters: value.length,
+    value,
+  };
+  let accepted;
+  try {
+    accepted = store.put(record);
+  } catch {
+    return block;
+  }
+  if (accepted === false) return block;
+  return realtimeAuditBlockSummary(block, {
+    schema: record.schema,
+    kind: record.kind,
+    key: record.key,
+    digest: record.digest,
+    encodedCharacters: record.encodedCharacters,
+  });
+}
+
 function compareEvents(left, right) {
   return (
     left.scheduledMs - right.scheduledMs ||
@@ -536,22 +1522,69 @@ function compareEvents(left, right) {
   );
 }
 
-function sortEventQueue(state) {
-  state.eventQueue.sort(compareEvents);
+function insertEventQueue(state, event) {
+  const queue = state.eventQueue;
+  queue.push(event);
+  let index = queue.length - 1;
+  while (index > 0) {
+    const parentIndex = Math.floor((index - 1) / 2);
+    if (compareEvents(queue[parentIndex], queue[index]) <= 0) {
+      break;
+    }
+    [queue[parentIndex], queue[index]] = [
+      queue[index],
+      queue[parentIndex],
+    ];
+    index = parentIndex;
+  }
 }
 
-function insertEventQueue(state, event) {
-  let low = 0;
-  let high = state.eventQueue.length;
-  while (low < high) {
-    const middle = low + Math.floor((high - low) / 2);
-    if (compareEvents(state.eventQueue[middle], event) <= 0) {
-      low = middle + 1;
-    } else {
-      high = middle;
+function popEventQueue(state) {
+  const queue = state.eventQueue;
+  if (queue.length === 0) return null;
+  const frontier = queue[0];
+  const tail = queue.pop();
+  if (queue.length === 0) return frontier;
+  queue[0] = tail;
+  let index = 0;
+  while (true) {
+    const leftIndex = index * 2 + 1;
+    const rightIndex = leftIndex + 1;
+    let smallestIndex = index;
+    if (
+      leftIndex < queue.length &&
+      compareEvents(
+        queue[leftIndex],
+        queue[smallestIndex],
+      ) < 0
+    ) {
+      smallestIndex = leftIndex;
     }
+    if (
+      rightIndex < queue.length &&
+      compareEvents(
+        queue[rightIndex],
+        queue[smallestIndex],
+      ) < 0
+    ) {
+      smallestIndex = rightIndex;
+    }
+    if (smallestIndex === index) break;
+    [queue[index], queue[smallestIndex]] = [
+      queue[smallestIndex],
+      queue[index],
+    ];
+    index = smallestIndex;
   }
-  state.eventQueue.splice(low, 0, event);
+  return frontier;
+}
+
+function heapifyEventQueue(state) {
+  const events = state.eventQueue;
+  state.eventQueue = [];
+  for (const event of events) {
+    insertEventQueue(state, event);
+  }
 }
 
 function nextLocalId(state, prefix, sequence = null) {
@@ -559,7 +1592,7 @@ function nextLocalId(state, prefix, sequence = null) {
   return `${prefix}_${String(value).padStart(8, '0')}`;
 }
 
-function scheduleEvent(
+function createScheduledEvent(
   state,
   {
     type,
@@ -584,6 +1617,14 @@ function scheduleEvent(
     payload: ownedPayload ? payload : cloneJson(payload),
     rngKey: `${state.world.world.seed}:${scheduledMs}:${phasePriority}:${sequence}`,
   };
+  return event;
+}
+
+function scheduleEvent(state, descriptor) {
+  const event = createScheduledEvent(
+    state,
+    descriptor,
+  );
   insertEventQueue(state, event);
   return event;
 }
@@ -777,6 +1818,175 @@ function createAccounts(world) {
     });
   }
   return accounts;
+}
+
+function ensureStabilizationFundAccount(state) {
+  const accountId = 'npc_stabilization_fund';
+  if (state.accounts[accountId]) return false;
+  const investor =
+    state.world.entities?.investors?.[accountId];
+  if (!investor) return false;
+  const securities = state.world.market.securities;
+  const sourceCustody =
+    state.accounts.holder_public_custody;
+  if (!sourceCustody) {
+    throw new Error(
+      'Missing public custody for stabilization-account migration.',
+    );
+  }
+  const targetHoldings = Object.fromEntries(
+    Object.keys(securities).map((symbol) => [
+      symbol,
+      investor.holdings?.[symbol] ?? 0,
+    ]),
+  );
+  const sourceHoldings = cloneJson(
+    sourceCustody.holdings,
+  );
+  for (const [symbol, quantity] of Object.entries(
+    targetHoldings,
+  )) {
+    const free = Math.max(
+      0,
+      (sourceHoldings[symbol] ?? 0) -
+        (sourceCustody.reservedHoldings?.[symbol] ?? 0),
+    );
+    if (free < quantity) {
+      throw new Error(
+        `Insufficient public custody for stabilization migration: ${symbol}`,
+      );
+    }
+    sourceHoldings[symbol] -= quantity;
+  }
+  const targetCashCents = cents(investor.cash);
+  let remainingCashCents = targetCashCents;
+  const makers = Object.values(state.accounts)
+    .filter(
+      (account) =>
+        account.kind === 'proprietary_maker',
+    )
+    .sort((left, right) =>
+      left.id.localeCompare(right.id),
+    );
+  for (const maker of makers) {
+    if (remainingCashCents <= 0) break;
+    const free = Math.max(
+      0,
+      maker.cashCents - maker.reservedCashCents,
+    );
+    const transferred = Math.min(
+      free,
+      remainingCashCents,
+    );
+    maker.cashCents -= transferred;
+    remainingCashCents -= transferred;
+  }
+  if (remainingCashCents > 0) {
+    throw new Error(
+      'Insufficient maker cash for stabilization migration.',
+    );
+  }
+  synchronizeTransferredHoldings(
+    sourceCustody,
+    sourceHoldings,
+    securities,
+  );
+  state.accounts[accountId] = makeAccount({
+    id: accountId,
+    kind: 'broker_client',
+    brokerId: 'broker_lzy',
+    cashCents: targetCashCents,
+    holdings: targetHoldings,
+    securities,
+  });
+  return true;
+}
+
+function ensureQuantInstitutionAccount(state) {
+  const accountId = 'npc_quant_institution';
+  if (state.accounts[accountId]) return false;
+  const investor =
+    state.world.entities?.investors?.[accountId];
+  if (!investor) return false;
+  const securities = state.world.market.securities;
+  const sourceCustody =
+    state.accounts.holder_public_custody;
+  if (!sourceCustody) {
+    throw new Error(
+      'Missing public custody for quant-institution migration.',
+    );
+  }
+  const targetHoldings = Object.fromEntries(
+    Object.keys(securities).map((symbol) => [
+      symbol,
+      investor.holdings?.[symbol] ?? 0,
+    ]),
+  );
+  const sourceHoldings = cloneJson(
+    sourceCustody.holdings,
+  );
+  for (const [symbol, quantity] of Object.entries(
+    targetHoldings,
+  )) {
+    const free = Math.max(
+      0,
+      (sourceHoldings[symbol] ?? 0) -
+        (sourceCustody.reservedHoldings?.[symbol] ?? 0),
+    );
+    if (free < quantity) {
+      throw new Error(
+        `Insufficient public custody for quant migration: ${symbol}`,
+      );
+    }
+    sourceHoldings[symbol] -= quantity;
+  }
+  const targetCashCents = cents(investor.cash);
+  const canonicalMakerCashCents = cents(
+    state.world.market.maker.cash,
+  );
+  const makers = Object.values(state.accounts)
+    .filter(
+      (account) =>
+        account.kind === 'proprietary_maker',
+    )
+    .sort((left, right) =>
+      left.id.localeCompare(right.id),
+    );
+  let makerExcessCents = Math.max(
+    0,
+    makers.reduce(
+      (sum, maker) => sum + maker.cashCents,
+      0,
+    ) - canonicalMakerCashCents,
+  );
+  for (const maker of makers) {
+    if (makerExcessCents <= 0) break;
+    const transferred = Math.min(
+      maker.cashCents - maker.reservedCashCents,
+      makerExcessCents,
+    );
+    maker.cashCents -= transferred;
+    makerExcessCents -= transferred;
+  }
+  if (makerExcessCents > 0) {
+    throw new Error(
+      'Unable to reconcile maker cash for quant migration.',
+    );
+  }
+  synchronizeTransferredHoldings(
+    sourceCustody,
+    sourceHoldings,
+    securities,
+  );
+  state.accounts[accountId] = makeAccount({
+    id: accountId,
+    kind: 'broker_client',
+    brokerId: 'broker_lzy',
+    cashCents: targetCashCents,
+    holdings: targetHoldings,
+    securities,
+  });
+  return true;
 }
 
 function ensureSecuritiesLendingCustodyAccount(state) {
@@ -1489,6 +2699,9 @@ function archiveTerminalOrders(state, symbol) {
       tif: order.tif,
       ecologyAgentId: order.ecologyAgentId ?? null,
       parentOrderId: order.parentOrderId ?? null,
+      automationKind: order.automationKind ?? null,
+      automationDecisionId: order.automationDecisionId ?? null,
+      automationStrategyIds: [...(order.automationStrategyIds ?? [])],
       sequence: order.sequence,
       commitSeq: order.commitSeq,
     };
@@ -1652,9 +2865,22 @@ function syncWorldMarketMirrors(
   {
     dirtySymbols = null,
     synchronizeDerivatives = true,
+    performanceTrace = null,
   } = {},
 ) {
+  const traceNow = performanceTrace
+    ? () => globalThis.performance?.now?.() ?? Date.now()
+    : null;
+  let traceStartedAt = traceNow?.();
+  const tracePart = performanceTrace
+    ? (name) => {
+        const completedAt = traceNow();
+        performanceTrace[name] = completedAt - traceStartedAt;
+        traceStartedAt = completedAt;
+      }
+    : () => {};
   syncWorldBalancesFromAccounts(state);
+  tracePart('worldBalanceMirrorMs');
   const scopedSymbols = Array.isArray(dirtySymbols)
     ? [...new Set(dirtySymbols)].filter((symbol) =>
         Object.hasOwn(state.books, symbol),
@@ -1663,6 +2889,7 @@ function syncWorldMarketMirrors(
   state.world.market.orders = scopedSymbols
     ? dirtyWorldOrderMirrors(state, scopedSymbols)
     : allBookOrders(state).map(worldOrderMirror);
+  tracePart('worldOrderMirrorMs');
   if (scopedSymbols) {
     state.world.market.orderBooks = {
       ...state.world.market.orderBooks,
@@ -1677,6 +2904,7 @@ function syncWorldMarketMirrors(
       state.world.world.tick,
     );
   }
+  tracePart('worldBookMirrorMs');
   const deferredSymbols =
     deferredWorldOrderMirrorSymbols.get(state);
   if (deferredSymbols) {
@@ -1692,8 +2920,15 @@ function syncWorldMarketMirrors(
     }
   }
   if (synchronizeDerivatives) {
-    synchronizeEmbeddedDerivatives(state.world);
+    if (synchronizeDerivatives === 'reservation_only') {
+      synchronizeEmbeddedDerivativeReservations(
+        state.world,
+      );
+    } else {
+      synchronizeEmbeddedDerivatives(state.world);
+    }
   }
+  tracePart('worldDerivativeMirrorMs');
 }
 
 function flushDeferredWorldOrderMirrors(state) {
@@ -1888,6 +3123,125 @@ function appendMarketFill(state, symbol, fill) {
   }
   appendFillInPlace(entry.validationSeries, fill);
   entry.fills.push(entry.validationSeries.fills.at(-1));
+}
+
+function turnoverWindowId(openedAtMs) {
+  return `market_day:${Math.floor(openedAtMs / WORLD_DAY_MS)}`;
+}
+
+function effectiveFloatUnits(world, symbol) {
+  const security = world.market.securities[symbol];
+  const units = Math.trunc(
+    Number(
+      security?.floatUnits ??
+        security?.floatShares,
+    ),
+  );
+  if (!Number.isSafeInteger(units) || units < 1) {
+    throw new Error(
+      `Invalid effective float for turnover: ${symbol}`,
+    );
+  }
+  return units;
+}
+
+function createTurnoverTruthBySymbol(
+  world,
+  openedAtMs,
+) {
+  return Object.fromEntries(
+    Object.keys(world.market.securities).map((symbol) => [
+      symbol,
+      createCumulativeTurnoverState({
+        assetId: symbol,
+        windowId: turnoverWindowId(openedAtMs),
+        effectiveFloatUnits:
+          effectiveFloatUnits(world, symbol),
+        openedAtMs,
+      }),
+    ]),
+  );
+}
+
+function exactTurnoverIntegrationBySymbol(world) {
+  return Object.fromEntries(
+    Object.keys(world.market.securities).map((symbol) => [
+      symbol,
+      {
+        schemaVersion:
+          TURNOVER_PRODUCTION_INTEGRATION_SCHEMA,
+        status: 'exact_from_window_open',
+        grossAuthority: 'settled_matched_fills_only',
+        selfTradeCoverage: 'exact',
+      },
+    ]),
+  );
+}
+
+function recordSettledTurnoverFill(state, trade) {
+  const current =
+    state.turnoverTruthBySymbol[trade.symbol];
+  const result = reduceCumulativeTurnover(current, {
+    type: 'MATCHED_FILL_SETTLED',
+    eventId: trade.id,
+    eventSeq: current.lastEventSeq + 1,
+    atMs: trade.virtualMs,
+    priceAuthority: 'matched_order_fill',
+    quantity: trade.quantity,
+    priceTicks: trade.priceTicks,
+    selfTrade: trade.selfTrade,
+  });
+  state.turnoverTruthBySymbol[trade.symbol] =
+    result.state;
+  return result.receipt;
+}
+
+function openTurnoverTruthWindow(state) {
+  for (const symbol of Object.keys(state.books)) {
+    const current =
+      state.turnoverTruthBySymbol[symbol];
+    const result = reduceCumulativeTurnover(current, {
+      type: 'OPEN_TURNOVER_WINDOW',
+      eventId:
+        `turnover_window:${symbol}:${state.nowMs}`,
+      eventSeq: current.lastEventSeq + 1,
+      atMs: state.nowMs,
+      windowId: turnoverWindowId(state.nowMs),
+      effectiveFloatUnits:
+        effectiveFloatUnits(state.world, symbol),
+    });
+    state.turnoverTruthBySymbol[symbol] = result.state;
+    state.turnoverTruthIntegrationBySymbol[symbol] = {
+      schemaVersion:
+        TURNOVER_PRODUCTION_INTEGRATION_SCHEMA,
+      status: 'exact_from_window_open',
+      grossAuthority: 'settled_matched_fills_only',
+      selfTradeCoverage: 'exact',
+    };
+  }
+}
+
+function publicTurnoverTruth(state, symbol) {
+  const source = projectCumulativeTurnover(
+    state.turnoverTruthBySymbol[symbol],
+  );
+  const integration =
+    state.turnoverTruthIntegrationBySymbol[symbol];
+  const projection = {
+    ...source,
+    integrationStatus: 'production_integrated',
+    sourceModuleIntegrationStatus:
+      source.integrationStatus,
+    productionIntegration: cloneJson(integration),
+  };
+  if (integration.selfTradeCoverage !== 'exact') {
+    projection.selfTradeUnits = null;
+    projection.selfTradeTurnoverTicks = null;
+    projection.selfTradeCount = null;
+    projection.armLengthUnits = null;
+    projection.armLengthTurnoverBps = null;
+  }
+  return projection;
 }
 
 function publishFill(state, fill, commitSeq) {
@@ -2161,6 +3515,7 @@ function publishFill(state, fill, commitSeq) {
   );
   state.world.memories.push(memory);
   state.world.market.trades.push(trade);
+  recordSettledTurnoverFill(state, trade);
   state.realtimeAuditArchive.liveChainCount += 1;
   appendMarketFill(state, buyOrder.symbol, {
     timestampMs: state.nowMs,
@@ -2227,6 +3582,42 @@ function validateSubmitIntent(state, command, account) {
     }
     if (command.priceTicks < band.limitDownTicks) {
       return invalid('PRICE_BELOW_DAILY_LIMIT');
+    }
+    if (
+      command.liquidityLayer?.zone === 'LIMIT_QUEUE' &&
+      typeof command.liquidityLayer.episodeId === 'string'
+    ) {
+      const agent =
+        state.agentEcology?.agents?.[
+          command.ecologyAgentId
+        ];
+      const episode =
+        agent?.limitQueueEpisodes?.[command.symbol];
+      const expectedDirection =
+        command.side === 'buy' ? 'up' : 'down';
+      const expectedLimitPriceTicks =
+        command.side === 'buy'
+          ? band.limitUpTicks
+          : band.limitDownTicks;
+      if (
+        !episode ||
+        episode.episodeId !== command.parentOrderId ||
+        episode.episodeId !==
+          command.liquidityLayer.episodeId ||
+        episode.direction !== expectedDirection ||
+        episode.limitPriceTicks !==
+          expectedLimitPriceTicks ||
+        command.priceTicks !==
+          expectedLimitPriceTicks ||
+        episode.activeLayerKey !==
+          command.liquidityLayer.layerKey ||
+        command.liquidityLayer.limitQueuePhase !==
+          episode.state
+      ) {
+        return invalid(
+          'STALE_DAILY_LIMIT_QUEUE_EPISODE',
+        );
+      }
     }
   }
 
@@ -2333,10 +3724,12 @@ function handleSubmitOrder(
   command,
   { deferBatchMaintenance = false } = {},
 ) {
+  const roleAutomation = automationAttribution(command);
   const brokerCheck = validateBrokerCommand(state, command);
   if (brokerCheck.reason) {
     return rejectedReceipt(state, 'submit_order', brokerCheck.reason, {
       actorId: command.actorId,
+      ...roleAutomation,
     });
   }
   const validation = validateSubmitIntent(
@@ -2347,6 +3740,7 @@ function handleSubmitOrder(
   if (validation.reason) {
     return rejectedReceipt(state, 'submit_order', validation.reason, {
       actorId: command.actorId,
+      ...roleAutomation,
     });
   }
 
@@ -2397,8 +3791,34 @@ function handleSubmitOrder(
     liquidityLayer: command.liquidityLayer
       ? cloneLiquidityLayer(command.liquidityLayer)
       : null,
+    ...roleAutomation,
     commitSeq,
   };
+  if (
+    typeof command.orderContextVersion === 'string' &&
+    typeof command.orderContextRegime === 'string' &&
+    command.orderContextSymbol === command.symbol &&
+    Number.isSafeInteger(
+      command.orderContextArrivalBudgetUnits,
+    ) &&
+    command.orderContextArrivalBudgetUnits > 0 &&
+    Number.isSafeInteger(
+      command.orderContextDepthBudgetUnits,
+    ) &&
+    command.orderContextDepthBudgetUnits > 0 &&
+    Array.isArray(command.orderContextMechanismSources)
+  ) {
+    order.orderContextVersion = command.orderContextVersion;
+    order.orderContextRegime = command.orderContextRegime;
+    order.orderContextSymbol = command.orderContextSymbol;
+    order.orderContextArrivalBudgetUnits =
+      command.orderContextArrivalBudgetUnits;
+    order.orderContextDepthBudgetUnits =
+      command.orderContextDepthBudgetUnits;
+    order.orderContextMechanismSources = [
+      ...command.orderContextMechanismSources,
+    ];
+  }
   if (order.side === 'buy') {
     order.reservedCashCents =
       orderType === 'market'
@@ -2427,7 +3847,7 @@ function handleSubmitOrder(
       state,
       'submit_order',
       result.rejected.reason,
-      { actorId: command.actorId },
+      { actorId: command.actorId, ...roleAutomation },
     );
   }
   indexOrder(state, state.books[order.symbol].orders[orderId]);
@@ -2482,6 +3902,27 @@ function handleSubmitOrder(
     parentOrderId: order.parentOrderId,
     ecologyAgentId: order.ecologyAgentId,
     ecologyIntentKind: order.ecologyIntentKind,
+    ...(order.automationKind
+      ? {
+          automationKind: order.automationKind,
+          automationDecisionId: order.automationDecisionId,
+          automationStrategyIds: [...order.automationStrategyIds],
+        }
+      : {}),
+    ...(order.orderContextVersion
+      ? {
+          orderContextVersion: order.orderContextVersion,
+          orderContextRegime: order.orderContextRegime,
+          orderContextSymbol: order.orderContextSymbol,
+          orderContextArrivalBudgetUnits:
+            order.orderContextArrivalBudgetUnits,
+          orderContextDepthBudgetUnits:
+            order.orderContextDepthBudgetUnits,
+          orderContextMechanismSources: [
+            ...order.orderContextMechanismSources,
+          ],
+        }
+      : {}),
     filledQuantity,
     remainingQuantity: activeOrder(stored) ? stored.remainingQty : 0,
     cancelledQuantity:
@@ -2875,24 +4316,16 @@ function compactRealtimeAuditOverflow(
     ),
   );
   archiveRealtimeAuditBundles(state, bundles, archiveCommitSeq);
+  // The lossless audit bundle and bounded bar authority already retain every
+  // archived fill. Keeping one placeholder in world.market.trades for each
+  // archived fill made the supposedly live collection grow with intraday
+  // elapsed history and forced every quote/command projection to rescan it.
+  // Remove archived trades completely; old checkpoints that contain the
+  // former slot records are still cleaned by rollRealtimeAuditSlotDomain.
   state.world.market.trades =
-    state.world.market.trades.flatMap((trade) => {
-      if (!selectedIds.trades.has(trade.id)) {
-        return [trade];
-      }
-      if (trade.virtualMs < domain.startMs) return [];
-      return [{
-        id:
-          `rt_audit_slot_${String(
-            numericIdSuffix(trade.id),
-          ).padStart(8, '0')}`,
-        originalTradeId: trade.id,
-        symbol: trade.symbol,
-        virtualMs: trade.virtualMs,
-        source: REALTIME_AUDIT_SLOT_SOURCE,
-        commitSeq: trade.commitSeq,
-      }];
-    });
+    state.world.market.trades.filter(
+      (trade) => !selectedIds.trades.has(trade.id),
+    );
   state.world.eventLog = state.world.eventLog.filter(
     (event) => !selectedIds.events.has(event.id),
   );
@@ -3444,12 +4877,19 @@ function compressLosslessPayloads(payloads) {
   };
 }
 
-function decompressLosslessPayloads(block) {
+function decompressLosslessPayloads(block, state = null) {
+  const compressedPayload =
+    typeof block?.compressedLosslessPayloads === 'string'
+      ? block.compressedLosslessPayloads
+      : realtimeAuditColdRecordValue(
+          state,
+          block?.compressedLosslessPayloads,
+          'payload',
+        );
   if (
     block?.losslessPayloadEncoding !==
       REALTIME_AUDIT_BLOCK_PAYLOAD_ENCODING ||
-    typeof block.compressedLosslessPayloads !== 'string' ||
-    block.compressedLosslessPayloads.length === 0 ||
+    compressedPayload.length === 0 ||
     !Number.isSafeInteger(
       block.losslessPayloadUncompressedBytes,
     ) ||
@@ -3463,7 +4903,7 @@ function decompressLosslessPayloads(block) {
   try {
     const decoded = decodeLz4Block(
       base64ToBytes(
-        block.compressedLosslessPayloads,
+        compressedPayload,
       ),
       block.losslessPayloadUncompressedBytes,
     );
@@ -3489,17 +4929,24 @@ function decompressLosslessPayloads(block) {
   return payloads;
 }
 
-function losslessPayloadsFromBlock(block) {
+function losslessPayloadsFromBlock(block, state = null) {
+  const resolved = resolveRealtimeAuditColdBlock(
+    state,
+    block,
+  );
+  if (resolved !== block) {
+    return losslessPayloadsFromBlock(resolved, state);
+  }
   if (Array.isArray(block?.children)) {
     return block.children.flatMap(
-      losslessPayloadsFromBlock,
+      (child) => losslessPayloadsFromBlock(child, state),
     );
   }
   if (
     block?.losslessPayloadEncoding ===
     REALTIME_AUDIT_BLOCK_PAYLOAD_ENCODING
   ) {
-    return decompressLosslessPayloads(block);
+    return decompressLosslessPayloads(block, state);
   }
   return Array.isArray(block?.losslessPayloads)
     ? block.losslessPayloads
@@ -3537,10 +4984,10 @@ function auditBlockBranchPayloadDigest(children) {
   );
 }
 
-function archivedLosslessPayloads(archive) {
+function archivedLosslessPayloads(archive, state = null) {
   return [
     ...(archive?.foldedBlocks ?? []).flatMap(
-      losslessPayloadsFromBlock,
+      (block) => losslessPayloadsFromBlock(block, state),
     ),
     ...(archive?.recentBundles ?? [])
       .map((bundle) => bundle?.losslessPayload)
@@ -3583,6 +5030,31 @@ function hydrateRealtimeAuditArchiveLosslessFields(state) {
     if (!Array.isArray(block.losslessPayloads)) {
       block.losslessPayloads = [];
     }
+    if (isRealtimeAuditColdBlockReference(block)) {
+      return {
+        bundles: block.losslessBundleCount,
+        chains: block.losslessChainCount,
+        receipts: block.losslessReceiptCount,
+      };
+    }
+    if (
+      validRealtimeAuditColdReference(
+        block.compressedLosslessPayloads,
+        'payload',
+      ) &&
+      realtimeAuditColdReferenceKnown(
+        state,
+        block.compressedLosslessPayloads,
+        'payload',
+      ) &&
+      !realtimeAuditColdStoreCanRead(state)
+    ) {
+      return {
+        bundles: block.losslessBundleCount,
+        chains: block.losslessChainCount,
+        receipts: block.losslessReceiptCount,
+      };
+    }
     if (Array.isArray(block.children)) {
       for (const child of block.children) {
         hydrateBlock(child);
@@ -3624,7 +5096,7 @@ function hydrateRealtimeAuditArchiveLosslessFields(state) {
       block.losslessPayloadEncoding ===
       REALTIME_AUDIT_BLOCK_PAYLOAD_ENCODING;
     const payloads = compressed
-      ? decompressLosslessPayloads(block)
+      ? decompressLosslessPayloads(block, state)
       : block.losslessPayloads;
     const totals = losslessAuditTotals(payloads);
     block.losslessBundleCount = totals.bundles;
@@ -3701,7 +5173,10 @@ export function materializeRealtimeAuditArchive(state) {
     throw new TypeError('A realtime audit archive is required.');
   }
   const totals = losslessAuditTotals(
-    archivedLosslessPayloads(archive),
+    archivedLosslessPayloads(
+      archive,
+      state?.realtimeAuditArchive ? state : null,
+    ),
   );
   if (
     totals.bundles !== archive.losslessArchivedBundles ||
@@ -3748,9 +5223,20 @@ export function materializeRealtimeAuditArchive(state) {
 function foldArchivedBundles(state) {
   const archive = state.realtimeAuditArchive;
   if (archive.recentBundles.length <= archive.maxRecentBundles) return;
+  // Fold one complete bounded hot batch. The previous one-bundle overflow
+  // produced thousands of tiny cold leaves and forfeited cross-bundle LZ4
+  // repetition. This keeps recent authority bounded while making leaf count
+  // depend on bounded batches rather than individual elapsed commits.
+  const overflowCount = Math.max(
+    archive.recentBundles.length - archive.maxRecentBundles,
+    Math.min(
+      archive.maxRecentBundles,
+      archive.recentBundles.length,
+    ),
+  );
   const overflow = archive.recentBundles.splice(
     0,
-    archive.recentBundles.length - archive.maxRecentBundles,
+    overflowCount,
   );
   const losslessPayloads = overflow
     .map((bundle) => bundle.losslessPayload)
@@ -3819,6 +5305,7 @@ function foldArchivedBundles(state) {
       compressedLosslessPayloads.encoded,
     ),
   };
+  externalizeRealtimeAuditPayload(state, block);
   verifiedRealtimeAuditBlocks.add(block);
   archive.foldedBlocks.push(block);
   while (
@@ -3848,6 +5335,9 @@ function foldArchivedBundles(state) {
       mergeIndex,
       2,
     );
+    const coldChildren = blocksToFold.map((block) =>
+      externalizeRealtimeAuditBlock(state, block),
+    );
     const mergedBlock = {
       id: `rt_chain_archive_block_${String(
         archive.nextBlockSequence++,
@@ -3873,9 +5363,9 @@ function foldArchivedBundles(state) {
       fromCommitSeq: blocksToFold[0].fromCommitSeq,
       toCommitSeq: blocksToFold.at(-1).toCommitSeq,
       digest: auditBlockBranchDigest(
-        blocksToFold,
+        coldChildren,
       ),
-      children: blocksToFold,
+      children: coldChildren,
       losslessPayloads: [],
       losslessBundleCount: blocksToFold.reduce(
         (sum, item) =>
@@ -3894,7 +5384,7 @@ function foldArchivedBundles(state) {
       ),
       losslessPayloadDigest:
         auditBlockBranchPayloadDigest(
-          blocksToFold,
+          coldChildren,
         ),
     };
     verifiedRealtimeAuditBlocks.add(mergedBlock);
@@ -4161,6 +5651,12 @@ function handleWorldAction(state, command) {
   const action = {
     ...(command.action ?? {}),
     actorId: command.actorId,
+    authorityCommitSeq:
+      command.action?.type === 'entertainment_action'
+        ? state.world.entertainment.projectionRevision
+        : state.commitSeq,
+    virtualTime: state.nowMs,
+    worldEpoch: state.streamId,
     availableCashCents:
       state.accounts.player.cashCents -
       state.accounts.player.reservedCashCents -
@@ -4194,6 +5690,7 @@ function handleWorldAction(state, command) {
   }
   const commitSeq = state.commitSeq + 1;
   state.world = result.state;
+  synchronizePlayerRoleAutomationConfiguration(state);
   stampNewWorldRecords(state.world, previousIds, commitSeq);
   syncAccountsAfterWorldMutation(state);
   for (const account of Object.values(state.accounts)) {
@@ -4202,6 +5699,26 @@ function handleWorldAction(state, command) {
   state.commitSeq = commitSeq;
   markAccountRisk(state);
   syncWorldMarketMirrors(state);
+  const scheduledCompletion =
+    result.receipt.scheduledCompletion;
+  if (
+    scheduledCompletion?.type ===
+      'open_world_city_completion' &&
+    typeof scheduledCompletion.commitmentId === 'string' &&
+    scheduledCompletion.commitmentId.length > 0 &&
+    Number.isSafeInteger(scheduledCompletion.scheduledMs) &&
+    scheduledCompletion.scheduledMs >= state.nowMs
+  ) {
+    scheduleEvent(state, {
+      type: 'open_world_city_completion',
+      scheduledMs: scheduledCompletion.scheduledMs,
+      phasePriority: MARKET_PHASE_PRIORITY.PLAYER_COMMAND,
+      actorId: command.actorId,
+      payload: {
+        commitmentId: scheduledCompletion.commitmentId,
+      },
+    });
+  }
   return pushReceipt(state, {
     ...cloneJson(result.receipt),
     id: nextLocalId(state, 'receipt'),
@@ -4215,6 +5732,132 @@ function handleWorldAction(state, command) {
   });
 }
 
+function handleOpenWorldCityCompletion(state, event) {
+  const previousIds = captureWorldRecordIds(state.world);
+  const commitSeq = state.commitSeq + 1;
+  const result = settleOpenWorldCityCompletion(
+    state.world,
+    event.payload.commitmentId,
+    {
+      authorityCommitSeq: commitSeq,
+      virtualTime: event.scheduledMs,
+    },
+  );
+  if (result.status !== 'accepted') {
+    return pushReceipt(state, {
+      ...cloneJson(result),
+      id: nextLocalId(state, 'receipt'),
+      engineReceiptId: result.id ?? null,
+      actorId: event.actorId,
+      virtualMs: state.nowMs,
+      commitSeq: state.commitSeq,
+    });
+  }
+  stampNewWorldRecords(
+    state.world,
+    previousIds,
+    commitSeq,
+  );
+  state.commitSeq = commitSeq;
+  if (result.destinationPlaceId) {
+    state.world.spatial.player.authorityCommitSeq = commitSeq;
+    state.world.spatial.player.authorityVirtualMs =
+      event.scheduledMs;
+  }
+  for (const account of Object.values(state.accounts)) {
+    account.commitSeq = commitSeq;
+  }
+  markAccountRisk(state);
+  return pushReceipt(state, {
+    ...cloneJson(result),
+    id: nextLocalId(state, 'receipt'),
+    engineReceiptId: result.id ?? null,
+    actorId: event.actorId,
+    virtualMs: state.nowMs,
+    commitSeq,
+  });
+}
+
+function queuedPlayerMotion(state) {
+  return state.eventQueue.some(
+    (event) =>
+      event.type === 'player_motion_step' &&
+      event.actorId === 'player',
+  );
+}
+
+function schedulePlayerMotion(state, scheduledMs) {
+  if (queuedPlayerMotion(state)) return null;
+  return scheduleEvent(state, {
+    ...world2dMotionEventDescriptor(
+      state.world,
+      scheduledMs,
+    ),
+    phasePriority:
+      MARKET_PHASE_PRIORITY.PLAYER_MOTION,
+  });
+}
+
+function handlePlayerControl(state, command) {
+  const prior = priorSpatialControlReceipt(
+    state.world.spatial,
+    command.commandId,
+  );
+  if (prior) return cloneJson(prior);
+  const priorPlaceId = state.world.spatial.player.currentPlaceId;
+  const result = acceptWorld2DControl(
+    state.world,
+    command,
+    {
+      authorityCommitSeq: state.commitSeq,
+      authorityVirtualMs: state.nowMs,
+    },
+  );
+  if (result.status !== 'accepted') {
+    return pushReceipt(state, {
+      id: nextLocalId(state, 'receipt'),
+      type: 'player_control',
+      commandType: 'player_control',
+      actorId: command.actorId,
+      commandId: command.commandId,
+      controlSeq: command.controlSeq,
+      status: 'rejected',
+      reason: result.reason,
+      virtualMs: state.nowMs,
+      commitSeq: state.commitSeq,
+    });
+  }
+  const commitSeq = state.commitSeq + 1;
+  state.commitSeq = commitSeq;
+  state.world.spatial.player.authorityCommitSeq =
+    commitSeq;
+  if (
+    state.world.spatial.player.currentPlaceId !== priorPlaceId
+  ) {
+    markEntertainmentProjectionChanged(state.world);
+  }
+  if (result.shouldSchedule) {
+    schedulePlayerMotion(
+      state,
+      state.nowMs + WORLD2D_MOTION_STEP_MS,
+    );
+  }
+  const receipt = pushReceipt(state, {
+    ...cloneJson(result),
+    id: nextLocalId(state, 'receipt'),
+    type: 'player_control',
+    commandType: 'player_control',
+    actorId: command.actorId,
+    virtualMs: state.nowMs,
+    commitSeq,
+  });
+  const remembered = state.world.spatial.recentControlCommands.find(
+    (entry) => entry.commandId === command.commandId,
+  );
+  if (remembered) remembered.receipt = cloneJson(receipt);
+  return receipt;
+}
+
 function routeCommand(state, command, options = {}) {
   switch (command.type) {
     case 'submit_order':
@@ -4223,6 +5866,8 @@ function routeCommand(state, command, options = {}) {
       return handleCancelOrder(state, command, options);
     case 'world_action':
       return handleWorldAction(state, command);
+    case 'player_control':
+      return handlePlayerControl(state, command);
     default:
       return rejectedReceipt(
         state,
@@ -4830,6 +6475,13 @@ function pruneBoundedAgentReceipts(state) {
       (!Array.isArray(receipt.tradeIds) ||
         receipt.tradeIds.length === 0),
   );
+  const disposableAutomationReceipts = state.receipts.filter(
+    (receipt) =>
+      (receipt.automationKind === 'quant' ||
+        receipt.automationKind === 'stabilization') &&
+      (!Array.isArray(receipt.tradeIds) ||
+        receipt.tradeIds.length === 0),
+  );
   const removeIds = new Set([
     ...disposableAgentReceipts
       .slice(
@@ -4848,6 +6500,16 @@ function pruneBoundedAgentReceipts(state) {
           0,
           disposablePlayerReceipts.length -
             MAX_PLAYER_REJECTED_RECEIPTS,
+        ),
+      )
+      .map((receipt) => receipt.id),
+    ...disposableAutomationReceipts
+      .slice(
+        0,
+        Math.max(
+          0,
+          disposableAutomationReceipts.length -
+            MAX_PLAYER_AUTOMATION_NONTRADE_RECEIPTS,
         ),
       )
       .map((receipt) => receipt.id),
@@ -4905,6 +6567,97 @@ function recentActivityById(state, activityId) {
   return recentActivityIndex(state)?.get(activityId) ?? null;
 }
 
+function makerSymbolsForCadence(
+  state,
+  agent,
+  event,
+  openingMakerDecision,
+) {
+  const symbols = Object.keys(state.books);
+  const hydrationSymbols =
+    event.payload?.universeHydrationSymbols;
+  if (hydrationSymbols !== undefined) {
+    if (
+      !Array.isArray(hydrationSymbols) ||
+      hydrationSymbols.length === 0 ||
+      new Set(hydrationSymbols).size !==
+        hydrationSymbols.length ||
+      hydrationSymbols.some(
+        (symbol) =>
+          typeof symbol !== 'string' ||
+          !Object.hasOwn(state.books, symbol),
+      )
+    ) {
+      throw new Error(
+        'Invalid stock-universe maker hydration event.',
+      );
+    }
+    return [...hydrationSymbols];
+  }
+  if (
+    openingMakerDecision ||
+    symbols.length <= MAX_MAKER_SYMBOLS_PER_CADENCE
+  ) {
+    return symbols;
+  }
+  const prioritySymbols = new Set(
+    (event.payload?.prioritySymbols ?? []).filter((symbol) =>
+      Object.hasOwn(state.books, symbol),
+    ),
+  );
+  const urgentBoundarySymbols = [
+    ...new Set(
+      (event.payload?.urgentBoundarySymbols ?? []).filter(
+        (symbol) => Object.hasOwn(state.books, symbol),
+      ),
+    ),
+  ].slice(0, MAX_MAKER_SYMBOLS_PER_CADENCE);
+  for (const [symbol, episode] of Object.entries(
+    agent.limitQueueEpisodes ?? {},
+  )) {
+    if (
+      episode &&
+      episode.state !== 'exhaustion' &&
+      episode.state !== 'failed_recovery'
+    ) {
+      prioritySymbols.add(symbol);
+    }
+  }
+  const cursor =
+    Number.isSafeInteger(agent.makerCadenceCursor) &&
+    agent.makerCadenceCursor >= 0
+      ? agent.makerCadenceCursor % symbols.length
+      : 0;
+  const shard = Array.from(
+    { length: MAX_MAKER_SYMBOLS_PER_CADENCE },
+    (_, offset) => symbols[(cursor + offset) % symbols.length],
+  );
+  // Ordinary settled trades only reorder their existing fixed shard. A first
+  // daily-boundary touch (or a documented relock) may replace one slot so the
+  // player does not wait a whole universe pass for a maker response; the
+  // episode gate prevents subsequent boundary fills from repeatedly doing so.
+  // Either path preserves the hard eight-symbol decision budget and advances
+  // the fairness cursor by the same fixed amount.
+  const urgentSet = new Set(urgentBoundarySymbols);
+  const selected = [
+    ...urgentBoundarySymbols,
+    ...shard.filter(
+      (symbol) =>
+        !urgentSet.has(symbol) &&
+        prioritySymbols.has(symbol),
+    ),
+    ...shard.filter(
+      (symbol) =>
+        !urgentSet.has(symbol) &&
+        !prioritySymbols.has(symbol),
+    ),
+  ].slice(0, MAX_MAKER_SYMBOLS_PER_CADENCE);
+  agent.makerCadenceCursor =
+    (cursor + MAX_MAKER_SYMBOLS_PER_CADENCE) %
+    symbols.length;
+  return selected;
+}
+
 function handleEcologyDecision(state, event) {
   const agentId = event.actorId;
   const agent = state.agentEcology.agents[agentId];
@@ -4928,6 +6681,7 @@ function handleEcologyDecision(state, event) {
     delete observed.deferredObservedTrades;
     agent.activePublicSignal = observed;
     agent.publicFlowMemory = cloneJson(observed);
+    agent.publicFlowMemory.processedAtMs = state.nowMs;
     agent.lastObservedTradeMs = pending.lastTradeMs;
     scheduleDeferredPublicFlowResponse(
       state,
@@ -4936,7 +6690,18 @@ function handleEcologyDecision(state, event) {
     );
   }
   agent.lastTrigger = trigger;
-  const commands = decideAgentOrders(state, agentId);
+  const makerSymbols =
+    agent.kind === 'maker'
+      ? makerSymbolsForCadence(
+          state,
+          agent,
+          event,
+          openingMakerDecision,
+        )
+      : null;
+  const commands = decideAgentOrders(state, agentId, {
+    makerSymbols,
+  });
   delete agent.activePublicSignal;
   agent.lastTrigger = null;
 
@@ -4948,6 +6713,10 @@ function handleEcologyDecision(state, event) {
     virtualMs: state.nowMs,
     decisionSequence: agent.decisionSequence,
     observedTradeIds: pending?.observedTradeIds ?? [],
+    evaluatedSymbols:
+      agent.kind === 'maker'
+        ? [...(agent.lastMakerEvaluatedSymbols ?? [])]
+        : [],
     commandCount: commands.length,
     processedCount: 0,
     acceptedCount: 0,
@@ -5027,8 +6796,8 @@ function handleEcologyDecision(state, event) {
         trigger: 'cadence',
       },
     });
-  } else {
-    scheduleAgentDecisions(state);
+  } else if (event.type === 'agent_decision') {
+    scheduleNextAgentDecision(state, agentId);
   }
   return cloneJson(activity);
 }
@@ -5106,6 +6875,21 @@ function handleAgentCommandBatch(
       deferReceiptPrune: deferMarketMirror,
     });
     results.push(receipt);
+  }
+  // One mature-world opening batch can legitimately cross hundreds of
+  // finite orders before the next playback-slice boundary. Keep the live
+  // audit working set bounded at the same command authority boundary; a
+  // transactional processNextEvent must never fail merely because one NPC
+  // batch produced more fills than the visible tape can retain.
+  if (
+    state.realtimeAuditArchive.liveChainCount >
+    MAX_LIVE_REALTIME_AUDIT_CHAINS
+  ) {
+    compactRealtimeAuditOverflow(
+      state,
+      state.commitSeq,
+      REALTIME_AUDIT_BACKGROUND_TARGET,
+    );
   }
   if (!deferMarketMirror) {
     for (const symbol of Object.keys(state.books)) {
@@ -6033,11 +7817,93 @@ function shareholderName(state, account) {
     : '市场账户';
 }
 
-function shareholderKind(account) {
+function shareholderKind(state, account) {
   if (account.id === 'player') return 'player';
+  const investor =
+    state.world.entities?.investors?.[account.id];
+  if (
+    typeof investor?.holderKind === 'string' &&
+    investor.holderKind.length > 0
+  ) {
+    return investor.holderKind;
+  }
   return account.kind === 'proprietary_maker'
     ? 'maker'
     : 'institution';
+}
+
+function shareholderMetadata(state, account, symbol, quantity) {
+  const investor =
+    state.world.entities?.investors?.[account.id];
+  if (investor) {
+    return {
+      beneficialOwner:
+        investor.beneficialOwner ?? investor.name,
+      holderNature:
+        investor.holderNature ?? 'investment_fund',
+      controlChain: Array.isArray(investor.controlChain)
+        ? [...investor.controlChain]
+        : [investor.name],
+      votesPerUnitBps: Math.max(
+        1,
+        Math.trunc(
+          Number(
+            investor.votesPerUnitBps ?? 10_000,
+          ),
+        ),
+      ),
+      lockedUnits: Math.min(
+        quantity,
+        Math.max(
+          0,
+          Math.trunc(
+            Number(
+              investor.lockedUnitsBySymbol?.[symbol],
+            ) || 0,
+          ),
+        ),
+      ),
+      pledgedUnits: Math.min(
+        quantity,
+        Math.max(
+          0,
+          Math.trunc(
+            Number(
+              investor.pledgedUnitsBySymbol?.[symbol],
+            ) || 0,
+          ),
+        ),
+      ),
+    };
+  }
+  if (account.id === 'player') {
+    return {
+      beneficialOwner: '玩家本人或玩家所管理产品',
+      holderNature:
+        state.world.player?.roleType === 'household' ||
+        state.world.player?.roleType === 'private_whale'
+          ? 'natural_person'
+          : 'player_managed_vehicle',
+      controlChain: ['玩家账户'],
+      votesPerUnitBps: 10_000,
+      lockedUnits: 0,
+      pledgedUnits: 0,
+    };
+  }
+  return {
+    beneficialOwner:
+      account.kind === 'proprietary_maker'
+        ? '做市业务自营账户'
+        : '市场账户受益所有人',
+    holderNature:
+      account.kind === 'proprietary_maker'
+        ? 'market_maker'
+        : 'institution',
+    controlChain: [],
+    votesPerUnitBps: 10_000,
+    lockedUnits: 0,
+    pledgedUnits: 0,
+  };
 }
 
 function shareholderCacheFor(state) {
@@ -6070,6 +7936,7 @@ function publicShareholderProjection(state, symbol, security) {
   const quantities = new Array(accounts.length);
   const names = new Array(accounts.length);
   const kinds = new Array(accounts.length);
+  const metadata = new Array(accounts.length);
   let unchanged =
     projectionCache.bySymbol.has(symbol);
   const prior = projectionCache.bySymbol.get(symbol);
@@ -6087,10 +7954,17 @@ function publicShareholderProjection(state, symbol, security) {
       Math.trunc(Number(account.holdings?.[symbol]) || 0),
     );
     const name = shareholderName(state, account);
-    const kind = shareholderKind(account);
+    const kind = shareholderKind(state, account);
+    const holderMetadata = shareholderMetadata(
+      state,
+      account,
+      symbol,
+      quantity,
+    );
     quantities[index] = quantity;
     names[index] = name;
     kinds[index] = kind;
+    metadata[index] = holderMetadata;
     if (
       unchanged &&
       (
@@ -6118,6 +7992,7 @@ function publicShareholderProjection(state, symbol, security) {
       kind: kinds[index],
       quantity: quantities[index],
       isPlayer: account.id === 'player',
+      ...metadata[index],
     }))
     .filter((holder) => holder.quantity > 0)
     .sort(
@@ -6128,6 +8003,12 @@ function publicShareholderProjection(state, symbol, security) {
     );
   const accountedUnits = ranked.reduce(
     (sum, holder) => sum + holder.quantity,
+    0,
+  );
+  const totalVotingWeight = ranked.reduce(
+    (sum, holder) =>
+      sum +
+      holder.quantity * holder.votesPerUnitBps,
     0,
   );
   const top = ranked.slice(0, 5).map((holder, index) => ({
@@ -6142,10 +8023,32 @@ function publicShareholderProjection(state, symbol, security) {
           )
         : 0,
     isPlayer: holder.isPlayer,
+    beneficialOwner: holder.beneficialOwner,
+    holderNature: holder.holderNature,
+    controlChain: holder.controlChain,
+    votingRightsBps:
+      totalVotingWeight > 0
+        ? Math.round(
+            holder.quantity *
+              holder.votesPerUnitBps *
+              10_000 /
+              totalVotingWeight,
+          )
+        : 0,
+    lockedUnits: holder.lockedUnits,
+    pledgedUnits: holder.pledgedUnits,
   }));
   const projection = {
     outstandingUnits,
+    registeredUnits: accountedUnits,
     accountedUnits,
+    votingRightsBpsTotal:
+      accountedUnits === outstandingUnits
+        ? 10_000
+        : Math.round(
+            accountedUnits * 10_000 /
+              Math.max(1, outstandingUnits),
+          ),
     top,
     othersUnits:
       accountedUnits -
@@ -6259,7 +8162,13 @@ function symbolSnapshot(
   const reusableFrameSymbol =
     includeIntraday &&
     state.quoteFrames.at(-1)?.virtualMs ===
-      state.nowMs
+      state.nowMs &&
+    Array.isArray(
+      state.quoteFrames.at(-1)?.symbols?.[symbol]?.bids,
+    ) &&
+    Array.isArray(
+      state.quoteFrames.at(-1)?.symbols?.[symbol]?.asks,
+    )
       ? state.quoteFrames.at(-1)?.symbols?.[
           symbol
         ]
@@ -6294,6 +8203,8 @@ function symbolSnapshot(
       snapshot,
       sessionSnapshotProjection(snapshot.chartAuthority),
     );
+    snapshot.turnoverTruth =
+      publicTurnoverTruth(state, symbol);
     snapshot.intradayBars = framePublication
       ? []
       : series.bars.map((bar) =>
@@ -6355,8 +8266,10 @@ function symbolSnapshot(
     return snapshot;
   }
   const playerQuantities = new Map();
-  for (const order of Object.values(state.books[symbol].orders)) {
-    if (!activeOrder(order) || order.ownerId !== 'player') continue;
+  for (const order of activeOrdersForOwner(
+    state.books[symbol],
+    'player',
+  )) {
     const key = `${order.side}:${order.priceTicks}`;
     playerQuantities.set(
       key,
@@ -6431,6 +8344,7 @@ function symbolSnapshot(
     direction:
       changeTicks > 0 ? 'up' : changeTicks < 0 ? 'down' : 'flat',
     ...sessionSnapshotProjection(chartAuthority),
+    turnoverTruth: publicTurnoverTruth(state, symbol),
     bids: depth.bids,
     asks: depth.asks,
     frameBar: visibleBar(state, symbol, series.bars.at(-1)),
@@ -6548,6 +8462,33 @@ function compactHistoricalQuoteFrame(frame) {
   };
 }
 
+function compactCurrentQuoteFrameSymbol(
+  state,
+  symbol,
+  frameBar,
+  marketData,
+) {
+  const security = state.world.market.securities[symbol];
+  const level2Active =
+    marketData.viewer.entitlements?.L2_DEPTH_100?.status ===
+    'active';
+  const level2Realtime =
+    level2Active &&
+    (
+      security.board === 'star' ||
+      security.board === 'chinext'
+    );
+  return {
+    lastPriceTicks: cents(security.lastPrice),
+    frameBar: visibleBar(state, symbol, frameBar),
+    ultraTradeDeltas: level2Realtime
+      ? currentUltraTradeDeltas(state, symbol)
+      : quoteCadenceTrades(state, symbol, {
+          latestOnly: true,
+        }),
+  };
+}
+
 function archivedMinuteBarIndex(minuteBars) {
   let index = archivedMinuteBarIndexes.get(minuteBars);
   if (
@@ -6655,6 +8596,50 @@ function appendArchivedMinuteBars(
   }
 }
 
+function archivedUltraFillIndex(ultraFills) {
+  let index = archivedUltraFillIndexes.get(
+    ultraFills,
+  );
+  if (
+    !index ||
+    index.sourceLength !== ultraFills.length ||
+    (
+      ultraFills.length > 0 &&
+      (
+        index.sourceFirst !== ultraFills[0] ||
+        index.sourceLast !== ultraFills.at(-1)
+      )
+    )
+  ) {
+    index = {
+      sourceLength: ultraFills.length,
+      sourceFirst: ultraFills[0] ?? null,
+      sourceLast: ultraFills.at(-1) ?? null,
+      byId: new Map(
+        ultraFills.map((fill) => [
+          `${fill.timestampMs}:${fill.sequence}`,
+          fill,
+        ]),
+      ),
+    };
+    archivedUltraFillIndexes.set(
+      ultraFills,
+      index,
+    );
+  }
+  return index;
+}
+
+function primeArchivedUltraFillIndexes(state) {
+  for (const archive of Object.values(
+    state?.barArchives?.bySymbol ?? {},
+  )) {
+    if (Array.isArray(archive?.ultraFills)) {
+      archivedUltraFillIndex(archive.ultraFills);
+    }
+  }
+}
+
 function appendArchivedUltraFills(
   state,
   symbol,
@@ -6663,12 +8648,10 @@ function appendArchivedUltraFills(
 ) {
   const archive =
     state.barArchives.bySymbol[symbol];
-  const byId = new Map(
-    archive.ultraFills.map((fill) => [
-      `${fill.timestampMs}:${fill.sequence}`,
-      fill,
-    ]),
+  let index = archivedUltraFillIndex(
+    archive.ultraFills,
   );
+  let requiresRebuild = false;
   for (const fill of fills) {
     if (
       fill.timestampMs < domain.startMs ||
@@ -6677,7 +8660,7 @@ function appendArchivedUltraFills(
       continue;
     }
     const key = `${fill.timestampMs}:${fill.sequence}`;
-    const existing = byId.get(key);
+    const existing = index.byId.get(key);
     if (existing) {
       if (!sameUltraFill(existing, fill)) {
         throw new Error(
@@ -6687,10 +8670,29 @@ function appendArchivedUltraFills(
       continue;
     }
     const archived = copyUltraFill(fill);
+    const priorLast = archive.ultraFills.at(-1);
+    if (
+      priorLast &&
+      compareUltraFills(priorLast, archived) >= 0
+    ) {
+      requiresRebuild = true;
+    }
     archive.ultraFills.push(archived);
-    byId.set(key, archived);
+    index.byId.set(key, archived);
   }
-  archive.ultraFills.sort(compareUltraFills);
+  if (requiresRebuild) {
+    archive.ultraFills.sort(compareUltraFills);
+    archivedUltraFillIndexes.delete(
+      archive.ultraFills,
+    );
+    index = archivedUltraFillIndex(
+      archive.ultraFills,
+    );
+  } else {
+    index.sourceLength = archive.ultraFills.length;
+    index.sourceFirst = archive.ultraFills[0] ?? null;
+    index.sourceLast = archive.ultraFills.at(-1) ?? null;
+  }
 }
 
 function compactClosedUltraAuthority(
@@ -6714,19 +8716,36 @@ function compactClosedUltraAuthority(
   }
   const archive =
     state.barArchives.bySymbol[symbol];
-  const completeBeforeRotation = mergedUltraFills(
-    archive.ultraFills,
-    series.fills,
-  );
-  let carry = null;
-  let priorDomainCarry = null;
-  let domainAnchor = null;
+  const archivedFirst = archive.ultraFills[0] ?? null;
+  const archivedLast = archive.ultraFills.at(-1) ?? null;
+  let carry = archivedLast;
+  let priorDomainCarry =
+    archivedLast?.timestampMs < domain.startMs
+      ? archivedLast
+      : null;
+  let domainAnchor =
+    archivedFirst?.timestampMs >= domain.startMs
+      ? archivedFirst
+      : null;
   const boundaryFills = [];
-  for (const fill of completeBeforeRotation) {
-    if (fill.timestampMs > completeMinuteThroughMs) break;
-    carry = fill;
+  const newlyClosedFills = [];
+  for (const fill of series.fills) {
+    if (fill.timestampMs > completeMinuteThroughMs) {
+      break;
+    }
+    if (!carry || compareUltraFills(carry, fill) < 0) {
+      carry = fill;
+    }
     if (fill.timestampMs < domain.startMs) {
-      priorDomainCarry = fill;
+      if (
+        !priorDomainCarry ||
+        compareUltraFills(
+          priorDomainCarry,
+          fill,
+        ) < 0
+      ) {
+        priorDomainCarry = fill;
+      }
     } else if (!domainAnchor) {
       domainAnchor = fill;
     }
@@ -6736,26 +8755,29 @@ function compactClosedUltraAuthority(
     ) {
       boundaryFills.push(fill);
     }
+    if (
+      (
+        fill.timestampMs > domain.startMs ||
+        domain.startMs === series.dayStartMs
+      ) &&
+      !(
+        completeMinuteThroughMs ===
+          series.dayStartMs &&
+        fill.timestampMs ===
+          series.dayStartMs
+      )
+    ) {
+      newlyClosedFills.push(fill);
+    }
   }
-  if (rotateDomain) archive.ultraFills = [];
+  if (rotateDomain) {
+    archive.ultraFills = [];
+    domainAnchor = null;
+  }
   appendArchivedUltraFills(
     state,
     symbol,
-    completeBeforeRotation.filter(
-      (fill) =>
-        (
-          fill.timestampMs > domain.startMs ||
-          domain.startMs === series.dayStartMs
-        ) &&
-        fill.timestampMs <=
-          completeMinuteThroughMs &&
-        !(
-          completeMinuteThroughMs ===
-            series.dayStartMs &&
-          fill.timestampMs ===
-            series.dayStartMs
-        ),
-    ),
+    newlyClosedFills,
     domain,
   );
   domainAnchor = archive.ultraFills[0] ?? domainAnchor;
@@ -6838,14 +8860,31 @@ function compactRealtimePriceEvidence(state) {
     const opening = history.find(
       (point) => point?.tick === 0,
     );
+    let legacyCloseAnchor = null;
+    for (let index = history.length - 1; index >= 0; index -= 1) {
+      if (history[index]?.source === 'matched_npc_orders') {
+        legacyCloseAnchor = history[index];
+        break;
+      }
+    }
+    const retainedAnchors = [];
+    if (opening) retainedAnchors.push(opening);
+    if (
+      legacyCloseAnchor &&
+      legacyCloseAnchor !== opening
+    ) {
+      retainedAnchors.push(legacyCloseAnchor);
+    }
     const tailLength =
       MAX_WORLD_PRICE_HISTORY_POINTS -
-      (opening ? 1 : 0);
+      retainedAnchors.length;
     const tail = history.slice(-tailLength);
-    security.priceHistory = opening &&
-      !tail.includes(opening)
-      ? [opening, ...tail]
-      : tail;
+    security.priceHistory = [
+      ...retainedAnchors.filter(
+        (anchor) => !tail.includes(anchor),
+      ),
+      ...tail,
+    ];
   }
 }
 
@@ -6892,7 +8931,6 @@ function publishQuoteFrame(
       0,
     ),
     commitSeq: state.commitSeq,
-    marketData,
     frameBars: Object.fromEntries(
       Object.keys(state.books).map((symbol) => [
         symbol,
@@ -6902,10 +8940,12 @@ function publishQuoteFrame(
     symbols: Object.fromEntries(
       Object.keys(state.books).map((symbol) => [
         symbol,
-        symbolSnapshot(state, symbol, {
-          includeUltraDelta: true,
+        compactCurrentQuoteFrameSymbol(
+          state,
+          symbol,
+          frameBars[symbol],
           marketData,
-        }),
+        ),
       ]),
     ),
   };
@@ -6991,9 +9031,39 @@ function settledClosingPriceTicks(state, symbol) {
   );
 }
 
+function expireDailyLimitQueueEpisodes(state) {
+  const expiredEpisodeIds = new Set();
+  for (const agent of Object.values(
+    state.agentEcology?.agents ?? {},
+  )) {
+    const episodes = agent.limitQueueEpisodes;
+    if (
+      !episodes ||
+      Array.isArray(episodes) ||
+      typeof episodes !== 'object'
+    ) {
+      continue;
+    }
+    for (const episode of Object.values(episodes)) {
+      if (typeof episode?.episodeId === 'string') {
+        expiredEpisodeIds.add(episode.episodeId);
+      }
+    }
+    // A limit-queue episode is evidence about one closing-price band, not a
+    // perpetual maker belief.  Retaining it after previousCloseTicks rolls
+    // would attach yesterday's boundary and budget to today's different
+    // exchange limit.  The order/trade audit archives retain the settled
+    // history; this map contains only live strategy state.
+    agent.limitQueueEpisodes = {};
+  }
+  return expiredEpisodeIds;
+}
+
 function rollDailyPriceBands(state, commitSeq) {
   const cancelledOrderIds = [];
   const closingPrices = {};
+  const expiredLimitQueueEpisodeIds =
+    expireDailyLimitQueueEpisodes(state);
   for (const [symbol, security] of Object.entries(
     state.world.market.securities,
   )) {
@@ -7003,10 +9073,14 @@ function rollDailyPriceBands(state, commitSeq) {
     security.previousCloseTicks = closingPriceTicks;
     const band = securityPriceBand(security);
     for (const order of Object.values(state.books[symbol].orders)) {
+      const dailyLimitQueueOrder =
+        order.liquidityLayer?.zone === 'LIMIT_QUEUE' ||
+        expiredLimitQueueEpisodeIds.has(order.parentOrderId);
       if (
         !activeOrder(order) ||
         order.type !== 'limit' ||
         (
+          !dailyLimitQueueOrder &&
           order.priceTicks >= band.limitDownTicks &&
           order.priceTicks <= band.limitUpTicks
         )
@@ -7034,6 +9108,66 @@ function rollDailyPriceBands(state, commitSeq) {
     archiveTerminalOrders(state, symbol);
   }
   return closingPrices;
+}
+
+function scheduleDailyBandMakerHydration(state) {
+  if (!state.agentEcology?.enabled) return [];
+  const symbols = Object.keys(state.books);
+  const scheduled = [];
+  let heapChanged = false;
+  for (const agent of Object.values(
+    state.agentEcology.agents,
+  )) {
+    if (agent.kind !== 'maker') continue;
+    const cadence = state.eventQueue.find(
+      (event) =>
+        event.type === 'agent_decision' &&
+        event.actorId === agent.id,
+    );
+    const latencyMs = Math.max(
+      1,
+      Math.trunc(Number(agent.latencyMs) || 1),
+    );
+    const latestHydrationMs = state.nowMs + latencyMs;
+    if (!cadence) {
+      scheduled.push(
+        scheduleEvent(state, {
+          type: 'agent_decision',
+          scheduledMs: latestHydrationMs,
+          phasePriority:
+            MARKET_PHASE_PRIORITY.MAKER_QUOTE,
+          actorId: agent.id,
+          payload: {
+            agentId: agent.id,
+            trigger: 'cadence',
+            universeHydrationSymbols: symbols,
+          },
+        }),
+      );
+      continue;
+    }
+    cadence.scheduledMs =
+      cadence.scheduledMs > state.nowMs
+        ? Math.min(
+            cadence.scheduledMs,
+            latestHydrationMs,
+          )
+        : latestHydrationMs;
+    cadence.phasePriority =
+      MARKET_PHASE_PRIORITY.MAKER_QUOTE;
+    cadence.payload = {
+      agentId: agent.id,
+      trigger: 'cadence',
+      universeHydrationSymbols: [...symbols],
+    };
+    cadence.rngKey =
+      `${state.world.world.seed}:${cadence.scheduledMs}:` +
+      `${cadence.phasePriority}:${cadence.sequence}`;
+    scheduled.push(cadence);
+    heapChanged = true;
+  }
+  if (heapChanged) heapifyEventQueue(state);
+  return scheduled;
 }
 
 function resetPortfolioDayAnchors(state) {
@@ -7631,7 +9765,9 @@ export function settleWorldDay(state) {
     account.commitSeq = commitSeq;
   }
   state.commitSeq = commitSeq;
+  openTurnoverTruthWindow(state);
   refreshDelayedFundamentals(state);
+  scheduleDailyBandMakerHydration(state);
   state.lastWorldDaySettlementMs = state.nowMs;
   markAccountRisk(state);
   syncWorldMarketMirrors(state);
@@ -7670,6 +9806,8 @@ function replaceState(target, source) {
     verifiedAccountAuthoritySeals.get(source);
   const verifiedRealtimeAuditPayloads =
     verifiedRealtimeAuditPayloadSummaries.get(source);
+  const realtimeAuditColdStore =
+    realtimeAuditColdStores.get(source);
   const worldBalanceMirrorState =
     worldBalanceMirrorStates.get(source);
   let committedOrderIndex = orderIndexes.get(source);
@@ -7689,6 +9827,7 @@ function replaceState(target, source) {
   orderIndexes.delete(target);
   verifiedAccountAuthoritySeals.delete(target);
   verifiedRealtimeAuditPayloadSummaries.delete(target);
+  realtimeAuditColdStores.delete(target);
   worldBalanceMirrorStates.delete(target);
   for (const key of Object.keys(target)) delete target[key];
   Object.assign(target, source);
@@ -7704,6 +9843,12 @@ function replaceState(target, source) {
       verifiedRealtimeAuditPayloads,
     );
   }
+  if (realtimeAuditColdStore) {
+    realtimeAuditColdStores.set(
+      target,
+      realtimeAuditColdStore,
+    );
+  }
   if (worldBalanceMirrorState) {
     worldBalanceMirrorStates.set(
       target,
@@ -7715,7 +9860,7 @@ function replaceState(target, source) {
   }
 }
 
-function inheritVerifiedRealtimeAuditPayloadSummaries(
+function inheritRealtimeAuditRuntimeMetadata(
   source,
   target,
 ) {
@@ -7723,6 +9868,10 @@ function inheritVerifiedRealtimeAuditPayloadSummaries(
     verifiedRealtimeAuditPayloadSummaries.get(source);
   if (cache) {
     verifiedRealtimeAuditPayloadSummaries.set(target, cache);
+  }
+  const coldStore = realtimeAuditColdStores.get(source);
+  if (coldStore) {
+    realtimeAuditColdStores.set(target, coldStore);
   }
   return target;
 }
@@ -8273,6 +10422,66 @@ function isCompleteRealtimeAuditChain(chain, expectedCommitSeq) {
   );
 }
 
+function turnoverTruthInvariantErrors(state, symbols) {
+  if (
+    !state.turnoverTruthBySymbol ||
+    typeof state.turnoverTruthBySymbol !== 'object' ||
+    Array.isArray(state.turnoverTruthBySymbol) ||
+    !sameStringSet(
+      Object.keys(state.turnoverTruthBySymbol),
+      symbols,
+    ) ||
+    !state.turnoverTruthIntegrationBySymbol ||
+    typeof state.turnoverTruthIntegrationBySymbol !==
+      'object' ||
+    Array.isArray(
+      state.turnoverTruthIntegrationBySymbol,
+    ) ||
+    !sameStringSet(
+      Object.keys(
+        state.turnoverTruthIntegrationBySymbol,
+      ),
+      symbols,
+    )
+  ) {
+    return ['INVALID_TURNOVER_TRUTH_ROOT'];
+  }
+  const errors = [];
+  for (const symbol of symbols) {
+    try {
+      const projection = projectCumulativeTurnover(
+        state.turnoverTruthBySymbol[symbol],
+      );
+      const integration =
+        state.turnoverTruthIntegrationBySymbol[symbol];
+      if (
+        projection.assetId !== symbol ||
+        projection.openedAtMs !==
+          state.lastWorldDaySettlementMs ||
+        projection.windowId !==
+          turnoverWindowId(
+            state.lastWorldDaySettlementMs,
+          ) ||
+        !integration ||
+        integration.schemaVersion !==
+          TURNOVER_PRODUCTION_INTEGRATION_SCHEMA ||
+        integration.grossAuthority === undefined ||
+        ![
+          'exact',
+          'unavailable_for_legacy_compacted_fills',
+        ].includes(integration.selfTradeCoverage)
+      ) {
+        errors.push(`INVALID_TURNOVER_TRUTH:${symbol}`);
+      }
+    } catch (error) {
+      errors.push(
+        `INVALID_TURNOVER_TRUTH:${symbol}:${error.message}`,
+      );
+    }
+  }
+  return errors;
+}
+
 function marketInvariantErrors(
   state,
   { reuseVerifiedArchives = false } = {},
@@ -8327,6 +10536,7 @@ function marketInvariantErrors(
   if (!sameScalarRecord(state.phasePriority, MARKET_PHASE_PRIORITY)) {
     errors.push('INVALID_PHASE_PRIORITY_SCHEMA');
   }
+  errors.push(...playerRoleAutomationInvariantErrors(state));
 
   const symbols = Object.keys(state.world.market.securities);
   for (const [symbol, security] of Object.entries(
@@ -8400,6 +10610,7 @@ function marketInvariantErrors(
   }
   errors.push(...barSeriesInvariantErrors(state, symbols));
   errors.push(...barArchiveInvariantErrors(state, symbols));
+  errors.push(...turnoverTruthInvariantErrors(state, symbols));
   errors.push(
     ...derivativeCadenceReceiptArchiveErrors(
       state,
@@ -8417,6 +10628,8 @@ function marketInvariantErrors(
     const derivativeActorCycleEvents = [];
     const agentDecisionEvents = [];
     const publicResponseEvents = [];
+    const playerMotionEvents = [];
+    const openWorldCityCompletionEvents = [];
     for (let index = 0; index < state.eventQueue.length; index += 1) {
       const event = state.eventQueue[index];
       if (
@@ -8493,6 +10706,45 @@ function marketInvariantErrors(
         continue;
       }
       if (
+        event.type === 'player_motion_step' &&
+        (
+          event.actorId !== 'player' ||
+          event.payload.sceneId !==
+            state.world.spatial?.activeSceneId ||
+          event.payload.geometryRevision !==
+            state.world.spatial?.geometryRevision ||
+          !Number.isSafeInteger(
+            event.payload.controlSeq,
+          ) ||
+          event.payload.controlSeq < 0
+        )
+      ) {
+        errors.push(
+          `INVALID_PLAYER_MOTION_EVENT:${event.id}`,
+        );
+        continue;
+      }
+      if (event.type === 'open_world_city_completion') {
+        const commitmentId = event.payload.commitmentId;
+        const commitment =
+          state.world.openWorldCityAuthority?.commitments?.find(
+            (entry) => entry.commitmentId === commitmentId,
+          );
+        if (
+          event.actorId !== 'player' ||
+          typeof commitmentId !== 'string' ||
+          commitmentId.length === 0 ||
+          !commitment ||
+          commitment.actorId !== event.actorId ||
+          commitment.endsAtVirtualTime !== event.scheduledMs
+        ) {
+          errors.push(
+            `INVALID_OPEN_WORLD_CITY_COMPLETION_EVENT:${event.id}`,
+          );
+        }
+        openWorldCityCompletionEvents.push(event);
+      }
+      if (
         event.type === 'agent_command_batch' &&
         (() => {
           const agent =
@@ -8555,15 +10807,23 @@ function marketInvariantErrors(
       if (event.type === 'public_flow_response') {
         publicResponseEvents.push(event);
       }
+      if (event.type === 'player_motion_step') {
+        playerMotionEvents.push(event);
+      }
       if (
         index > 0 &&
-        compareEvents(state.eventQueue[index - 1], event) > 0
+        compareEvents(
+          state.eventQueue[Math.floor((index - 1) / 2)],
+          event,
+        ) > 0
       ) {
-        errors.push(`UNSORTED_EVENT_QUEUE:${index}`);
+        errors.push(`INVALID_EVENT_QUEUE_HEAP:${index}`);
       }
       let expectedPriority = MARKET_PHASE_PRIORITY.PLAYER_COMMAND;
       if (event.type === 'quote_frame') {
         expectedPriority = MARKET_PHASE_PRIORITY.QUOTE_FRAME;
+      } else if (event.type === 'player_motion_step') {
+        expectedPriority = MARKET_PHASE_PRIORITY.PLAYER_MOTION;
       } else if (
         event.type ===
         'security_corporate_action'
@@ -8620,6 +10880,25 @@ function marketInvariantErrors(
       }
       if (event.phasePriority !== expectedPriority) {
         errors.push(`EVENT_PHASE_MISMATCH:${event.id}`);
+      }
+    }
+    if (playerMotionEvents.length > 1) {
+      errors.push('DUPLICATE_PLAYER_MOTION_EVENT');
+    }
+    const completionCounts = new Map();
+    for (const event of openWorldCityCompletionEvents) {
+      const commitmentId = event.payload.commitmentId;
+      completionCounts.set(
+        commitmentId,
+        Number(completionCounts.get(commitmentId) ?? 0) + 1,
+      );
+    }
+    for (const commitment of
+      state.world.openWorldCityAuthority?.commitments ?? []) {
+      if (completionCounts.get(commitment.commitmentId) !== 1) {
+        errors.push(
+          `INVALID_OPEN_WORLD_CITY_COMPLETION_ANCHOR:${commitment.commitmentId}`,
+        );
       }
     }
     const lastPublishedFrameMs =
@@ -9468,6 +11747,38 @@ function marketInvariantErrors(
         return false;
       }
 
+      if (isRealtimeAuditColdBlockReference(block)) {
+        if (
+          realtimeAuditColdReferenceKnown(
+            state,
+            block.coldBlock,
+            'block',
+          ) &&
+          !realtimeAuditColdStoreCanRead(state)
+        ) {
+          losslessBundleCount +=
+            block.losslessBundleCount;
+          losslessChainCount +=
+            block.losslessChainCount;
+          losslessReceiptCount +=
+            block.losslessReceiptCount;
+          return true;
+        }
+        let resolved;
+        try {
+          resolved = resolveRealtimeAuditColdBlock(
+            state,
+            block,
+          );
+        } catch {
+          errors.push(
+            `INVALID_REALTIME_AUDIT_ARCHIVE_COLD_BLOCK:${block.id}`,
+          );
+          return false;
+        }
+        return auditFoldedBlock(resolved);
+      }
+
       const losslessBefore = {
         bundles: losslessBundleCount,
         chains: losslessChainCount,
@@ -9537,18 +11848,45 @@ function marketInvariantErrors(
         losslessReceiptCount +=
           block.losslessReceiptCount;
       } else {
+        if (
+          validRealtimeAuditColdReference(
+            block.compressedLosslessPayloads,
+            'payload',
+          ) &&
+          realtimeAuditColdReferenceKnown(
+            state,
+            block.compressedLosslessPayloads,
+            'payload',
+          ) &&
+          !realtimeAuditColdStoreCanRead(state)
+        ) {
+          losslessBundleCount +=
+            block.losslessBundleCount;
+          losslessChainCount +=
+            block.losslessChainCount;
+          losslessReceiptCount +=
+            block.losslessReceiptCount;
+          return true;
+        }
         const compressed =
           block.losslessPayloadEncoding ===
           REALTIME_AUDIT_BLOCK_PAYLOAD_ENCODING;
         let payloads = block.losslessPayloads;
         try {
           if (compressed) {
+            const compressedPayload =
+              typeof block.compressedLosslessPayloads ===
+              'string'
+                ? block.compressedLosslessPayloads
+                : realtimeAuditColdRecordValue(
+                    state,
+                    block.compressedLosslessPayloads,
+                    'payload',
+                  );
             if (
               block.losslessPayloads.length !== 0 ||
               block.losslessPayloadDigest !==
-                hashText(
-                  block.compressedLosslessPayloads,
-                )
+                hashText(compressedPayload)
             ) {
               throw new Error(
                 'INVALID_REALTIME_AUDIT_COMPRESSED_PAYLOAD',
@@ -9556,6 +11894,7 @@ function marketInvariantErrors(
             }
             payloads = decompressLosslessPayloads(
               block,
+              state,
             );
           } else if (
             block.losslessPayloadDigest !==
@@ -9906,6 +12245,19 @@ function marketInvariantErrors(
       MAX_PLAYER_REJECTED_RECEIPTS
     ) {
       errors.push('PLAYER_REJECTED_RECEIPT_LIMIT_EXCEEDED');
+    }
+    const playerAutomationNontradeReceiptCount = state.receipts.filter(
+      (receipt) =>
+        (receipt.automationKind === 'quant' ||
+          receipt.automationKind === 'stabilization') &&
+        (!Array.isArray(receipt.tradeIds) ||
+          receipt.tradeIds.length === 0),
+    ).length;
+    if (
+      playerAutomationNontradeReceiptCount >
+      MAX_PLAYER_AUTOMATION_NONTRADE_RECEIPTS
+    ) {
+      errors.push('PLAYER_AUTOMATION_RECEIPT_LIMIT_EXCEEDED');
     }
     let previousFrameMs = -1;
     for (const frame of state.quoteFrames) {
@@ -10340,6 +12692,144 @@ function hydrateBarArchiveFields(state) {
   }
 }
 
+function legacyTurnoverAggregate(state, symbol) {
+  const series = state.barSeries[symbol];
+  const summary = emptyMinuteBarSummary();
+  for (const bar of minuteBarsForCurrentDay(
+    state,
+    symbol,
+    series,
+  )) {
+    mergeMinuteBarSummary(summary, bar);
+  }
+  const tailStart = firstFillIndexAtOrAfter(
+    series.fills,
+    unclosedFillStartMs(series),
+  );
+  const tailFills = series.fills.slice(tailStart);
+  const matchedUnits =
+    summary.volume +
+    tailFills.reduce(
+      (total, fill) => total + fill.quantity,
+      0,
+    );
+  const matchedTurnoverTicks =
+    summary.turnoverTicks +
+    tailFills.reduce(
+      (total, fill) =>
+        total + fill.priceTicks * fill.quantity,
+      0,
+    );
+  const matchedTradeCount =
+    summary.tradeCount + tailFills.length;
+  const retainedTrades = state.world.market.trades.filter(
+    (trade) =>
+      trade.source === 'realtime_order_book' &&
+      trade.symbol === symbol &&
+      trade.virtualMs >= series.dayStartMs &&
+      trade.virtualMs <= state.nowMs,
+  );
+  const retainedSelfTrades = retainedTrades.filter(
+    (trade) => trade.selfTrade === true,
+  );
+  return {
+    matchedUnits,
+    matchedTurnoverTicks,
+    matchedTradeCount,
+    selfTradeUnits: retainedSelfTrades.reduce(
+      (total, trade) => total + trade.quantity,
+      0,
+    ),
+    selfTradeTurnoverTicks: retainedSelfTrades.reduce(
+      (total, trade) =>
+        total + trade.priceTicks * trade.quantity,
+      0,
+    ),
+    selfTradeCount: retainedSelfTrades.length,
+    selfTradeCoverage:
+      retainedTrades.length === matchedTradeCount
+        ? 'exact'
+        : 'unavailable_for_legacy_compacted_fills',
+    lastEventAtMs:
+      retainedTrades.at(-1)?.virtualMs ?? state.nowMs,
+  };
+}
+
+function reconstructLegacyTurnoverTruth(state, symbol) {
+  const openedAtMs =
+    state.barSeries[symbol].dayStartMs;
+  const base = createCumulativeTurnoverState({
+    assetId: symbol,
+    windowId: turnoverWindowId(openedAtMs),
+    effectiveFloatUnits:
+      effectiveFloatUnits(state.world, symbol),
+    openedAtMs,
+  });
+  const aggregate = legacyTurnoverAggregate(
+    state,
+    symbol,
+  );
+  const reconstructed = aggregate.matchedTradeCount > 0
+    ? {
+        ...base,
+        lastEventId:
+          `legacy_turnover_reconstruction:${symbol}:${state.nowMs}`,
+        lastEventSeq: aggregate.matchedTradeCount,
+        lastEventAtMs: aggregate.lastEventAtMs,
+        matchedUnits: aggregate.matchedUnits,
+        matchedTurnoverTicks:
+          aggregate.matchedTurnoverTicks,
+        matchedTradeCount: aggregate.matchedTradeCount,
+        selfTradeUnits: aggregate.selfTradeUnits,
+        selfTradeTurnoverTicks:
+          aggregate.selfTradeTurnoverTicks,
+        selfTradeCount: aggregate.selfTradeCount,
+      }
+    : base;
+  projectCumulativeTurnover(reconstructed);
+  return {
+    state: reconstructed,
+    integration: {
+      schemaVersion:
+        TURNOVER_PRODUCTION_INTEGRATION_SCHEMA,
+      status:
+        'legacy_gross_reconstructed_from_bar_authority',
+      grossAuthority:
+        'current_day_minute_bars_and_unclosed_fills',
+      selfTradeCoverage: aggregate.selfTradeCoverage,
+    },
+  };
+}
+
+function hydrateTurnoverTruthFields(state) {
+  const symbols = Object.keys(state.books);
+  if (state.turnoverTruthBySymbol === undefined) {
+    state.turnoverTruthBySymbol = {};
+    state.turnoverTruthIntegrationBySymbol = {};
+    for (const symbol of symbols) {
+      const reconstructed =
+        reconstructLegacyTurnoverTruth(state, symbol);
+      state.turnoverTruthBySymbol[symbol] =
+        reconstructed.state;
+      state.turnoverTruthIntegrationBySymbol[symbol] =
+        reconstructed.integration;
+    }
+    return;
+  }
+  if (
+    !state.turnoverTruthIntegrationBySymbol ||
+    typeof state.turnoverTruthIntegrationBySymbol !==
+      'object' ||
+    Array.isArray(
+      state.turnoverTruthIntegrationBySymbol,
+    )
+  ) {
+    throw new Error(
+      'Invalid turnover integration checkpoint.',
+    );
+  }
+}
+
 function hydrateOrderSettlementFields(state) {
   for (const book of Object.values(state.books ?? {})) {
     for (const order of Object.values(book.orders ?? {})) {
@@ -10577,12 +13067,53 @@ function incrementalOrderInvariantErrors(
         event.sequence < 1 ||
         (
           index > 0 &&
-          compareEvents(state.eventQueue[index - 1], event) > 0
+          compareEvents(
+            state.eventQueue[Math.floor((index - 1) / 2)],
+            event,
+          ) > 0
         )
       ) {
         errors.push(`INVALID_INCREMENTAL_EVENT_QUEUE:${index}`);
       }
       ids.add(event?.id);
+    }
+    const derivativeCycles = state.eventQueue.filter(
+      (event) => event.type === 'derivative_actor_cycle',
+    );
+    const expectedDerivativeCycleMs =
+      expectedDerivativeActorCycleEventMs(state);
+    if (
+      derivativeCycles.length !== 1 ||
+      derivativeCycles[0].scheduledMs !==
+        expectedDerivativeCycleMs
+    ) {
+      errors.push(
+        `INVALID_INCREMENTAL_DERIVATIVE_ACTOR_CYCLE_ANCHOR:${JSON.stringify({
+          marketNowMs: state.nowMs,
+          expectedDerivativeCycleMs,
+          derivativeNowMs:
+            state.world.derivatives?.nowMs ?? null,
+          previousCycles: previous.eventQueue
+            .filter(
+              (event) =>
+                event.type === 'derivative_actor_cycle',
+            )
+            .map((event) => ({
+              id: event.id,
+              scheduledMs: event.scheduledMs,
+              sequence: event.sequence,
+            })),
+          derivativeCycles: derivativeCycles.map((event) => ({
+            id: event.id,
+            scheduledMs: event.scheduledMs,
+            sequence: event.sequence,
+          })),
+          commandType: command.type,
+          commandSymbol: command.symbol ?? null,
+          receiptType: receipt?.type ?? null,
+          receiptVirtualMs: receipt?.virtualMs ?? null,
+        })}`,
+      );
     }
   }
 
@@ -10952,7 +13483,9 @@ function assertIncrementalOrderState(
 }
 
 function canonicalLegacyListingRule(symbol, security) {
-  const canonical = DEFAULT_LISTING_RULES[symbol];
+  const canonical =
+    DEFAULT_LISTING_RULES[symbol] ??
+    listingRuleFromIdentity(security);
   if (!canonical) return listingRule(symbol, security);
   if (
     Object.hasOwn(security, 'board') &&
@@ -11451,6 +13984,40 @@ function migrateLegacyRealtimeStockUniverseCheckpoint(
   };
 }
 
+function markStockUniverseMakerHydration(
+  state,
+  addedSymbols,
+) {
+  if (addedSymbols.length === 0 || !state.agentEcology?.enabled) {
+    return;
+  }
+  const makerIds = new Set(
+    Object.values(state.agentEcology.agents ?? {})
+      .filter((agent) => agent.kind === 'maker')
+      .map((agent) => agent.id),
+  );
+  const markedMakerIds = new Set();
+  for (const event of state.eventQueue) {
+    if (
+      event.type !== 'agent_decision' ||
+      !makerIds.has(event.actorId) ||
+      markedMakerIds.has(event.actorId)
+    ) {
+      continue;
+    }
+    event.payload = {
+      ...(event.payload ?? {}),
+      universeHydrationSymbols: [...addedSymbols],
+    };
+    markedMakerIds.add(event.actorId);
+  }
+  if (markedMakerIds.size !== makerIds.size) {
+    throw new Error(
+      'Missing maker cadence for stock-universe hydration.',
+    );
+  }
+}
+
 function expectedDerivativeActorCycleEventMs(state) {
   const nextAuthorityAtMs =
     state.world.derivatives?.market
@@ -11500,6 +14067,7 @@ function migrateMissingDerivativeActorCycleEvent(state) {
   state.eventQueue = state.eventQueue.filter(
     (event) => event.type !== 'derivative_actor_cycle',
   );
+  heapifyEventQueue(state);
   ensureDerivativeActorCycleEvent(state);
 }
 
@@ -11546,6 +14114,49 @@ function applyTestingAccessInitialization(
   return true;
 }
 
+function professionalDerivativePolicyEntries(options) {
+  const policies =
+    options.professionalDerivativeActorPolicies;
+  if (policies === undefined) return [];
+  if (
+    !policies ||
+    typeof policies !== 'object' ||
+    Array.isArray(policies)
+  ) {
+    throw new TypeError(
+      'professionalDerivativeActorPolicies must be an object.',
+    );
+  }
+  return Object.entries(policies).sort(
+    ([left], [right]) => left.localeCompare(right),
+  );
+}
+
+function applyInitialProfessionalDerivativePolicies(
+  state,
+  entries,
+) {
+  for (const [actorId, policy] of entries) {
+    const result = reduceDerivatives(
+      state.world.derivatives,
+      {
+        type: 'SET_PROFESSIONAL_ACTOR_CONTROL',
+        atMs: state.world.derivatives.nowMs,
+        actorId,
+        policy,
+        source:
+          'controller_professional_ecology_policy',
+      },
+    );
+    if (result.receipt.status !== 'applied') {
+      throw new Error(
+        `Invalid professional derivative actor policy: ${actorId}:${result.receipt.reason}`,
+      );
+    }
+    state.world.derivatives = result.state;
+  }
+}
+
 /**
  * Creates a JSON-serializable full-world market authority. A supplied saved
  * state is restored exactly; the separate world argument is used only to
@@ -11567,8 +14178,27 @@ export function createMarketSimulation(
       'testingAccessOpen must be a boolean.',
     );
   }
+  const professionalPolicyEntries =
+    professionalDerivativePolicyEntries(options);
   if (savedState) {
+    if (professionalPolicyEntries.length > 0) {
+      throw new Error(
+        'A saved derivative authority cannot be overridden by initialization policies.',
+      );
+    }
     let resumed = cloneJson(savedState);
+    if (
+      resumed.phasePriority?.PLAYER_MOTION !==
+        MARKET_PHASE_PRIORITY.PLAYER_MOTION
+    ) {
+      resumed.phasePriority = cloneJson(
+        MARKET_PHASE_PRIORITY,
+      );
+    }
+    configureRealtimeAuditColdStore(
+      resumed,
+      options.auditColdStore,
+    );
     if (resumed.world?.world?.id !== world.world.id) {
       throw new Error('Invalid or incompatible realtime market save.');
     }
@@ -11596,13 +14226,17 @@ export function createMarketSimulation(
     migrateEmbeddedWorldStateForRestore(
       resumed.world,
     );
+    hydratePlayerRoleAutomation(resumed);
     resumed.derivativeAuthorityOriginMs ??=
       resumed.world.derivatives.nowMs -
       resumed.nowMs;
-    migrateLegacyRealtimeStockUniverseCheckpoint(
-      resumed,
-    );
+    const stockUniverseMigration =
+      migrateLegacyRealtimeStockUniverseCheckpoint(
+        resumed,
+      );
     hydrateAccountPortfolioFields(resumed);
+    ensureStabilizationFundAccount(resumed);
+    ensureQuantInstitutionAccount(resumed);
     const custodyMigration =
       ensureSecuritiesLendingCustodyAccount(
         resumed,
@@ -11613,6 +14247,7 @@ export function createMarketSimulation(
     hydrateAccountPortfolioFields(resumed);
     hydrateOrderSettlementFields(resumed);
     hydrateBarArchiveFields(resumed);
+    hydrateTurnoverTruthFields(resumed);
     hydrateRealtimeAuditArchiveLosslessFields(resumed);
     hydrateDerivativeCadenceReceiptArchive(
       resumed,
@@ -11626,6 +14261,10 @@ export function createMarketSimulation(
     ) {
       scheduleAgentDecisions(resumed);
     }
+    markStockUniverseMakerHydration(
+      resumed,
+      stockUniverseMigration.addedSymbols,
+    );
     if (missingDerivativeAuthority) {
       migrateMissingDerivativeActorCycleEvent(resumed);
     } else {
@@ -11636,6 +14275,7 @@ export function createMarketSimulation(
       options.testingAccessOpen === true,
     );
     assertFullMarketState(resumed);
+    primeArchivedUltraFillIndexes(resumed);
     return resumed;
   }
 
@@ -11643,6 +14283,7 @@ export function createMarketSimulation(
     state: authoritativeWorld,
     migration: legacyMarketHistoryMigration,
   } = migrateLegacyMarketHistoryForRealtime(world);
+  normalizeWorldSpatialState(authoritativeWorld);
   hydrateSecurityListingFields(authoritativeWorld);
   const books = Object.fromEntries(
     Object.keys(authoritativeWorld.market.securities).map((symbol) => [
@@ -11685,18 +14326,32 @@ export function createMarketSimulation(
       ),
     },
     accounts: createAccounts(authoritativeWorld),
+    turnoverTruthBySymbol:
+      createTurnoverTruthBySymbol(authoritativeWorld, 0),
+    turnoverTruthIntegrationBySymbol:
+      exactTurnoverIntegrationBySymbol(authoritativeWorld),
     exchangeFeePoolCents: cents(authoritativeWorld.market.exchangeFeePool),
     orderArchive: createOrderArchive(Object.keys(books)),
     realtimeAuditArchive: createAuditChainArchive(),
     derivativeCadenceReceiptArchive:
       createDerivativeCadenceReceiptArchive(),
+    playerRoleAutomation:
+      createPlayerRoleAutomation(authoritativeWorld),
     agentEcology: null,
     quoteFrames: [],
     receipts: [],
   };
+  configureRealtimeAuditColdStore(
+    state,
+    options.auditColdStore,
+  );
   hydrateAccountPortfolioFields(state);
   state.agentEcology = createAgentCatalog(authoritativeWorld);
   state.agentEcology.enabled = options.enableAgentEcology !== false;
+  applyInitialProfessionalDerivativePolicies(
+    state,
+    professionalPolicyEntries,
+  );
   markAccountRisk(state);
   syncWorldMarketMirrors(state);
   // A supplied world may already sit on a later slow-world day while its
@@ -11751,7 +14406,7 @@ export function createMarketSimulation(
         'derivative_actor_cycle'
     )
   ) {
-    executeNextEvent(state, {
+    processNextEventInPlace(state, {
       deferMarketMirror: true,
     });
   }
@@ -11773,11 +14428,11 @@ export function createMarketSimulation(
     options.testingAccessOpen === true,
   );
   assertFullMarketState(state);
+  primeArchivedUltraFillIndexes(state);
   return state;
 }
 
-/** Adds a command to the deterministic queue without executing it. */
-export function enqueueCommand(state, command) {
+function commandEventDescriptor(state, command) {
   if (!state || state.marketRuleVersion !== MARKET_RULE_VERSION) {
     throw new Error('A realtime market simulation is required.');
   }
@@ -11818,13 +14473,28 @@ export function enqueueCommand(state, command) {
       : command.type === 'submit_order'
         ? MARKET_PHASE_PRIORITY.BROKER_ROUTE
         : MARKET_PHASE_PRIORITY.PLAYER_COMMAND;
-  return scheduleEvent(state, {
+  return {
     type: 'command',
     scheduledMs,
     phasePriority,
     actorId: command.actorId ?? 'world_system',
     payload: command,
-  });
+  };
+}
+
+/** Adds a command to the deterministic queue without executing it. */
+export function enqueueCommand(state, command) {
+  return scheduleEvent(
+    state,
+    commandEventDescriptor(state, command),
+  );
+}
+
+function reserveCommandEvent(state, command) {
+  return createScheduledEvent(
+    state,
+    commandEventDescriptor(state, command),
+  );
 }
 
 function splitAdjustedInteger(
@@ -11993,11 +14663,36 @@ function handleSecurityCorporateAction(
         ),
       }),
     );
+  const stabilityInventoryBefore =
+    state.world.player.roleType ===
+      'stabilization_fund' &&
+    Object.hasOwn(
+      state.world.player.roleState
+        .stabilityDesk
+        .interventionInventoryBySymbol,
+      symbol,
+    )
+      ? state.world.player.roleState
+          .stabilityDesk
+          .interventionInventoryBySymbol[
+          symbol
+        ]
+      : null;
+  const stabilityInventoryAfter =
+    stabilityInventoryBefore === null
+      ? null
+      : splitAdjustedInteger(
+          stabilityInventoryBefore,
+          splitNumerator,
+          splitDenominator,
+        );
   if (
     accountAdjustments.some(
       (adjustment) =>
         adjustment.after === null,
-    )
+    ) ||
+    (stabilityInventoryBefore !== null &&
+      stabilityInventoryAfter === null)
   ) {
     return pushReceipt(state, {
       id: nextLocalId(
@@ -12055,6 +14750,13 @@ function handleSecurityCorporateAction(
   const previousIds =
     captureWorldRecordIds(state.world);
   state.world = worldResult.state;
+  if (stabilityInventoryAfter !== null) {
+    state.world.player.roleState
+      .stabilityDesk
+      .interventionInventoryBySymbol[
+      symbol
+    ] = stabilityInventoryAfter;
+  }
   for (const adjustment of accountAdjustments) {
     adjustment.account.holdings[
       symbol
@@ -12095,12 +14797,57 @@ function handleSecurityCorporateAction(
   });
 }
 
+function handlePlayerMotionStep(state, event) {
+  const spatial = state.world.spatial;
+  if (
+    event.payload.sceneId !== spatial.activeSceneId ||
+    event.payload.geometryRevision !== spatial.geometryRevision
+  ) {
+    return {
+      type: 'player_motion_step',
+      status: 'stopped',
+      reason: 'STALE_SCENE',
+      changed: false,
+      shouldSchedule: false,
+      virtualMs: state.nowMs,
+      commitSeq: state.commitSeq,
+    };
+  }
+  const result = stepWorld2DMotion(
+    state.world,
+    {
+      authorityCommitSeq: state.commitSeq,
+      authorityVirtualMs: event.scheduledMs,
+      eventSequence: event.sequence,
+    },
+  );
+  if (result.changed) {
+    state.commitSeq += 1;
+    state.world.spatial.player.authorityCommitSeq =
+      state.commitSeq;
+  }
+  if (result.shouldSchedule) {
+    schedulePlayerMotion(
+      state,
+      event.scheduledMs + WORLD2D_MOTION_STEP_MS,
+    );
+  }
+  return {
+    ...result,
+    type: 'player_motion_step',
+    reason: null,
+    sceneId: spatial.activeSceneId,
+    geometryRevision: spatial.geometryRevision,
+    virtualMs: state.nowMs,
+    commitSeq: state.commitSeq,
+  };
+}
+
 function executeNextEvent(
   state,
   { deferMarketMirror = false } = {},
 ) {
-  sortEventQueue(state);
-  const event = state.eventQueue.shift();
+  const event = popEventQueue(state);
   if (!event) return null;
   state.nowMs = event.scheduledMs;
   rollRealtimeAuditSlotDomain(state);
@@ -12120,6 +14867,10 @@ function executeNextEvent(
       state,
       deferMarketMirror,
     );
+  } else if (event.type === 'player_motion_step') {
+    result = handlePlayerMotionStep(state, event);
+  } else if (event.type === 'open_world_city_completion') {
+    result = handleOpenWorldCityCompletion(state, event);
   } else if (event.type === 'agent_command_batch') {
     result = handleAgentCommandBatch(state, event, {
       deferMarketMirror,
@@ -12145,7 +14896,11 @@ function executeNextEvent(
   } else if (
     event.type === 'derivative_actor_cycle'
   ) {
-    flushDeferredWorldOrderMirrors(state);
+    // Derivative cadence consumes settled spot prices, player balances and
+    // collateral authority; it never consumes the stock order-list mirror.
+    // Keep that rebuild deferred until the enclosing publication/verification
+    // boundary so one three-second cadence cannot rescan the complete live
+    // order mirror merely to price futures and options.
     syncWorldBalancesFromAccounts(state);
     const authorityAtMs =
       state.derivativeAuthorityOriginMs +
@@ -12153,7 +14908,15 @@ function executeNextEvent(
     const cadence =
       advanceEmbeddedDerivativesMarket(
         state.world,
-        { atMs: authorityAtMs },
+        {
+          atMs: authorityAtMs,
+          // The realtime account ledger is the reservation authority. Passing
+          // its scalar directly avoids rebuilding the complete order-list
+          // projection merely so derivatives can respect stock buying power.
+          playerExternalReservedCashCents:
+            state.accounts.player
+              .reservedCashCents,
+        },
       );
     syncAccountsAfterWorldMutation(state, {
       synchronizeHoldings:
@@ -12205,6 +14968,7 @@ function executeNextEvent(
     }
     result = cadence.receipt;
   } else if (event.type === 'quote_frame') {
+    runPlayerRoleAutomation(state, { deferMarketMirror });
     result = publishQuoteFrame(state, { deferMarketMirror });
   } else if (event.type === 'world_day_settlement') {
     if (deferMarketMirror) syncWorldMarketMirrors(state);
@@ -12215,20 +14979,101 @@ function executeNextEvent(
   return { event, result };
 }
 
-/** Executes exactly one queue event, including all synchronous fill commits. */
-export function processNextEvent(state) {
+function recordMarketProgression(
+  state,
+  execution,
+  { inPlace },
+) {
+  const current =
+    marketProgressionDiagnostics.get(state) ?? {
+      processNextEventCallCount: 0,
+      inPlaceAuthorityCallCount: 0,
+      transactionalAuthorityCallCount: 0,
+      executedEventCount: 0,
+      lastEventId: null,
+      lastEventType: null,
+      lastEventScheduledMs: null,
+    };
+  current.processNextEventCallCount += 1;
+  if (inPlace) {
+    current.inPlaceAuthorityCallCount += 1;
+  } else {
+    current.transactionalAuthorityCallCount += 1;
+  }
+  if (execution) {
+    current.executedEventCount += 1;
+    current.lastEventId = execution.event.id;
+    current.lastEventType = execution.event.type;
+    current.lastEventScheduledMs =
+      execution.event.scheduledMs;
+  }
+  marketProgressionDiagnostics.set(state, current);
+}
+
+export function getMarketProgressionDiagnostics(state) {
   if (!Array.isArray(state?.eventQueue)) {
     throw new Error('A realtime market simulation is required.');
   }
+  const current =
+    marketProgressionDiagnostics.get(state) ?? {
+      processNextEventCallCount: 0,
+      inPlaceAuthorityCallCount: 0,
+      transactionalAuthorityCallCount: 0,
+      executedEventCount: 0,
+      lastEventId: null,
+      lastEventType: null,
+      lastEventScheduledMs: null,
+    };
+  return { ...current };
+}
+
+function processNextEventInPlace(
+  state,
+  { deferMarketMirror = false } = {},
+) {
+  return processNextEvent(state, {
+    [INTERNAL_PROCESS_NEXT_EVENT_AUTHORITY]: true,
+    deferMarketMirror,
+  });
+}
+
+/** Executes exactly one queue event, including all synchronous fill commits. */
+export function processNextEvent(state, options = undefined) {
+  if (!Array.isArray(state?.eventQueue)) {
+    throw new Error('A realtime market simulation is required.');
+  }
+  const inPlace =
+    options?.[INTERNAL_PROCESS_NEXT_EVENT_AUTHORITY] === true;
+  if (options !== undefined && !inPlace) {
+    throw new TypeError('Invalid processNextEvent authority options.');
+  }
+  if (inPlace) {
+    const execution = executeNextEvent(state, {
+      deferMarketMirror:
+        options.deferMarketMirror === true,
+    });
+    recordMarketProgression(state, execution, {
+      inPlace: true,
+    });
+    return execution;
+  }
   const draft =
-    inheritVerifiedRealtimeAuditPayloadSummaries(
+    inheritRealtimeAuditRuntimeMetadata(
       state,
       cloneJson(state),
     );
   const execution = executeNextEvent(draft);
-  if (!execution) return null;
+  if (!execution) {
+    recordMarketProgression(state, null, {
+      inPlace: false,
+    });
+    return null;
+  }
   assertFullMarketState(draft);
   replaceState(state, draft);
+  recordMarketProgression(state, execution, {
+    inPlace: false,
+  });
   return execution.result;
 }
 
@@ -12327,18 +15172,26 @@ function cloneImmediateWorldTransaction(
       maker: {
         ...source.market.maker,
       },
-      trades: [
-        ...(source.market.trades ?? []),
-      ],
+      trades: cloneWorldline
+        ? [...(source.market.trades ?? [])]
+        : source.market.trades,
       orders: source.market.orders,
       orderBooks: {
         ...source.market.orderBooks,
       },
     },
-    eventLog: [...source.eventLog],
-    ledger: [...source.ledger],
-    facts: [...source.facts],
-    memories: [...source.memories],
+    eventLog: cloneWorldline
+      ? [...source.eventLog]
+      : source.eventLog,
+    ledger: cloneWorldline
+      ? [...source.ledger]
+      : source.ledger,
+    facts: cloneWorldline
+      ? [...source.facts]
+      : source.facts,
+    memories: cloneWorldline
+      ? [...source.memories]
+      : source.memories,
   };
 }
 
@@ -12514,6 +15367,9 @@ function cloneImmediateOrderTransaction(
     },
     barSeries: { ...state.barSeries },
     accounts: cloneStructured(state.accounts),
+    turnoverTruthBySymbol: {
+      ...state.turnoverTruthBySymbol,
+    },
     orderArchive: cloneImmediateOrderArchive(
       state.orderArchive,
       symbols,
@@ -12561,7 +15417,7 @@ function cloneImmediateOrderTransaction(
   }
   const pendingBarFills = new Map();
   deferredBarFillTransactions.set(draft, pendingBarFills);
-  inheritVerifiedRealtimeAuditPayloadSummaries(
+  inheritRealtimeAuditRuntimeMetadata(
     state,
     draft,
   );
@@ -12569,13 +15425,14 @@ function cloneImmediateOrderTransaction(
     draft,
     symbols,
     incrementalEligible: true,
+    mayTrade,
     pendingBarFills,
   };
 }
 
 function cloneMarketStateWithOrderBookRuntimeMetadata(state) {
   const cloned =
-    inheritVerifiedRealtimeAuditPayloadSummaries(
+    inheritRealtimeAuditRuntimeMetadata(
       state,
       cloneStructured(state),
     );
@@ -12668,11 +15525,249 @@ function commitDeferredBarFills(draft, pendingBarFills) {
   deferredBarFillTransactions.delete(draft);
 }
 
+function settleEventsBeforeReservedCommand(
+  state,
+  reservedCommand,
+) {
+  const executions = [];
+  while (
+    state.eventQueue[0] &&
+    compareEvents(
+      state.eventQueue[0],
+      reservedCommand,
+    ) < 0
+  ) {
+    const execution = processNextEventInPlace(state, {
+      deferMarketMirror: true,
+    });
+    if (!execution) {
+      throw new Error(
+        'A preceding market event disappeared before execution.',
+      );
+    }
+    executions.push(execution);
+  }
+  if (executions.length > 0) {
+    flushDeferredWorldOrderMirrors(state);
+    compactRealtimeAuditOverflow(
+      state,
+      state.commitSeq,
+    );
+    verifiedAccountAuthoritySeals.set(
+      state,
+      accountAuthoritySeal(state),
+    );
+  }
+  return executions;
+}
+
+function cloneSpatialControlTransaction(state) {
+  const draft = {
+    ...state,
+    world: {
+      ...state.world,
+      spatial: cloneJson(state.world.spatial),
+    },
+    eventQueue: cloneJson(state.eventQueue),
+    receipts: [...state.receipts],
+  };
+  inheritRealtimeAuditRuntimeMetadata(state, draft);
+  const accountSeal =
+    verifiedAccountAuthoritySeals.get(state);
+  if (typeof accountSeal === 'string') {
+    verifiedAccountAuthoritySeals.set(
+      draft,
+      accountSeal,
+    );
+  }
+  const orderIndex = orderIndexes.get(state);
+  if (orderIndex) orderIndexes.set(draft, orderIndex);
+  const balanceMirror =
+    worldBalanceMirrorStates.get(state);
+  if (balanceMirror) {
+    worldBalanceMirrorStates.set(
+      draft,
+      balanceMirror,
+    );
+  }
+  return draft;
+}
+
+function assertIncrementalSpatialState(
+  previous,
+  draft,
+  receipt,
+) {
+  const protectedRoots = [
+    'books',
+    'accounts',
+    'barSeries',
+    'barArchives',
+    'orderArchive',
+    'realtimeAuditArchive',
+    'derivativeCadenceReceiptArchive',
+    'playerRoleAutomation',
+    'agentEcology',
+    'quoteFrames',
+  ];
+  for (const root of protectedRoots) {
+    if (draft[root] !== previous[root]) {
+      throw new Error(
+        `incremental spatial authority touched ${root}`,
+      );
+    }
+  }
+  for (const root of [
+    'player',
+    'cityLife',
+    'socialCareer',
+    'entities',
+    'economy',
+    'market',
+    'clues',
+    'facts',
+    'memories',
+    'narratives',
+    'ledger',
+    'eventLog',
+    'replay',
+    'historyArchive',
+    'accounting',
+    'worldline',
+    'derivatives',
+  ]) {
+    if (draft.world[root] !== previous.world[root]) {
+      throw new Error(
+        `incremental spatial authority touched world.${root}`,
+      );
+    }
+  }
+  const audit = auditWorldSpatialState(draft.world);
+  if (!audit.ok) {
+    throw new Error(
+      `spatial invariant violation: ${audit.errors.join('; ')}`,
+    );
+  }
+  if (receipt.status === 'accepted') {
+    if (
+      draft.commitSeq !== previous.commitSeq + 1 ||
+      draft.world.spatial.player.authorityCommitSeq !==
+        draft.commitSeq
+    ) {
+      throw new Error('invalid incremental spatial commit');
+    }
+  } else if (
+    draft.commitSeq !== previous.commitSeq ||
+    !sameJson(
+      draft.world.spatial,
+      previous.world.spatial,
+    )
+  ) {
+    throw new Error('rejected spatial command mutated authority');
+  }
+}
+
+function processSpatialControlCommand(
+  state,
+  command,
+  { performanceTrace = null, tracePart = () => {} } = {},
+) {
+  const duplicate = priorSpatialControlReceipt(
+    state.world.spatial,
+    command.commandId,
+  );
+  if (duplicate) {
+    if (performanceTrace) {
+      performanceTrace.cloneRoots = 0;
+      performanceTrace.bookCloneCount = 0;
+      performanceTrace.coldHistoryReads = 0;
+      performanceTrace.duplicate = true;
+    }
+    return {
+      receipt: cloneJson(duplicate),
+      quoteFrames: [],
+      precedingEvents: [],
+    };
+  }
+  const reservationNextEventSequence =
+    state.nextEventSequence;
+  const reservedCommand = reserveCommandEvent(
+    state,
+    command,
+  );
+  const precedingEvents =
+    settleEventsBeforeReservedCommand(
+      state,
+      reservedCommand,
+    );
+  const authorityBefore = {
+    ...state,
+    world: state.world,
+  };
+  if (performanceTrace) {
+    performanceTrace.cloneRoots = 4;
+    performanceTrace.bookCloneCount = 0;
+    performanceTrace.coldHistoryReads = 0;
+    performanceTrace.precedingEventCount =
+      precedingEvents.length;
+  }
+  tracePart('prepareBoundaryMs');
+  try {
+    const draft = cloneSpatialControlTransaction(
+      state,
+    );
+    insertEventQueue(draft, reservedCommand);
+    tracePart('cloneAndScheduleMs');
+    let receipt = null;
+    while (!receipt) {
+      const execution = processNextEventInPlace(
+        draft,
+      );
+      if (!execution) {
+        throw new Error(
+          'Spatial command disappeared before execution.',
+        );
+      }
+      if (execution.event.id === reservedCommand.id) {
+        receipt = execution.result;
+      }
+    }
+    tracePart('executeMs');
+    assertIncrementalSpatialState(
+      authorityBefore,
+      draft,
+      receipt,
+    );
+    tracePart('incrementalAuditMs');
+    replaceState(state, draft);
+    tracePart('replaceMs');
+    return {
+      receipt,
+      quoteFrames: precedingEvents
+        .filter(({ event }) => event.type === 'quote_frame')
+        .map(({ result }) => result),
+      precedingEvents,
+    };
+  } catch (error) {
+    if (
+      precedingEvents.length === 0 &&
+      state.nextEventSequence ===
+        reservationNextEventSequence + 1
+    ) {
+      state.nextEventSequence =
+        reservationNextEventSequence;
+    }
+    throw error;
+  }
+}
+
 /**
- * Runs one external command as a single copy-on-write transaction. Internal
- * events that must precede the command share the same draft and the complete
- * invariant suite runs once before publication. Failure leaves the authority
- * at its pre-command state.
+ * Runs one external command at the deterministic queue boundary. Trusted
+ * autonomous events that already precede the reserved command settle on the
+ * sole authority first; the player command then uses a symbol-scoped
+ * copy-on-write transaction. A rejected or failed player command therefore
+ * cannot roll back market work that was already due, and it cannot mutate its
+ * target book before the incremental invariant proof succeeds.
  */
 export function processExternalCommand(
   state,
@@ -12715,9 +15810,33 @@ export function processExternalCommand(
   // set once before creating its transactional snapshot.
   flushDeferredWorldOrderMirrors(state);
   tracePart('boundaryMs');
+  if (command.type === 'player_control') {
+    return processSpatialControlCommand(
+      state,
+      command,
+      { performanceTrace, tracePart },
+    );
+  }
   const immediateOrder =
     command.type === 'submit_order' ||
     command.type === 'cancel_order';
+  const reservationNextEventSequence =
+    state.nextEventSequence;
+  const reservedCommand = immediateOrder
+    ? reserveCommandEvent(state, command)
+    : null;
+  const precedingEvents = immediateOrder
+    ? settleEventsBeforeReservedCommand(
+        state,
+        reservedCommand,
+      )
+    : [];
+  if (performanceTrace) {
+    performanceTrace.precedingEventCount =
+      precedingEvents.length;
+  }
+  tracePart('prepareBoundaryMs');
+  try {
   let transaction = immediateOrder
     ? cloneImmediateOrderTransaction(state, command, {
         archiveAllSymbols: verification === 'full',
@@ -12735,31 +15854,27 @@ export function processExternalCommand(
     archiveTerminalOrders(draft, symbol);
   }
   pruneBoundedAgentReceipts(draft);
-  let scheduled = enqueueCommand(draft, command);
-  if (
-    immediateOrder &&
-    draft.eventQueue[0]?.id !== scheduled.id
-  ) {
-    transaction = {
-      draft:
-        cloneMarketStateWithOrderBookRuntimeMetadata(
-          state,
-        ),
-      symbols: Object.keys(state.books),
-      incrementalEligible: false,
-    };
-    draft = transaction.draft;
-    for (const symbol of transaction.symbols) {
-      archiveTerminalOrders(draft, symbol);
+  const scheduled = immediateOrder
+    ? reservedCommand
+    : enqueueCommand(draft, command);
+  if (immediateOrder) {
+    insertEventQueue(draft, scheduled);
+    if (draft.eventQueue[0]?.id !== scheduled.id) {
+      throw new Error(
+        'Reserved player command boundary was not fully prepared.',
+      );
     }
-    pruneBoundedAgentReceipts(draft);
-    scheduled = enqueueCommand(draft, command);
   }
   tracePart('cloneAndScheduleMs');
-  const quoteFrames = [];
+  const quoteFrames = precedingEvents
+    .filter(
+      ({ event }) => event.type === 'quote_frame',
+    )
+    .map(({ result }) => result);
   let receipt = null;
-  while (draft.eventQueue.some((event) => event.id === scheduled.id)) {
-    const execution = executeNextEvent(draft, {
+  let commandExecuted = false;
+  while (!commandExecuted) {
+    const execution = processNextEventInPlace(draft, {
       deferMarketMirror: transaction.incrementalEligible,
     });
     if (!execution) {
@@ -12770,20 +15885,48 @@ export function processExternalCommand(
     }
     if (execution.event.id === scheduled.id) {
       receipt = execution.result;
+      commandExecuted = true;
     }
   }
   tracePart('executeMs');
-  for (const symbol of transaction.symbols) {
-    archiveTerminalOrders(draft, symbol);
-  }
-  pruneBoundedAgentReceipts(draft);
-  markAccountRisk(draft);
-  compactRealtimePriceEvidence(draft);
-  syncWorldMarketMirrors(
-    draft,
-    transaction.incrementalEligible
-      ? { dirtySymbols: transaction.symbols }
-      : undefined,
+  const maintenancePart = performanceTrace
+    ? (name, operation) => {
+        const startedAt = traceNow();
+        const result = operation();
+        performanceTrace[name] = traceNow() - startedAt;
+        return result;
+      }
+    : (_name, operation) => operation();
+  maintenancePart('terminalArchiveMs', () => {
+    for (const symbol of transaction.symbols) {
+      archiveTerminalOrders(draft, symbol);
+    }
+  });
+  maintenancePart('receiptPruneMs', () =>
+    pruneBoundedAgentReceipts(draft),
+  );
+  maintenancePart('accountRiskMs', () =>
+    markAccountRisk(draft),
+  );
+  maintenancePart('priceEvidenceMs', () =>
+    compactRealtimePriceEvidence(draft),
+  );
+  maintenancePart('worldMirrorMs', () =>
+    syncWorldMarketMirrors(
+      draft,
+      transaction.incrementalEligible
+          ? {
+            dirtySymbols: transaction.symbols,
+            synchronizeDerivatives:
+              transaction.mayTrade === false
+                ? 'reservation_only'
+                : true,
+            performanceTrace,
+          }
+        : performanceTrace
+          ? { performanceTrace }
+          : undefined,
+    ),
   );
   tracePart('maintenanceMs');
   const incrementalVerification =
@@ -12864,7 +16007,19 @@ export function processExternalCommand(
   );
   replaceState(state, draft);
   tracePart('replaceMs');
-  return { receipt, quoteFrames };
+  return { receipt, quoteFrames, precedingEvents };
+  } catch (error) {
+    if (
+      immediateOrder &&
+      precedingEvents.length === 0 &&
+      state.nextEventSequence ===
+        reservationNextEventSequence + 1
+    ) {
+      state.nextEventSequence =
+        reservationNextEventSequence;
+    }
+    throw error;
+  }
 }
 
 /**
@@ -12886,6 +16041,7 @@ export function advanceTo(
     verifyState = true,
     reuseVerifiedArchives = false,
     shouldYield = null,
+    deferWorldOrderMirrorFlush = false,
   } = {},
 ) {
   if (
@@ -12903,6 +16059,11 @@ export function advanceTo(
   if (typeof reuseVerifiedArchives !== 'boolean') {
     throw new TypeError(
       'reuseVerifiedArchives must be a boolean',
+    );
+  }
+  if (typeof deferWorldOrderMirrorFlush !== 'boolean') {
+    throw new TypeError(
+      'deferWorldOrderMirrorFlush must be a boolean',
     );
   }
   if (
@@ -12925,7 +16086,7 @@ export function advanceTo(
     state.eventQueue[0] &&
     state.eventQueue[0].scheduledMs <= targetMs
   ) {
-    const execution = executeNextEvent(state, {
+    const execution = processNextEventInPlace(state, {
       deferMarketMirror: true,
     });
     onEvent?.(execution.event, execution.result, state);
@@ -12973,7 +16134,10 @@ export function advanceTo(
         synchronizeDerivatives: false,
       });
     }
-  } else if (!yielded) {
+  } else if (
+    !yielded &&
+    !deferWorldOrderMirrorFlush
+  ) {
     flushDeferredWorldOrderMirrors(state);
   }
   compactRealtimeAuditOverflow(state, state.commitSeq);
@@ -13026,6 +16190,29 @@ function publicTradeSnapshot(trade) {
   };
 }
 
+function publicTradeRetention(state, visibleTrades = null) {
+  const retained = Array.isArray(visibleTrades)
+    ? visibleTrades
+    : state.world.market.trades
+        .filter(
+          (trade) => trade.source === 'realtime_order_book',
+        )
+        .slice(-MAX_VISIBLE_TRADES);
+  const firstTrade = retained[0] ?? null;
+  return {
+    schema: 'lzy_public_trade_retention_v1',
+    authorityCommitSeq: state.commitSeq,
+    empty: firstTrade === null,
+    firstTrade:
+      firstTrade === null
+        ? null
+        : {
+            id: firstTrade.id,
+            virtualMs: firstTrade.virtualMs,
+          },
+  };
+}
+
 function publicOrderSnapshot(order) {
   return {
     id: order.id,
@@ -13046,7 +16233,32 @@ function publicOrderSnapshot(order) {
     selfTradeGrossCents:
       order.selfTradeGrossCents,
     chargedFeeCents: order.chargedFeeCents,
+    ...(order.automationKind
+      ? {
+          automationKind: order.automationKind,
+          automationDecisionId: order.automationDecisionId,
+          automationStrategyIds: [...order.automationStrategyIds],
+        }
+      : {}),
     commitSeq: order.commitSeq,
+  };
+}
+
+function publicPlayerRoleAutomationSnapshot(state) {
+  const runtime = state.playerRoleAutomation;
+  return {
+    schemaVersion: runtime.schemaVersion,
+    kind: runtime.kind,
+    configRevision: runtime.configRevision,
+    nextDecisionAtMs: runtime.nextDecisionAtMs,
+    lastDecisionAtMs: runtime.lastDecisionAtMs,
+    totalDecisions: runtime.totalDecisions,
+    totalOrderAttempts: runtime.totalOrderAttempts,
+    totalFilledQuantity: runtime.totalFilledQuantity,
+    recentDecisions: runtime.recentDecisions.map((decision) => ({
+      ...decision,
+      strategyIds: [...decision.strategyIds],
+    })),
   };
 }
 
@@ -13152,6 +16364,281 @@ function publicCapacityProjection(state) {
   return capacity;
 }
 
+const FUNDAMENTAL_SOURCE_METRICS = Object.freeze([
+  Object.freeze({
+    metric: 'deliveryReliabilityBps',
+    relationship: 'supplier',
+  }),
+  Object.freeze({
+    metric: 'demandHealthBps',
+    relationship: 'customer',
+  }),
+  Object.freeze({
+    metric: 'creditHealthBps',
+    relationship: 'credit',
+  }),
+  Object.freeze({
+    metric: 'investmentPerformanceBps',
+    relationship: 'investment',
+  }),
+]);
+
+function fundamentalHolderAuthority(state) {
+  const accounts = Object.values(state.accounts)
+    .filter((account) =>
+      Object.values(account.holdings ?? {}).some(
+        (quantity) => quantity > 0,
+      ),
+    )
+    .sort((left, right) =>
+      left.id.localeCompare(right.id),
+    );
+  const publicHolderIdByAccountId = new Map(
+    accounts.map((account, index) => [
+      account.id,
+      `public_holder_${String(index + 1).padStart(2, '0')}`,
+    ]),
+  );
+  return {
+    accounts,
+    publicHolderIdByAccountId,
+    shareholderProfiles: accounts.map((account) => ({
+      holderId: publicHolderIdByAccountId.get(account.id),
+      displayName: shareholderName(state, account),
+      linkEligible:
+        Object.values(account.holdings ?? {}).filter(
+          (quantity) => quantity > 0,
+        ).length >= 2,
+    })),
+  };
+}
+
+function fundamentalCompaniesFrame(
+  state,
+  holderAuthority,
+) {
+  const securityByIssuerId = new Map(
+    Object.values(state.world.market.securities).map(
+      (security) => [security.issuerId, security],
+    ),
+  );
+  return Object.values(state.world.entities.companies)
+    .sort((left, right) => left.id.localeCompare(right.id))
+    .map((company) => {
+      const security = securityByIssuerId.get(company.id);
+      const holders = Object.fromEntries(
+        holderAuthority.accounts
+          .map((account) => [
+            holderAuthority.publicHolderIdByAccountId.get(
+              account.id,
+            ),
+            account.holdings[security.symbol] ?? 0,
+          ])
+          .filter(([, quantity]) => quantity > 0),
+      );
+      const issuedUnits = Math.trunc(
+        Number(security.outstandingUnits),
+      );
+      const floatUnits = Math.trunc(
+        Number(
+          security.floatUnits ?? security.floatShares,
+        ),
+      );
+      return {
+        id: company.id,
+        symbol: security.symbol,
+        metrics: cloneJson(
+          state.world.economy.businessNetwork
+            .lastSignalsByCompany[company.id] ?? {},
+        ),
+        ownership: {
+          issuedUnits,
+          registeredUnits: Object.values(holders).reduce(
+            (sum, quantity) => sum + quantity,
+            0,
+          ),
+          floatUnits,
+          lockedUnits: issuedUnits - floatUnits,
+          holders,
+        },
+      };
+    });
+}
+
+function fundamentalEdgesFrame(network) {
+  const activeEdges = network.edges
+    .map((edge) => ({
+      id: edge.id,
+      fromCompanyId: edge.fromCompanyId,
+      toCompanyId: edge.toCompanyId,
+      relationship: edge.relationship,
+      weightBps: edge.weightBps,
+      maxImpactBps: edge.maxImpactBps,
+      lagDays: edge.lagDays,
+      validFromDay: edge.validFromDay ?? 0,
+      validToDay:
+        edge.validToDay ?? Number.MAX_SAFE_INTEGER,
+    }))
+    .sort(
+      (left, right) =>
+        left.fromCompanyId.localeCompare(
+          right.fromCompanyId,
+        ) ||
+        right.maxImpactBps * right.weightBps -
+          left.maxImpactBps * left.weightBps ||
+        left.id.localeCompare(right.id),
+    );
+  const retainedBySource = new Map();
+  const retained = [];
+  for (const edge of activeEdges) {
+    const count =
+      retainedBySource.get(edge.fromCompanyId) ?? 0;
+    if (count >= 8) continue;
+    retainedBySource.set(edge.fromCompanyId, count + 1);
+    retained.push(edge);
+  }
+  return retained.sort(
+    (left, right) => left.id.localeCompare(right.id),
+  );
+}
+
+function recentSettledBusinessFacts(network, edges) {
+  const edgesBySourceAndRelationship = new Map();
+  for (const edge of edges) {
+    const key =
+      `${edge.fromCompanyId}:${edge.relationship}`;
+    edgesBySourceAndRelationship.set(
+      key,
+      (edgesBySourceAndRelationship.get(key) ?? 0) + 1,
+    );
+  }
+  const candidates = [];
+  for (const [companyId, window] of Object.entries(
+    network.metricWindowByCompany,
+  ).sort(([left], [right]) => left.localeCompare(right))) {
+    if (!Array.isArray(window) || window.length < 2) continue;
+    const previous = window.at(-2);
+    const latest = window.at(-1);
+    for (const source of FUNDAMENTAL_SOURCE_METRICS) {
+      const deltaBps =
+        latest[source.metric] - previous[source.metric];
+      const matchingEdgeCount =
+        edgesBySourceAndRelationship.get(
+          `${companyId}:${source.relationship}`,
+        ) ?? 0;
+      if (
+        !Number.isSafeInteger(deltaBps) ||
+        deltaBps === 0 ||
+        matchingEdgeCount === 0
+      ) {
+        continue;
+      }
+      candidates.push({
+        fact: {
+          id: `${latest.sourceFactId}:${source.metric}`,
+          sourceFactId: latest.sourceFactId,
+          status: 'settled',
+          authority: 'world_company_operating_ledger',
+          kind: 'operating_metric_change',
+          companyId,
+          metric: source.metric,
+          deltaBps,
+          settledDay: latest.tick,
+        },
+        matchingEdgeCount,
+      });
+    }
+  }
+  let projectedCandidateCount = 0;
+  const facts = [];
+  for (const candidate of candidates) {
+    if (
+      facts.length >= 96 ||
+      projectedCandidateCount +
+          candidate.matchingEdgeCount >
+        64
+    ) {
+      continue;
+    }
+    facts.push(candidate.fact);
+    projectedCandidateCount +=
+      candidate.matchingEdgeCount;
+  }
+  return facts;
+}
+
+function publicFundamentalNetworkProjection(state) {
+  const network = state.world.economy?.businessNetwork;
+  if (
+    !network ||
+    network.authority !== 'world_company_operating_ledger'
+  ) {
+    return {
+      schemaVersion:
+        'lzy_fundamental_relationship_network_projection_v1',
+      authority: 'read_only_projection',
+      integrationStatus: 'production_integrated_read_only',
+      status: 'blocked',
+      nodes: [],
+      relationships: [],
+      causalCandidates: {
+        status: 'blocked',
+        candidates: [],
+        reasonCodes: ['SETTLED_BUSINESS_NETWORK_UNAVAILABLE'],
+      },
+      reasonCodes: ['SETTLED_BUSINESS_NETWORK_UNAVAILABLE'],
+      productionIntegration: {
+        status: 'blocked',
+        applicationAuthority:
+          'existing_world_business_network_only',
+      },
+    };
+  }
+  const nowDay = state.world.world.tick;
+  const holderAuthority = fundamentalHolderAuthority(state);
+  const edges = fundamentalEdgesFrame(network);
+  const frame = {
+    schemaVersion: 'lzy_bounded_settled_fact_frame_v1',
+    worldSeed: state.world.world.seed,
+    observedCommitSeq: state.commitSeq,
+    nowDay,
+    ruleEpoch: network.contractVersion,
+    companies: fundamentalCompaniesFrame(
+      state,
+      holderAuthority,
+    ),
+    recentSettledFacts:
+      recentSettledBusinessFacts(network, edges),
+    edges,
+    appliedCandidateIds: [],
+    shareholderProfiles:
+      holderAuthority.shareholderProfiles,
+  };
+  const projection =
+    projectFundamentalRelationshipNetwork(frame);
+  return {
+    ...projection,
+    integrationStatus: 'production_integrated_read_only',
+    sourceModuleIntegrationStatus:
+      projection.integrationStatus,
+    productionIntegration: {
+      status: 'projected_from_settled_business_network',
+      inputAuthority: network.authority,
+      applicationAuthority:
+        'existing_world_business_network_only',
+      hotPathPolicy:
+        'full_snapshot_only_fixed_active_catalog',
+      marketObservationsConsumed: false,
+      sourceEdgeCount: network.edges.length,
+      projectedEdgeCount: edges.length,
+      omittedColdEdgeCount:
+        network.edges.length - edges.length,
+      activeEdgeSelection:
+        'top_8_per_source_by_weighted_max_impact',
+    },
+  };
+}
+
 /**
  * Returns a read-only market view derived from authoritative orders.
  * Every normal caller receives the same versioned player-facing projection.
@@ -13160,13 +16647,20 @@ function publicCapacityProjection(state) {
  */
 export function snapshotMarket(
   state,
-  { framePublication = false } = {},
+  {
+    framePublication = false,
+    transportOwned = false,
+  } = {},
 ) {
   if (typeof framePublication !== 'boolean') {
     throw new TypeError('framePublication must be a boolean');
   }
-  const activeOrders = allBookOrders(state)
-    .filter(activeOrder)
+  if (typeof transportOwned !== 'boolean') {
+    throw new TypeError('transportOwned must be a boolean');
+  }
+  const activeOrders = Object.values(state.books)
+    .flatMap((book) =>
+      activeOrdersForOwner(book, 'player'))
     .sort((left, right) =>
       left.submittedMs - right.submittedMs ||
       left.sequence - right.sequence ||
@@ -13188,7 +16682,7 @@ export function snapshotMarket(
     ]),
   );
   const player = state.accounts.player;
-  return cloneJson({
+  const projection = {
     publication: PUBLIC_MARKET_SCHEMA,
     publicationMode: framePublication ? 'quote_frame' : 'snapshot',
     nowMs: state.nowMs,
@@ -13204,11 +16698,11 @@ export function snapshotMarket(
         portfolio: accountPortfolioProjection(state, player),
       },
     },
-    activeOrders: activeOrders
-      .filter((order) => order.ownerId === 'player')
-      .map(publicOrderSnapshot),
+    activeOrders: activeOrders.map(publicOrderSnapshot),
     trades: visibleTrades.map(publicTradeSnapshot),
+    tradeRetention: publicTradeRetention(state, visibleTrades),
     agentEcology: publicAgentEcologySnapshot(state),
+    playerRoleAutomation: publicPlayerRoleAutomationSnapshot(state),
     capacity: {
       player: publicCapacityProjection(state),
     },
@@ -13221,8 +16715,21 @@ export function snapshotMarket(
         ? compactHistoricalQuoteFrame
         : publicQuoteFrameSnapshot,
     ),
-    ...(framePublication ? {} : { barArchives: state.barArchives }),
-  });
+    ...(framePublication
+      ? {}
+      : {
+          barArchives: state.barArchives,
+          fundamentalNetwork:
+            publicFundamentalNetworkProjection(state),
+        }),
+  };
+  // A Worker immediately hands an owned frame projection to structured-clone
+  // transport on the same task turn. Every mutable collection assembled
+  // above is already a projection, so an additional JSON round trip would
+  // only duplicate the exact snapshot before postMessage duplicates it again.
+  return transportOwned
+    ? projection
+    : cloneJson(projection);
 }
 
 /**
@@ -13242,12 +16749,10 @@ export function snapshotMarketCommandPatch(
   }
   const marketData = publicMarketDataProjection(state.world);
   const player = state.accounts.player;
-  const activeOrders = Object.values(state.books[symbol].orders)
-    .filter(
-      (order) =>
-        activeOrder(order) &&
-        order.ownerId === 'player',
-    )
+  const activeOrders = activeOrdersForOwner(
+    state.books[symbol],
+    'player',
+  )
     .sort(
       (left, right) =>
         left.submittedMs - right.submittedMs ||
@@ -13297,6 +16802,8 @@ export function snapshotMarketCommandPatch(
     },
     activeOrders,
     tradeDeltas,
+    tradeRetention: publicTradeRetention(state),
+    playerRoleAutomation: publicPlayerRoleAutomationSnapshot(state),
     capacity: {
       player: publicCapacityProjection(state),
     },
@@ -13361,13 +16868,12 @@ export function snapshotRealtimeLevel2(
   });
   if (symbols.length === 0) return null;
   const symbolSet = new Set(symbols);
-  const activeOrders = allBookOrders(state)
-    .filter(
-      (order) =>
-        activeOrder(order) &&
-        order.ownerId === 'player' &&
-        symbolSet.has(order.symbol),
-    )
+  const activeOrders = symbols
+    .flatMap((symbol) =>
+      activeOrdersForOwner(
+        state.books[symbol],
+        'player',
+      ))
     .sort(
       (left, right) =>
         left.submittedMs - right.submittedMs ||
@@ -13407,6 +16913,7 @@ export function snapshotRealtimeLevel2(
     ),
     activeOrders,
     tradeDeltas,
+    tradeRetention: publicTradeRetention(state),
   });
 }
 
@@ -13442,11 +16949,17 @@ export function canonicalMarketState(state) {
       barSeries: state.barSeries,
       barArchives: state.barArchives,
       accounts: state.accounts,
+      turnoverTruthBySymbol:
+        state.turnoverTruthBySymbol,
+      turnoverTruthIntegrationBySymbol:
+        state.turnoverTruthIntegrationBySymbol,
       exchangeFeePoolCents: state.exchangeFeePoolCents,
       orderArchive: state.orderArchive,
       realtimeAuditArchive: state.realtimeAuditArchive,
       derivativeCadenceReceiptArchive:
         state.derivativeCadenceReceiptArchive,
+      playerRoleAutomation:
+        state.playerRoleAutomation,
       agentEcology: state.agentEcology,
       quoteFrames: state.quoteFrames,
       receipts: state.receipts,

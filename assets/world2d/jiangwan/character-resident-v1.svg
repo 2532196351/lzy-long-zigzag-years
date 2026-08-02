@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" data-semantic-category="character" role="img" aria-label="江湾居民八方向骨骼源资产">
+  <defs>
+    <linearGradient id="coat" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3f725f"/>
+      <stop offset="1" stop-color="#26312f"/>
+    </linearGradient>
+  </defs>
+  <ellipse id="contact-shadow" cx="512" cy="920" rx="132" ry="38" fill="#18201f" opacity=".28" data-contact="feet" data-anchor="feet"/>
+  <g id="rig" data-material="mat_jiangwan_character_v1" stroke="#26312f" stroke-linejoin="round">
+    <g id="root" data-bone="root" transform="translate(512 900)">
+      <g id="pelvis" data-bone="pelvis" transform="translate(0 -286)">
+        <path d="M-124-40 124-40 96 96-96 96z" fill="#304d43" stroke-width="12"/>
+        <g id="left-foot" data-bone="left_foot" transform="translate(-60 92)">
+          <path d="M-42 0h76l38 226H0z" fill="#343b3a" stroke-width="12"/>
+          <path d="M-6 210h92q32 0 38 38H-14z" fill="#26312f"/>
+        </g>
+        <g id="right-foot" data-bone="right_foot" transform="translate(60 92)">
+          <path d="M-34 0h76l34 226H4z" fill="#343b3a" stroke-width="12"/>
+          <path d="M0 210h92q32 0 38 38H-8z" fill="#26312f"/>
+        </g>
+        <g id="torso" data-bone="torso" transform="translate(0 -218)">
+          <path d="m-164-98 164-44 164 44-42 270H-122z" fill="url(#coat)" stroke-width="14"/>
+          <path d="M0-132v286" fill="none" stroke="#e7e0d2" stroke-width="8" opacity=".55"/>
+          <g id="left-hand" data-bone="left_hand" transform="translate(-160 -40)">
+            <path d="M20 0-56 168-12 190 68 38z" fill="#3f725f" stroke-width="12"/>
+            <circle cx="-34" cy="186" r="30" fill="#d9a37e" stroke-width="10" data-anchor="left_hand"/>
+          </g>
+          <g id="right-hand" data-bone="right_hand" transform="translate(160 -40)">
+            <path d="M-20 0 56 168 12 190-68 38z" fill="#3f725f" stroke-width="12"/>
+            <circle cx="34" cy="186" r="30" fill="#d9a37e" stroke-width="10" data-anchor="right_hand"/>
+          </g>
+          <g id="head" data-bone="head" transform="translate(0 -214)">
+            <path d="M-86 14q0-110 86-110T86 14v72q0 106-86 106T-86 86z" fill="#d9a37e" stroke-width="14"/>
+            <path d="M-92 20q-6-124 92-124 110 0 96 136L54-26-18-48-78 18z" fill="#26312f"/>
+          </g>
+        </g>
+      </g>
+    </g>
+  </g>
+  <g id="direction-markers" transform="translate(96 96)" fill="#d47a57" opacity=".8">
+    <path d="M0 48 48 0l48 48-48-12z"/><path d="M736 48 784 0l48 48-48-12z"/>
+  </g>
+</svg>

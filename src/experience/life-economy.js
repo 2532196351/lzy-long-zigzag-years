@@ -927,6 +927,20 @@ const BASE_SHIFT_INCOME = Object.freeze({
   institution: Object.freeze({ low: 1_250, high: 2_500 }),
 });
 
+function lifeRoleFamily(roleType) {
+  if (
+    [
+      'institution',
+      'quant_institution',
+      'stabilization_fund',
+    ].includes(roleType)
+  ) {
+    return 'institution';
+  }
+  if (roleType === 'private_whale') return 'household';
+  return roleType;
+}
+
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
@@ -958,8 +972,9 @@ export function lifeProductHasDirectUse(product) {
 
 function startingPossessions(roleType, strengthTier) {
   const high = strengthTier === 'high';
+  const roleFamily = lifeRoleFamily(roleType);
   const ids =
-    STARTING_PRODUCTS[roleType]?.[high ? 'high' : 'low'] ??
+    STARTING_PRODUCTS[roleFamily]?.[high ? 'high' : 'low'] ??
     STARTING_PRODUCTS.household[high ? 'high' : 'low'];
   const homeId = `life_asset_start_${ids[0]}`;
   return ids.map((itemId, index) => {
@@ -995,19 +1010,20 @@ function activeFromPossessions(possessions) {
 
 export function createLifeState(roleType, strengthTier) {
   const stronger = strengthTier === 'high';
+  const roleFamily = lifeRoleFamily(roleType);
   const possessions = startingPossessions(roleType, strengthTier);
   return {
     schemaVersion: 'lzy-life-v2',
     assetAccountingVersion: 'lzy-life-assets-v1',
     status: 'active',
     kind:
-      roleType === 'operator' || roleType === 'institution'
+      roleFamily === 'operator' || roleFamily === 'institution'
         ? 'organization'
         : 'personal',
     homeLabel:
-      roleType === 'operator'
+      roleFamily === 'operator'
         ? '经营现场'
-        : roleType === 'institution'
+        : roleFamily === 'institution'
           ? '机构总部'
           : '住处',
     energy: stronger ? 82 : 74,
@@ -1024,7 +1040,7 @@ export function createLifeState(roleType, strengthTier) {
     nextRestockTick: 5,
     work: {
       baseIncome:
-        BASE_SHIFT_INCOME[roleType]?.[stronger ? 'high' : 'low'] ??
+        BASE_SHIFT_INCOME[roleFamily]?.[stronger ? 'high' : 'low'] ??
         650,
       shiftsCompleted: 0,
       totalEarned: 0,

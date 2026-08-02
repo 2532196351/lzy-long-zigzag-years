@@ -2,7 +2,7 @@ import {
   getMarketIntelligencePage,
   projectMarketIntelligence,
   queryMarketIntelligence,
-} from './market-intelligence.js?v=20260801-01';
+} from './market-intelligence.js?v=20260803-02';
 
 const PAGE_LABELS = Object.freeze({
   overview: '行情总览',
@@ -507,16 +507,40 @@ function financialMetric(metric) {
 }
 
 function holderRow(holder) {
+  const beneficialOwner =
+    holder.beneficialOwner || '未单独披露';
+  const controlChain = holder.controlChain?.length
+    ? holder.controlChain.join(' → ')
+    : '';
   return `
     <tr>
       <td>${formatNumber(holder.rank)}</td>
-      <th scope="row">${escapeText(holder.name)}</th>
+      <th scope="row">
+        ${escapeText(holder.name)}
+        <small>${escapeText(holder.holderNature || holder.kind)}</small>
+      </th>
+      <td>
+        ${escapeText(beneficialOwner)}
+        ${
+          controlChain
+            ? `<small>${escapeText(controlChain)}</small>`
+            : ''
+        }
+      </td>
       <td>${formatNumber(holder.quantity)}</td>
       <td>${
         holder.ownershipBps === null
           ? '—'
           : formatBps(holder.ownershipBps)
       }</td>
+      <td>${
+        holder.votingRightsBps === null
+          ? '—'
+          : formatBps(holder.votingRightsBps)
+      }</td>
+      <td>${formatNumber(holder.pledgedUnits)} / ${formatNumber(
+        holder.lockedUnits,
+      )}</td>
     </tr>
   `;
 }
@@ -564,6 +588,67 @@ function reportedOperatingMetrics(supplyDemand) {
   `;
 }
 
+function businessNetworkView(supplyDemand) {
+  const network = supplyDemand.businessNetwork ?? {};
+  const metrics = network.metrics ?? [];
+  const causes = network.causes ?? [];
+  if (!metrics.length) return '';
+  const relationshipLabels = {
+    supplier: '供应交付',
+    customer: '客户需求',
+    credit: '信用与融资',
+    investment: '投资敞口',
+  };
+  return `
+    <section class="mi-business-transmission">
+      <header>
+        <div>
+          <span class="mi-eyebrow">已结算经营事实</span>
+          <h4>产业链因果传导</h4>
+        </div>
+        <small>第 ${formatNumber(network.asOfTick ?? 0)} 日</small>
+      </header>
+      <dl class="mi-operating-metrics">
+        ${metrics
+          .map((metric) =>
+            marketMetric(
+              metric.label,
+              `${metric.valueBps >= 10_000 ? '+' : ''}${formatNumber(
+                (metric.valueBps - 10_000) / 100,
+                2,
+              )}%`,
+            ),
+          )
+          .join('')}
+      </dl>
+      <div class="mi-transmission-causes">
+        ${
+          causes.length
+            ? causes
+                .slice(0, 8)
+                .map(
+                  (cause) => `
+                    <article>
+                      <strong>${escapeText(cause.counterpartyName)}</strong>
+                      <span>${escapeText(
+                        relationshipLabels[cause.relationship] || '经营关联',
+                      )} · 滞后 ${formatNumber(cause.lagDays)} 日</span>
+                      <em>${cause.impactBps >= 0 ? '+' : ''}${formatNumber(
+                        cause.impactBps / 100,
+                        2,
+                      )}%</em>
+                    </article>
+                  `,
+                )
+                .join('')
+            : '<p class="mi-empty">当前关联方事实没有形成显著传导。</p>'
+        }
+      </div>
+      <p class="mi-source-note">这里只读取交易价格之外的经营、交付、回款、信用和投资事实；股价波动本身不会改写企业业务。</p>
+    </section>
+  `;
+}
+
 function companyConnectionGroup(label, companies) {
   return `
     <section class="mi-company-connections">
@@ -594,6 +679,225 @@ function companyConnectionGroup(label, companies) {
         }
       </div>
     </section>
+  `;
+}
+
+const COMPANY_SYSTEM_LABELS = Object.freeze({
+  foundation_model_platform: '基础模型与智能体平台',
+  commercial: '商业交付',
+  training: '训练中',
+  validation: '验证中',
+  continuous: '持续治理',
+  training_run_failure: '训练运行失败',
+  customer_pilot_without_renewal: '客户试点未续约',
+  safety_case_rejected: '安全案例被驳回',
+  smaller_verified_training_run: '缩小规模并完成可核验训练',
+  deployment_scope_reduction: '缩减部署范围后重新验收',
+  independent_remediation_review: '独立整改复核',
+  long_term_compute_contract: '长期算力合同',
+  model_release_boundary: '模型发布边界',
+  related_party_transaction: '关联交易',
+  training_compute_precommitment: '训练算力预付款承诺',
+  research_cash_runway: '研发现金跑道',
+  incident_liability_reserve: '事故责任准备金',
+  model_researchers: '模型研究人员',
+  enterprise_delivery_engineers: '企业交付工程师',
+  industrial_enterprises: '工业企业客户',
+  cloud_distribution_partners: '云分发合作方',
+});
+
+function companySystemLabel(value) {
+  return COMPANY_SYSTEM_LABELS[String(value ?? '')] ?? '';
+}
+
+function companySystemChips(values) {
+  const labels = (Array.isArray(values) ? values : [])
+    .map(companySystemLabel)
+    .filter(Boolean);
+  return labels.length
+    ? `<div class="mi-system-chips">${labels
+        .map((label) => `<span>${escapeText(label)}</span>`)
+        .join('')}</div>`
+    : '';
+}
+
+function companyStandingSystem(company) {
+  const standing = company.worldStanding ?? {};
+  const milestones = company.history?.milestones ?? [];
+  if (!standing.ecosystemRole && milestones.length === 0) return '';
+  return `
+    <details data-mi-progressive data-mi-company-system
+      data-mi-section="company-standing">
+      <summary>
+        <span><strong>来历、地位与成长路径</strong><small>${escapeText(
+          standing.ecosystemRole ?? '公开公司沿革',
+        )}</small></span>
+        <span aria-hidden="true">＋</span>
+      </summary>
+      <div class="mi-details-body mi-company-system-body">
+        <p class="mi-system-lead">${escapeText(
+          standing.historicalOrigin ?? '',
+        )}</p>
+        <p>${escapeText(standing.ecosystemRole ?? '')}</p>
+        <div class="mi-system-chips">${(standing.cityPresence ?? [])
+          .map((place) => `<span>${escapeText(place)}</span>`)
+          .join('')}</div>
+        <ol class="mi-company-timeline">${milestones
+          .map(
+            (milestone) => `
+              <li><span>${formatNumber(milestone.sequence)}</span>
+                <p>${escapeText(milestone.description)}</p></li>
+            `,
+          )
+          .join('')}</ol>
+      </div>
+    </details>
+  `;
+}
+
+function companyBusinessSystem(company) {
+  const business = company.business ?? {};
+  const mechanism = company.financialMechanism ?? {};
+  const products = company.operatingProducts ?? [];
+  const research = company.researchPrograms ?? [];
+  if (!business.modelKind && products.length === 0) return '';
+  return `
+    <details data-mi-progressive data-mi-company-system
+      data-mi-section="business-system">
+      <summary>
+        <span><strong>产品、研发与赚钱方式</strong><small>${escapeText(
+          company.canonicalBusinessModel?.revenueDriver ??
+            companySystemLabel(business.modelKind) ??
+            '经营系统',
+        )}</small></span>
+        <span aria-hidden="true">＋</span>
+      </summary>
+      <div class="mi-details-body mi-company-system-body">
+        <div class="mi-system-columns">
+          <section><h4>商业化产品</h4><div class="mi-system-list">${products
+            .map(
+              (entry) => `
+                <article><strong>${escapeText(entry.name)}</strong>
+                  <span>${escapeText(
+                    companySystemLabel(entry.status) || '状态以公开记录为准',
+                  )}</span></article>
+              `,
+            )
+            .join('')}</div></section>
+          <section><h4>研发计划</h4><div class="mi-system-list">${research
+            .map(
+              (entry) => `
+                <article><strong>${escapeText(entry.name)}</strong>
+                  <span>${escapeText(
+                    companySystemLabel(entry.stage) || '进度以公开记录为准',
+                  )}</span></article>
+              `,
+            )
+            .join('')}</div></section>
+        </div>
+        <div class="mi-system-callout">
+          <strong>收入如何确认</strong>
+          <p>${escapeText(mechanism.revenueRecognition ?? '以真实履约与结算事实为准。')}</p>
+        </div>
+        <div class="mi-system-columns">
+          <section><h4>现金约束</h4>${companySystemChips(
+            mechanism.cashConstraints,
+          )}</section>
+          <section><h4>失败与恢复</h4>${companySystemChips([
+            ...(mechanism.failureStates ?? []),
+            ...(mechanism.recoveryPaths ?? []),
+          ])}</section>
+        </div>
+      </div>
+    </details>
+  `;
+}
+
+function companyGovernanceSystem(company) {
+  const governance = company.governance ?? {};
+  const committees = governance.committees ?? [];
+  if (committees.length === 0) return '';
+  return `
+    <details data-mi-progressive data-mi-company-system
+      data-mi-section="governance-system">
+      <summary>
+        <span><strong>治理、控制与责任边界</strong><small>${formatNumber(
+          governance.boardSeatCount,
+        )} 席董事会 · ${committees.length} 个专门委员会</small></span>
+        <span aria-hidden="true">＋</span>
+      </summary>
+      <div class="mi-details-body mi-company-system-body">
+        <div class="mi-system-list">${committees
+          .map(
+            (committee) => `
+              <article><strong>专门委员会</strong>
+                <span>${escapeText(committee.mandate)}</span></article>
+            `,
+          )
+          .join('')}</div>
+        <div class="mi-system-callout"><strong>利益冲突规则</strong>
+          <p>${escapeText(governance.conflictPolicy ?? '')}</p></div>
+        <section><h4>必须上收决策的事项</h4>${companySystemChips(
+          governance.reservedMatters,
+        )}</section>
+      </div>
+    </details>
+  `;
+}
+
+function companyContractGroup(title, edges) {
+  if (!edges.length) {
+    return `<section><h4>${escapeText(title)}</h4><p class="mi-empty">当前没有公开合同关系。</p></section>`;
+  }
+  return `
+    <section><h4>${escapeText(title)}</h4><div class="mi-contract-list">
+      ${edges
+        .map((edge) => {
+          const counterparty = edge.counterpartyCompany;
+          return counterparty
+            ? `<button type="button" data-mi-open-company="${escapeText(
+                counterparty.id,
+              )}"><span><strong>${escapeText(counterparty.name)}</strong>
+                <small>${escapeText(counterparty.role ?? '')}</small></span>
+                <em>${escapeText(edge.settlementBasis ?? '按真实履约结算')} ↗</em></button>`
+            : '';
+        })
+        .join('')}
+    </div></section>
+  `;
+}
+
+function companyEcosystemSystem(company) {
+  const network = company.relationshipNetwork ?? {};
+  const incoming = network.incoming ?? [];
+  const outgoing = network.outgoing ?? [];
+  if (incoming.length + outgoing.length === 0) return '';
+  const stakeholderGroups = company.stakeholderGroups ?? {};
+  return `
+    <details data-mi-progressive data-mi-company-system
+      data-mi-section="ecosystem-contracts">
+      <summary>
+        <span><strong>生态位、合同与利益相关方</strong><small>${
+          incoming.length
+        } 条上游 · ${outgoing.length} 条下游公开关系</small></span>
+        <span aria-hidden="true">＋</span>
+      </summary>
+      <div class="mi-details-body mi-company-system-body">
+        <div class="mi-system-columns">
+          ${companyContractGroup('投入与保障方', incoming)}
+          ${companyContractGroup('客户与分发方', outgoing)}
+        </div>
+        <div class="mi-system-columns">
+          <section><h4>员工群体</h4>${companySystemChips(
+            stakeholderGroups.employeeGroups,
+          )}</section>
+          <section><h4>客户群体</h4>${companySystemChips(
+            stakeholderGroups.customerGroups,
+          )}</section>
+        </div>
+        <p class="mi-source-note">关系只表达合同、产能与履约逻辑；股价波动不会直接改写这些经营事实。</p>
+      </div>
+    </details>
   `;
 }
 
@@ -677,6 +981,10 @@ function companyPage(model) {
         </dl>
       </section>
       <section class="mi-progressive-stack" aria-label="公司详细信息">
+        ${companyStandingSystem(company)}
+        ${companyBusinessSystem(company)}
+        ${companyGovernanceSystem(company)}
+        ${companyEcosystemSystem(company)}
         <details data-mi-progressive data-mi-section="financials">
           <summary>
             <span><strong>财务与估值</strong><small>${escapeText(
@@ -744,7 +1052,7 @@ function companyPage(model) {
               company.shareholders.length
                 ? `
                   <table>
-                    <thead><tr><th>序</th><th>持有人</th><th>数量</th><th>占比</th></tr></thead>
+                    <thead><tr><th>序</th><th>登记持有人</th><th>受益所有人与控制链</th><th>数量</th><th>经济权益</th><th>表决权</th><th>质押 / 锁定</th></tr></thead>
                     <tbody>${company.shareholders.map(holderRow).join('')}</tbody>
                   </table>
                 `
@@ -761,6 +1069,7 @@ function companyPage(model) {
           </summary>
           <div class="mi-details-body">
             ${reportedOperatingMetrics(company.supplyDemand)}
+            ${businessNetworkView(company.supplyDemand)}
             <div class="mi-facet-grid">
               ${facetGroup('需求侧', company.supplyDemand.demandFacets)}
               ${facetGroup('供给侧', company.supplyDemand.supplyFacets)}

@@ -1,11 +1,11 @@
-import { createValuationSnapshot } from './valuation.js?v=20260801-01';
+import { createValuationSnapshot } from './valuation.js?v=20260803-02';
 import {
   VALUATION_OBSERVATION_VERSION,
-} from './maker-ecology.js?v=20260801-01';
+} from './maker-ecology.js?v=20260803-02';
 import {
   INSTITUTIONAL_VALUATION_INPUT_VERSION,
   createInstitutionalEcology,
-} from './institutional-ecology.js?v=20260801-01';
+} from './institutional-ecology.js?v=20260803-02';
 
 const ONE_YEAR_MS = 31_536_000_000;
 const PPM = 1_000_000;
@@ -39,13 +39,17 @@ const INSTITUTION_LINEAGED_FIELDS = Object.freeze([
 const LIVE_INSTITUTION_MODEL = Object.freeze({
   npc_value_fund: 'inst_quant_value',
   npc_trend_fund: 'inst_quant_trend',
+  npc_quant_institution: 'inst_quant_trend',
   npc_industry_fund: 'inst_discretionary_industry',
+  npc_stabilization_fund: 'inst_market_stabilization',
 });
 const LIVE_INSTITUTION_MULTIPLE_FACTOR_PPM =
   Object.freeze({
     npc_value_fund: 980_000,
     npc_trend_fund: 920_000,
+    npc_quant_institution: 1_000_000,
     npc_industry_fund: 1_060_000,
+    npc_stabilization_fund: 900_000,
   });
 
 const policyCache = new Map();

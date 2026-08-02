@@ -11,7 +11,7 @@ export {
   enablePermission,
   observeEligibility,
   restoreAccess,
-} from './eligibility.js?v=20260801-01';
+} from './eligibility.js?v=20260803-02';
 
 export {
   CONTRACT_RULE_VERSION,
@@ -30,7 +30,7 @@ export {
   equityBasketDisplayName,
   equityBasketIdentity,
   sameEquityBasketIdentity,
-} from './contracts.js?v=20260801-01';
+} from './contracts.js?v=20260803-02';
 
 export {
   DAYS_PER_YEAR,
@@ -40,7 +40,7 @@ export {
   priceEuropeanOption,
   putCallParityGapTicks,
   surfaceVolatilityPpm,
-} from './pricing.js?v=20260801-01';
+} from './pricing.js?v=20260803-02';
 
 export {
   FINANCING_INITIAL_RATIO_BPS,
@@ -59,7 +59,7 @@ export {
   netContractPositions,
   securitiesLendingRiskState,
   settleFutureVariation,
-} from './risk.js?v=20260801-01';
+} from './risk.js?v=20260803-02';
 
 export {
   ACTOR_RULE_VERSION,
@@ -67,7 +67,7 @@ export {
   createDerivativeActorCatalog,
   deriveActorCommands,
   updateActorCapacity,
-} from './actors.js?v=20260801-01';
+} from './actors.js?v=20260803-02';
 
 export {
   DERIVATIVES_RULE_VERSION,
@@ -78,13 +78,13 @@ export {
   reduceDerivatives,
   restoreDerivatives,
   snapshotDerivatives,
-} from './engine.js?v=20260801-01';
+} from './engine.js?v=20260803-02';
 
 export {
   STRESS_RULE_VERSION,
   runDerivativeStressScenario,
   runDerivativeStressSuite,
-} from './stress.js?v=20260801-01';
+} from './stress.js?v=20260803-02';
 
 export const DERIVATIVE_COMMAND_TYPES = Object.freeze([
   'SYNC_WORLD',

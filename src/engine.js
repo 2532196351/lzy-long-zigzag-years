@@ -6,7 +6,7 @@
  * authoritative; memories and narratives may only reference facts.
  */
 
-import { createValuationSnapshot } from './market/valuation.js?v=20260801-01';
+import { createValuationSnapshot } from './market/valuation.js?v=20260803-02';
 import {
   LIFE_PRODUCT_BY_ID as LIFE_ITEM_BY_ID,
   auditLifeState,
@@ -16,7 +16,7 @@ import {
   lifeProductHasDirectUse,
   lifeProductRequiresPlacement,
   normalizeLifeState,
-} from './experience/life-economy.js?v=20260801-01';
+} from './experience/life-economy.js?v=20260803-02';
 import {
   CITY_LIFE_CONTRACT_VERSION,
   accrueCityObligation,
@@ -33,7 +33,7 @@ import {
   recordCityRetailSale,
   settleCityObligations,
   synchronizeLifeLocations,
-} from './experience/city-life-ecology.js?v=20260801-01';
+} from './experience/city-life-ecology.js?v=20260803-02';
 import {
   advanceSocialCareerEcology,
   applySocialCareerAction,
@@ -43,7 +43,22 @@ import {
   projectSocialCareerEcology,
   socialCareerCashTotal,
   socialCareerSchemaVersion,
-} from './experience/social-career-ecology.js?v=20260801-01';
+} from './experience/social-career-ecology.js?v=20260803-02';
+import {
+  applyEntertainmentSettlement,
+  auditEntertainmentWorld,
+  createEntertainmentWorldState,
+  deriveEntertainmentSettlement,
+  normalizeEntertainmentWorldState,
+  projectEntertainmentWorld,
+} from './experience/entertainment-world.js?v=20260803-02';
+import {
+  auditOpenWorldCityAuthorityState,
+  beginOpenWorldCityAction,
+  completeOpenWorldCityCommitment,
+  createOpenWorldCityAuthorityState,
+  normalizeOpenWorldCityAuthorityState,
+} from './experience/open-world-city-authority.js?v=20260803-02';
 import {
   DERIVATIVE_EQUITY_BASKETS,
   DERIVATIVE_EQUITY_BASKET_VERSIONS,
@@ -59,20 +74,41 @@ import {
   sameEquityBasketIdentity,
   securitiesLendingRiskState,
   snapshotDerivatives,
-} from './derivatives/index.js?v=20260801-01';
+} from './derivatives/index.js?v=20260803-02';
 import {
   advanceWorldlineState,
   archiveWorldlineSourceEvidence,
   auditWorldlineState,
   createWorldlineState,
   normalizeWorldlineState,
-} from './worldline.js?v=20260801-01';
+} from './worldline.js?v=20260803-02';
+import {
+  auditRoleStrategyState,
+  createQuantStrategyLab,
+  createStabilityDesk,
+  importPlayerStrategyManifest,
+  maximumCustomStrategies,
+  normalizeRoleStrategyState,
+  quantStrategyDefinition,
+  quantStrategyUpgradeCost,
+  researchCostForStrategy,
+  validateQuantConfiguration,
+  validateStabilityConfiguration,
+} from './role-strategies.js?v=20260803-02';
+import {
+  auditWorldSpatialState,
+  createWorldSpatialState,
+  normalizeWorldSpatialState,
+} from './world2d/index.js?v=20260803-02';
 
 export const ROLE_TYPES = Object.freeze([
   'household',
   'professional',
   'operator',
   'institution',
+  'quant_institution',
+  'stabilization_fund',
+  'private_whale',
 ]);
 
 export const STRENGTH_TIERS = Object.freeze(['low', 'high']);
@@ -82,7 +118,49 @@ export const ROLE_ACTIONS = Object.freeze({
   professional: 'record_dissent',
   operator: 'schedule_production',
   institution: 'set_liquidity_buffer',
+  quant_institution: 'set_liquidity_buffer',
+  stabilization_fund: 'set_liquidity_buffer',
+  private_whale: 'set_reserve',
 });
+
+const ROLE_ALLOWED_ACTIONS = Object.freeze({
+  household: new Set(['set_reserve']),
+  professional: new Set(['record_dissent']),
+  operator: new Set(['schedule_production']),
+  institution: new Set(['set_liquidity_buffer']),
+  quant_institution: new Set([
+    'set_liquidity_buffer',
+    'configure_quant_automation',
+    'research_quant_strategy',
+    'upgrade_quant_strategy',
+    'import_quant_strategy',
+    'remove_quant_strategy',
+  ]),
+  stabilization_fund: new Set([
+    'set_liquidity_buffer',
+    'configure_stabilization_automation',
+  ]),
+  private_whale: new Set(['set_reserve']),
+});
+
+export const CAPITAL_PROFILE_VERSION =
+  'lzy-capital-profile-v1';
+
+const INSTITUTIONAL_ROLE_TYPES = Object.freeze([
+  'institution',
+  'quant_institution',
+  'stabilization_fund',
+]);
+
+function isInstitutionalRole(roleType) {
+  return INSTITUTIONAL_ROLE_TYPES.includes(roleType);
+}
+
+function lifeEligibilityRoleType(roleType) {
+  if (isInstitutionalRole(roleType)) return 'institution';
+  if (roleType === 'private_whale') return 'household';
+  return roleType;
+}
 
 export const RULE_VERSION = 'lzy-mvp-0.4.0';
 
@@ -140,6 +218,7 @@ const DERIVATIVE_COMMODITY_TEMPLATES = Object.freeze({
   }),
 });
 const BPS_SCALE = 10_000;
+const MIN_LISTED_PRICE_YUAN = 0.01;
 const WORLD_HISTORY_LIMITS = Object.freeze({
   clues: 48,
   memories: 120,
@@ -156,7 +235,7 @@ const WORLD_HISTORY_LIMITS = Object.freeze({
 });
 const LEVEL2_DEPTH_PRODUCT_ID = 'L2_DEPTH_100';
 export const STOCK_UNIVERSE_VERSION =
-  'lzy_stock_universe_14_v1';
+  'lzy_stock_universe_32_v1';
 const MARKET_DATA_PRODUCTS = Object.freeze({
   [LEVEL2_DEPTH_PRODUCT_ID]: Object.freeze({
     id: LEVEL2_DEPTH_PRODUCT_ID,
@@ -167,6 +246,149 @@ const MARKET_DATA_PRODUCTS = Object.freeze({
     synthetic: true,
   }),
 });
+
+const LISTING_IDENTITIES = Object.freeze({
+  LZA001: Object.freeze({ exchange: 'SSE', board: 'MAIN', displayCode: '600901', riskDesignation: 'NONE' }),
+  LZA002: Object.freeze({ exchange: 'SSE', board: 'STAR', displayCode: '688101', riskDesignation: 'NONE' }),
+  LZA003: Object.freeze({ exchange: 'SZSE', board: 'CHINEXT', displayCode: '300901', riskDesignation: 'NONE' }),
+  LZB101: Object.freeze({ exchange: 'SSE', board: 'MAIN', displayCode: '600902', riskDesignation: 'NONE' }),
+  LZC201: Object.freeze({ exchange: 'SSE', board: 'STAR', displayCode: '688201', riskDesignation: 'NONE' }),
+  LZD301: Object.freeze({ exchange: 'SZSE', board: 'MAIN', displayCode: '000901', riskDesignation: 'NONE' }),
+  LZE401: Object.freeze({ exchange: 'SSE', board: 'MAIN', displayCode: '600903', riskDesignation: 'NONE' }),
+  LZF501: Object.freeze({ exchange: 'SZSE', board: 'CHINEXT', displayCode: '300902', riskDesignation: 'NONE' }),
+  LZG601: Object.freeze({ exchange: 'SSE', board: 'STAR', displayCode: '688301', riskDesignation: 'NONE' }),
+  LZH701: Object.freeze({ exchange: 'SZSE', board: 'CHINEXT', displayCode: '300903', riskDesignation: 'NONE' }),
+  LZI801: Object.freeze({ exchange: 'SSE', board: 'MAIN', displayCode: '600904', riskDesignation: 'NONE' }),
+  LZJ901: Object.freeze({ exchange: 'SSE', board: 'MAIN', displayCode: '600905', riskDesignation: 'NONE' }),
+  LZK011: Object.freeze({ exchange: 'SSE', board: 'MAIN', displayCode: '600906', riskDesignation: 'NONE' }),
+  LZL121: Object.freeze({ exchange: 'SSE', board: 'STAR', displayCode: '688401', riskDesignation: 'NONE' }),
+  LZM101: Object.freeze({ exchange: 'SSE', board: 'STAR', displayCode: '688901', riskDesignation: 'NONE' }),
+  LZM102: Object.freeze({ exchange: 'SSE', board: 'STAR', displayCode: '688902', riskDesignation: 'NONE' }),
+  LZM103: Object.freeze({ exchange: 'SZSE', board: 'CHINEXT', displayCode: '301901', riskDesignation: 'NONE' }),
+  LZM104: Object.freeze({ exchange: 'SSE', board: 'STAR', displayCode: '688903', riskDesignation: 'NONE' }),
+  LZM105: Object.freeze({ exchange: 'SZSE', board: 'CHINEXT', displayCode: '301902', riskDesignation: 'NONE' }),
+  LZN201: Object.freeze({ exchange: 'SZSE', board: 'MAIN', displayCode: '001901', riskDesignation: 'NONE' }),
+  LZN202: Object.freeze({ exchange: 'SSE', board: 'MAIN', displayCode: '601901', riskDesignation: 'NONE' }),
+  LZN203: Object.freeze({ exchange: 'SZSE', board: 'MAIN', displayCode: '001902', riskDesignation: 'NONE' }),
+  LZN204: Object.freeze({ exchange: 'SSE', board: 'MAIN', displayCode: '601902', riskDesignation: 'NONE' }),
+  LZO301: Object.freeze({ exchange: 'SZSE', board: 'MAIN', displayCode: '001903', riskDesignation: 'NONE' }),
+  LZO302: Object.freeze({ exchange: 'SSE', board: 'MAIN', displayCode: '601903', riskDesignation: 'NONE' }),
+  LZO303: Object.freeze({ exchange: 'SZSE', board: 'MAIN', displayCode: '001904', riskDesignation: 'STAR_ST' }),
+  LZO304: Object.freeze({ exchange: 'SSE', board: 'MAIN', displayCode: '601904', riskDesignation: 'ST' }),
+  LZP401: Object.freeze({ exchange: 'SSE', board: 'MAIN', displayCode: '601905', riskDesignation: 'NONE' }),
+  LZP402: Object.freeze({ exchange: 'SZSE', board: 'MAIN', displayCode: '001905', riskDesignation: 'NONE' }),
+  LZP403: Object.freeze({ exchange: 'SSE', board: 'MAIN', displayCode: '601906', riskDesignation: 'NONE' }),
+  LZP404: Object.freeze({ exchange: 'SZSE', board: 'MAIN', displayCode: '001906', riskDesignation: 'NONE' }),
+  LZP405: Object.freeze({ exchange: 'SZSE', board: 'CHINEXT', displayCode: '301903', riskDesignation: 'NONE' }),
+});
+
+function expandedCompanyTemplate(config, index) {
+  const marketCap =
+    config.openingPrice * config.sharesOutstanding;
+  const targetBookEquity = Math.round(
+    marketCap / (config.priceBook ?? 2.4),
+  );
+  const trailingNetIncome = Math.round(
+    config.trailingNetIncome ??
+      marketCap / (config.priceEarnings ?? 25),
+  );
+  const trailingFreeCashFlow = Math.round(
+    config.trailingFreeCashFlow ??
+      trailingNetIncome * (config.freeCashFlowFactor ?? 0.86),
+  );
+  const trailingRevenue = Math.round(
+    config.trailingRevenue ??
+      Math.max(
+        Math.abs(trailingNetIncome) * 10,
+        marketCap / (config.priceSales ?? 3.2),
+      ),
+  );
+  const lossMaking = trailingNetIncome <= 0;
+  return {
+    id: config.id,
+    symbol: config.symbol,
+    name: config.name,
+    shortName: config.shortName,
+    role: config.role,
+    description: config.description,
+    businessModel: {
+      kind: config.businessModelKind,
+      revenueDriver: config.revenueDriver,
+    },
+    board: {
+      MAIN: 'main',
+      STAR: 'star',
+      CHINEXT: 'chinext',
+    }[LISTING_IDENTITIES[config.symbol].board],
+    dailyLimitBps:
+      LISTING_IDENTITIES[config.symbol].riskDesignation === 'NONE'
+        ? LISTING_IDENTITIES[config.symbol].board === 'MAIN' ? 1_000 : 2_000
+        : 500,
+    openingPrice: config.openingPrice,
+    cash: Math.round(targetBookEquity * (config.cashRatio ?? 0.24)),
+    debt: Math.round(targetBookEquity * (config.debtRatio ?? 0.36)),
+    inventory: config.inventory ?? 2_400 + index * 170,
+    capacity: config.capacity ?? 1_600 + index * 90,
+    unitCost: config.unitCost ?? 72 + index * 5,
+    productPrice: config.productPrice ?? 118 + index * 7,
+    baseDemand: config.baseDemand ?? 900 + index * 55,
+    sharesOutstanding: config.sharesOutstanding,
+    floatRatioBps: config.floatRatioBps ?? 6_600,
+    targetBookEquity,
+    industry: config.industry,
+    lifecycle: config.lifecycle,
+    informationTransparencyBps:
+      config.informationTransparencyBps ?? 6_800,
+    management: {
+      confidenceBps: config.managementConfidenceBps ?? 6_700,
+      operatingStyle: config.operatingStyle,
+      chiefExecutive: {
+        name: config.executives[0],
+        incentive: config.executiveIncentives[0],
+      },
+      financeLead: {
+        name: config.executives[1],
+        incentive: config.executiveIncentives[1],
+      },
+      investorRelations: {
+        name: config.executives[2],
+        incentive: config.executiveIncentives[2],
+      },
+    },
+    macroExposures: config.macroExposures,
+    supplierCompanyIds: config.supplierCompanyIds,
+    customerCompanyIds: config.customerCompanyIds,
+    financialCounterpartyCompanyIds:
+      config.financialCounterpartyCompanyIds ?? [],
+    investmentExposureCompanyIds:
+      config.investmentExposureCompanyIds ?? [],
+    products: config.products ?? [
+      { id: `${config.symbol}_core_product`, name: `${config.shortName}核心产品`, status: 'commercial' },
+    ],
+    researchPrograms: config.researchPrograms ?? [
+      { id: `${config.symbol}_efficiency_program`, name: '效率与质量改进', stage: 'active' },
+    ],
+    financialBaseline: {
+      trailingRevenue,
+      trailingNetIncome,
+      trailingFreeCashFlow,
+      operatingExpenseRatio: config.operatingExpenseRatio ?? 0.24,
+      maintenanceCapexRatio: config.maintenanceCapexRatio ?? 0.04,
+      annualInterestRateBps: config.annualInterestRateBps ?? 620,
+      valuationPolicy: {
+        earningsMultiple: lossMaking ? 0 : marketCap / trailingNetIncome,
+        bookMultiple: marketCap / targetBookEquity,
+        freeCashFlowMultiple:
+          trailingFreeCashFlow <= 0 ? 0 : marketCap / trailingFreeCashFlow,
+        earningsWeightBps: lossMaking ? 0 : 4_500,
+        bookWeightBps: lossMaking ? 10_000 : 2_500,
+        freeCashFlowWeightBps:
+          trailingFreeCashFlow <= 0 ? 0 : 3_000,
+        baseUncertaintyBps: config.baseUncertaintyBps ?? 1_800,
+      },
+    },
+  };
+}
 const COMPANY_TEMPLATES = Object.freeze([
   {
     id: 'company_aurora_materials',
@@ -1026,10 +1248,304 @@ const COMPANY_TEMPLATES = Object.freeze([
       },
     },
   },
+  expandedCompanyTemplate({
+    id: 'company_tianyan_intelligence', symbol: 'LZM101',
+    name: '天演智能', shortName: '天演', role: '基础模型与智能体平台',
+    description: '研发基础模型、推理平台和企业智能体；能力、算力合同、数据授权与交付质量共同决定收入。',
+    businessModelKind: 'foundation_model_platform',
+    revenueDriver: 'API、私有部署、行业授权与智能体工具调用',
+    openingPrice: 86, sharesOutstanding: 3_200_000_000,
+    industry: '人工智能基础模型', lifecycle: '高投入规模成长',
+    operatingStyle: '能力、效率、安全与商业交付并重',
+    executives: ['顾演', '闻砚秋', '祁澈'],
+    executiveIncentives: ['模型能力与客户留存', '算力承诺与现金跑道', '能力边界与事故透明披露'],
+    macroExposures: ['算力供给', '企业智能化预算', '数据与模型治理'],
+    supplierCompanyIds: ['company_yuncen_compute', 'company_frontier_semiconductor', 'company_guangmai_interconnect', 'company_rongyue_data'],
+    customerCompanyIds: ['company_qiming_robotics', 'company_horizon_software', 'company_qunxing_cloud'],
+    products: [
+      { id: 'tianyan_foundation_model', name: '天演基础模型', status: 'commercial' },
+      { id: 'tianyan_agent_platform', name: '企业智能体平台', status: 'commercial' },
+      { id: 'tianyan_private_deployment', name: '行业私有部署套件', status: 'commercial' },
+    ],
+    researchPrograms: [
+      { id: 'tianyan_reasoning', name: '推理与规划能力', stage: 'training' },
+      { id: 'tianyan_efficiency', name: '训练与推理效率', stage: 'validation' },
+      { id: 'tianyan_safety', name: '模型安全与可控性', stage: 'continuous' },
+    ],
+    informationTransparencyBps: 6_100, baseUncertaintyBps: 2_900,
+    priceBook: 7.2, priceEarnings: 58, priceSales: 8.5,
+    operatingExpenseRatio: 0.62, maintenanceCapexRatio: 0.085,
+  }, 0),
+  expandedCompanyTemplate({
+    id: 'company_guangmai_interconnect', symbol: 'LZM102',
+    name: '光脉互联', shortName: '光脉', role: '高速光互连',
+    description: '提供光模块、交换与高速互连设备，认证、良率和客户扩产节奏决定订单兑现。',
+    businessModelKind: 'advanced_network_hardware', revenueDriver: '高速互连设备交付与维护',
+    openingPrice: 52, sharesOutstanding: 1_600_000_000,
+    industry: '光通信与数据中心网络', lifecycle: '技术迭代成长',
+    operatingStyle: '良率、认证与产能爬坡同步',
+    executives: ['章循光', '谷澜', '程禾'],
+    executiveIncentives: ['代际切换与客户认证', '良率和库存现金', '订单与产能口径一致'],
+    macroExposures: ['数据中心互连', '光芯片供给', '海外客户预算'],
+    supplierCompanyIds: ['company_aurora_materials'],
+    customerCompanyIds: ['company_yuncen_compute', 'company_tianyan_intelligence'],
+    informationTransparencyBps: 6_600, priceBook: 4.6, priceEarnings: 34,
+  }, 1),
+  expandedCompanyTemplate({
+    id: 'company_rongyue_data', symbol: 'LZM103',
+    name: '容岳数据', shortName: '容岳', role: '数据治理与授权服务',
+    description: '提供合法授权、脱敏、质量评估与数据管线，事故和续费会留下独立经营事实。',
+    businessModelKind: 'governed_data_service', revenueDriver: '数据治理项目、授权服务与持续订阅',
+    openingPrice: 34, sharesOutstanding: 1_300_000_000,
+    industry: '数据治理', lifecycle: '专业服务成长',
+    operatingStyle: '授权可追溯与交付质量优先',
+    executives: ['容知岳', '陈确', '林白榆'],
+    executiveIncentives: ['授权资产与客户续约', '项目回款与责任准备', '来源和事故完整披露'],
+    macroExposures: ['数据合规', '企业数字预算', '模型训练需求'],
+    supplierCompanyIds: ['company_yuncen_compute'],
+    customerCompanyIds: ['company_tianyan_intelligence', 'company_qunxing_cloud', 'company_mingjian_security'],
+    informationTransparencyBps: 7_400, priceBook: 3.8, priceEarnings: 31,
+  }, 2),
+  expandedCompanyTemplate({
+    id: 'company_mingjian_security', symbol: 'LZM104',
+    name: '明鉴安全', shortName: '明鉴', role: '模型与网络安全',
+    description: '提供模型红队、身份权限和关键基础设施审计；安全事故既可能增需也可能损害行业信任。',
+    businessModelKind: 'security_assurance', revenueDriver: '安全订阅、审计项目与应急服务',
+    openingPrice: 47, sharesOutstanding: 1_100_000_000,
+    industry: '网络与模型安全', lifecycle: '需求扩张',
+    operatingStyle: '证据、响应和持续服务并重',
+    executives: ['阮明鉴', '乔遥', '卫澄'],
+    executiveIncentives: ['防护效果与续费', '人才成本与合同质量', '事件响应透明度'],
+    macroExposures: ['安全事件', '合规投入', '关键基础设施预算'],
+    supplierCompanyIds: ['company_rongyue_data', 'company_yuncen_compute'],
+    customerCompanyIds: ['company_tianyan_intelligence', 'company_heyuan_bank', 'company_guoheng_securities'],
+    informationTransparencyBps: 7_900, priceBook: 5.1, priceEarnings: 39,
+  }, 3),
+  expandedCompanyTemplate({
+    id: 'company_qunxing_cloud', symbol: 'LZM105',
+    name: '群星云服', shortName: '群星', role: '企业云与模型分发',
+    description: '把多家模型、云资源和中小企业客户连接起来，留存、推理成本和渠道冲突决定价值。',
+    businessModelKind: 'cloud_model_distribution', revenueDriver: '云资源、模型调用与企业订阅分成',
+    openingPrice: 29, sharesOutstanding: 2_100_000_000,
+    industry: '企业云服务', lifecycle: '平台竞争成长',
+    operatingStyle: '多模型分发与客户留存优先',
+    executives: ['许群星', '边澍', '谢知微'],
+    executiveIncentives: ['活跃客户和留存', '推理毛利与应收', '渠道冲突披露'],
+    macroExposures: ['中小企业IT预算', '推理价格', '云资源供给'],
+    supplierCompanyIds: ['company_tianyan_intelligence', 'company_yuncen_compute', 'company_rongyue_data'],
+    customerCompanyIds: ['company_horizon_software', 'company_yuansheng_media'],
+    informationTransparencyBps: 6_300, priceBook: 4.2, priceEarnings: 37,
+  }, 4),
+  expandedCompanyTemplate({
+    id: 'company_haifeng_new_energy', symbol: 'LZN201',
+    name: '海沣新能源', shortName: '海沣', role: '风光设备制造',
+    description: '在技术迭代、产能过剩和海外需求之间竞争，装机增长不保证利润增长。',
+    businessModelKind: 'renewable_equipment', revenueDriver: '风光设备交付、运维与技术升级',
+    openingPrice: 21, sharesOutstanding: 4_800_000_000,
+    industry: '新能源设备', lifecycle: '供给过剩调整',
+    operatingStyle: '降本、去库存与海外交付',
+    executives: ['施海沣', '庄沐', '郁晴川'],
+    executiveIncentives: ['订单质量和产能利用', '库存与回款', '海外风险透明度'],
+    macroExposures: ['新能源装机', '海外贸易', '产业链价格'],
+    supplierCompanyIds: ['company_aurora_materials', 'company_northern_logistics'],
+    customerCompanyIds: ['company_anlan_grid'],
+    informationTransparencyBps: 6_700, priceBook: 2.1, priceEarnings: 22,
+  }, 5),
+  expandedCompanyTemplate({
+    id: 'company_qianfeng_resources', symbol: 'LZN202',
+    name: '乾峰资源', shortName: '乾峰', role: '关键矿产资源',
+    description: '矿山品位、许可、安全与资本开支约束供给，商品价格上涨不自动带来扩产。',
+    businessModelKind: 'mineral_resources', revenueDriver: '矿产开采、选冶与长期供货合同',
+    openingPrice: 17, sharesOutstanding: 5_200_000_000,
+    industry: '有色资源', lifecycle: '资源周期成熟',
+    operatingStyle: '安全、品位与资本纪律',
+    executives: ['邢乾峰', '莫原', '贺岑'],
+    executiveIncentives: ['安全产量与资源储量', '资本开支与商品套保', '许可和事故披露'],
+    macroExposures: ['金属价格', '矿业许可', '工业需求'],
+    supplierCompanyIds: ['company_northern_logistics'],
+    customerCompanyIds: ['company_aurora_materials', 'company_frontier_semiconductor'],
+    informationTransparencyBps: 7_100, priceBook: 1.8, priceEarnings: 16,
+  }, 6),
+  expandedCompanyTemplate({
+    id: 'company_hesheng_auto', symbol: 'LZN203',
+    name: '合成汽车', shortName: '合成', role: '整车与智能驾驶',
+    description: '销量、价格、库存、供应链、软件订阅和安全责任共同决定整车现金流。',
+    businessModelKind: 'automotive_platform', revenueDriver: '整车交付、软件订阅与售后服务',
+    openingPrice: 26, sharesOutstanding: 7_000_000_000,
+    industry: '汽车制造', lifecycle: '规模竞争',
+    operatingStyle: '产品节奏、成本与安全并重',
+    executives: ['钟合成', '穆行', '黎慎'],
+    executiveIncentives: ['销量质量与产品安全', '库存和单车现金流', '事故与交付披露'],
+    macroExposures: ['居民耐用品需求', '电池与芯片供给', '价格竞争'],
+    supplierCompanyIds: ['company_frontier_semiconductor', 'company_qiming_robotics', 'company_tianyan_intelligence'],
+    customerCompanyIds: ['company_haiyue_consumer'],
+    informationTransparencyBps: 7_000, priceBook: 2.8, priceEarnings: 24,
+  }, 7),
+  expandedCompanyTemplate({
+    id: 'company_yuangang_shipbuilding', symbol: 'LZN204',
+    name: '远港船造', shortName: '远港', role: '船舶与重型装备',
+    description: '长周期订单、预付款、钢材成本、汇率和延期责任形成跨年的现金循环。',
+    businessModelKind: 'long_cycle_shipbuilding', revenueDriver: '船舶建造里程碑、改装和维护',
+    openingPrice: 14, sharesOutstanding: 8_500_000_000,
+    industry: '船舶制造', lifecycle: '长周期景气',
+    operatingStyle: '订单选择、节点交付与成本锁定',
+    executives: ['陶远港', '宋棱', '周泊'],
+    executiveIncentives: ['高质量订单与准时交付', '预付款和成本套保', '进度与延期披露'],
+    macroExposures: ['全球造船周期', '钢材成本', '汇率'],
+    supplierCompanyIds: ['company_henglu_chemical', 'company_northern_logistics'],
+    customerCompanyIds: ['company_hailan_shipping'],
+    informationTransparencyBps: 7_600, priceBook: 1.9, priceEarnings: 18,
+  }, 8),
+  expandedCompanyTemplate({
+    id: 'company_guoheng_securities', symbol: 'LZO301',
+    name: '国衡证券', shortName: '国衡', role: '证券与衍生品服务',
+    description: '经纪、两融、做市、投行和自营分账运行，活跃收入与库存、违约、合规成本同时存在。',
+    businessModelKind: 'securities_broker', revenueDriver: '经纪、两融、做市、投行与资管服务',
+    openingPrice: 19, sharesOutstanding: 9_000_000_000,
+    industry: '证券', lifecycle: '综合金融成熟',
+    operatingStyle: '客户资产隔离与风险资本约束',
+    executives: ['岳国衡', '裴谨', '秦律'],
+    executiveIncentives: ['客户与资本回报', '净资本和库存风险', '业务分账与合规披露'],
+    macroExposures: ['市场成交活跃', '融资信用', '资本市场融资'],
+    supplierCompanyIds: ['company_mingjian_security'], customerCompanyIds: [],
+    financialCounterpartyCompanyIds: ['company_heyuan_bank', 'company_hengqiao_asset_management'],
+    informationTransparencyBps: 8_300, priceBook: 1.7, priceEarnings: 19,
+  }, 9),
+  expandedCompanyTemplate({
+    id: 'company_hengqiao_asset_management', symbol: 'LZO302',
+    name: '恒桥资管', shortName: '恒桥', role: '多元资产管理',
+    description: '价值、指数、量化、固收与多资产产品独立记账，申赎和容量约束策略兑现。',
+    businessModelKind: 'asset_management_group', revenueDriver: '管理费、业绩费与产品服务',
+    openingPrice: 23, sharesOutstanding: 4_600_000_000,
+    industry: '资产管理', lifecycle: '成熟转型',
+    operatingStyle: '产品分账、容量与客户责任',
+    executives: ['陆恒桥', '叶度', '白隽'],
+    executiveIncentives: ['长期业绩与客户留存', '流动性和产品负债', '费率与利益冲突披露'],
+    macroExposures: ['资产价格', '客户申赎', '无风险利率'],
+    supplierCompanyIds: ['company_guoheng_securities'], customerCompanyIds: [],
+    financialCounterpartyCompanyIds: ['company_heyuan_bank', 'company_sihai_insurance'],
+    investmentExposureCompanyIds: ['company_tianyan_intelligence', 'company_anlan_grid'],
+    informationTransparencyBps: 8_100, priceBook: 2.0, priceEarnings: 21,
+  }, 10),
+  expandedCompanyTemplate({
+    id: 'company_shanhe_property', symbol: 'LZO303',
+    name: '山河置业', shortName: '山河', role: '地产与城市更新',
+    description: '项目公司、预售交付、抵押债务与供应商权利交织，真实重组而非涨停修复持续经营。',
+    businessModelKind: 'distressed_property', revenueDriver: '项目交付、物业运营与资产处置',
+    openingPrice: 2.84, sharesOutstanding: 11_000_000_000,
+    industry: '房地产', lifecycle: '持续经营危机',
+    operatingStyle: '保交付、债务协商与资产处置',
+    executives: ['齐山河', '高垣', '罗契'],
+    executiveIncentives: ['项目交付与债务重组', '受限现金与到期债务', '重组进展和风险揭示'],
+    macroExposures: ['住房销售', '信用条件', '地方城市更新'],
+    supplierCompanyIds: ['company_northern_logistics'],
+    customerCompanyIds: ['company_dongcheng_tourism'],
+    financialCounterpartyCompanyIds: ['company_heyuan_bank', 'company_guoheng_securities'],
+    trailingNetIncome: -3_800_000_000, trailingFreeCashFlow: -5_200_000_000,
+    trailingRevenue: 18_000_000_000, priceBook: 0.72,
+    cashRatio: 0.08, debtRatio: 1.45, informationTransparencyBps: 4_200,
+    baseUncertaintyBps: 4_800, annualInterestRateBps: 980,
+  }, 11),
+  expandedCompanyTemplate({
+    id: 'company_ruifeng_commerce', symbol: 'LZO304',
+    name: '瑞丰商贸', shortName: '瑞丰', role: '零售与商业物业',
+    description: '门店现金流仍在，但关联交易、治理和债务压力使摘帽与恶化都成为可能。',
+    businessModelKind: 'distressed_retail', revenueDriver: '门店零售、租赁与供应链服务',
+    openingPrice: 4.36, sharesOutstanding: 3_600_000_000,
+    industry: '零售商业', lifecycle: '治理修复期',
+    operatingStyle: '现金保全、门店重组与治理整改',
+    executives: ['冯瑞', '商芮', '唐证'],
+    executiveIncentives: ['同店现金与治理修复', '债务和关联往来', '整改和审计意见披露'],
+    macroExposures: ['本地消费', '商业租金', '信用条件'],
+    supplierCompanyIds: ['company_haiyue_consumer', 'company_northern_logistics'],
+    customerCompanyIds: ['company_dongcheng_tourism'],
+    financialCounterpartyCompanyIds: ['company_heyuan_bank'],
+    trailingNetIncome: -460_000_000, trailingFreeCashFlow: 120_000_000,
+    trailingRevenue: 9_800_000_000, priceBook: 0.94,
+    cashRatio: 0.12, debtRatio: 0.88, informationTransparencyBps: 4_900,
+    baseUncertaintyBps: 3_900, annualInterestRateBps: 860,
+  }, 12),
+  expandedCompanyTemplate({
+    id: 'company_hailan_shipping', symbol: 'LZP401',
+    name: '海蓝航运', shortName: '海蓝', role: '航运与港口',
+    description: '航线供给、运价、燃料、贸易量和造船资本开支共同形成强周期。',
+    businessModelKind: 'shipping_network', revenueDriver: '班轮运价、港口服务与长期运输合同',
+    openingPrice: 13, sharesOutstanding: 6_800_000_000,
+    industry: '航运港口', lifecycle: '强周期成熟',
+    operatingStyle: '运力纪律与周期现金管理',
+    executives: ['柯海蓝', '章舵', '岑渡'],
+    executiveIncentives: ['运力利用与航线收益', '燃料和船队资本开支', '运价和运力披露'],
+    macroExposures: ['全球贸易', '燃料价格', '航线供给'],
+    supplierCompanyIds: ['company_yuangang_shipbuilding', 'company_henglu_chemical'],
+    customerCompanyIds: ['company_northern_logistics'],
+    informationTransparencyBps: 7_300, priceBook: 1.6, priceEarnings: 14,
+  }, 13),
+  expandedCompanyTemplate({
+    id: 'company_pingchuan_pharma', symbol: 'LZP402',
+    name: '平川医药', shortName: '平川', role: '成熟药品与流通',
+    description: '集采、成熟产品、研发补充、渠道回款和合规形成与早期生科不同的现金流。',
+    businessModelKind: 'pharma_distribution', revenueDriver: '成熟药品、商业流通与研发授权',
+    openingPrice: 18, sharesOutstanding: 3_900_000_000,
+    industry: '医药制造与流通', lifecycle: '稳定转型',
+    operatingStyle: '产品组合、合规与渠道回款',
+    executives: ['萧平川', '尤方', '简宁'],
+    executiveIncentives: ['产品组合与供应保障', '集采价格和回款', '质量与合规披露'],
+    macroExposures: ['医疗支出', '集采规则', '渠道信用'],
+    supplierCompanyIds: ['company_qinghe_biotech', 'company_northern_logistics'],
+    customerCompanyIds: ['company_haiyue_consumer'],
+    informationTransparencyBps: 8_000, priceBook: 2.2, priceEarnings: 20,
+  }, 14),
+  expandedCompanyTemplate({
+    id: 'company_jintian_agriculture', symbol: 'LZP403',
+    name: '金田农业', shortName: '金田', role: '种业与农业服务',
+    description: '天气、库存、育种研发、农产品价格和政策采购形成跨年度经营周期。',
+    businessModelKind: 'agricultural_services', revenueDriver: '种子、农资、技术服务与采购合同',
+    openingPrice: 12, sharesOutstanding: 4_300_000_000,
+    industry: '农业服务', lifecycle: '跨周期成长',
+    operatingStyle: '品种研发、库存与田间兑现',
+    executives: ['姜金田', '谷穗', '沈稔'],
+    executiveIncentives: ['品种表现与市场覆盖', '库存和季节现金', '试验与采购披露'],
+    macroExposures: ['天气', '粮食价格', '农业采购'],
+    supplierCompanyIds: ['company_henglu_chemical'],
+    customerCompanyIds: ['company_haiyue_consumer', 'company_pingchuan_pharma'],
+    informationTransparencyBps: 7_500, priceBook: 2.3, priceEarnings: 23,
+  }, 15),
+  expandedCompanyTemplate({
+    id: 'company_dongcheng_tourism', symbol: 'LZP404',
+    name: '东城文旅', shortName: '东城', role: '文旅与本地消费',
+    description: '客流、票价、固定成本、天气、公共事件和城市资产把资本市场与生活地图连接起来。',
+    businessModelKind: 'urban_tourism', revenueDriver: '景区、酒店、活动与城市服务',
+    openingPrice: 15, sharesOutstanding: 2_700_000_000,
+    industry: '文化旅游', lifecycle: '恢复与升级',
+    operatingStyle: '客流质量、资产利用与城市协同',
+    executives: ['苏东城', '游棠', '景然'],
+    executiveIncentives: ['客流和复购', '固定成本和资产回报', '公共事件与客流披露'],
+    macroExposures: ['居民服务消费', '天气与公共事件', '城市财政'],
+    supplierCompanyIds: ['company_haiyue_consumer', 'company_northern_logistics'],
+    customerCompanyIds: ['company_yuansheng_media'],
+    informationTransparencyBps: 7_200, priceBook: 2.0, priceEarnings: 26,
+  }, 16),
+  expandedCompanyTemplate({
+    id: 'company_yuansheng_media', symbol: 'LZP405',
+    name: '远声传媒', shortName: '远声', role: '内容广告与AI应用',
+    description: '广告预算、版权、推荐、生成内容成本和平台分成共同作用，模型降本不保证内容收入。',
+    businessModelKind: 'media_ai_application', revenueDriver: '广告、版权、订阅与内容技术服务',
+    openingPrice: 24, sharesOutstanding: 1_900_000_000,
+    industry: '传媒与数字内容', lifecycle: '内容平台转型',
+    operatingStyle: '内容质量、版权与商业安全',
+    executives: ['舒远声', '文铎', '蓝苓'],
+    executiveIncentives: ['用户留存与内容价值', '版权成本和广告回款', '内容来源和品牌安全'],
+    macroExposures: ['广告预算', '平台分成', '生成内容成本'],
+    supplierCompanyIds: ['company_tianyan_intelligence', 'company_qunxing_cloud', 'company_rongyue_data'],
+    customerCompanyIds: ['company_dongcheng_tourism', 'company_haiyue_consumer'],
+    informationTransparencyBps: 6_500, priceBook: 3.6, priceEarnings: 33,
+  }, 17),
 ].map((template) => Object.freeze(enrichCompanyTemplate(template))));
 
 function enrichCompanyTemplate(template) {
-  const marketCap = template.openingPrice * template.sharesOutstanding;
+  const marketCap =
+    template.openingPrice *
+    template.sharesOutstanding;
   const size =
     marketCap >= 500_000_000_000
       ? 'mega'
@@ -1038,6 +1554,57 @@ function enrichCompanyTemplate(template) {
         : marketCap >= 20_000_000_000
           ? 'mid'
           : 'small';
+  const registeredListing =
+    LISTING_IDENTITIES[template.symbol];
+  if (!registeredListing) {
+    throw new Error(
+      `Missing listing identity: ${template.symbol}`,
+    );
+  }
+  const legacyBoard = {
+    MAIN: 'main',
+    STAR: 'star',
+    CHINEXT: 'chinext',
+  }[registeredListing.board];
+  const riskDesignation =
+    registeredListing.riskDesignation;
+  const dailyLimitBps =
+    riskDesignation === 'NONE'
+      ? legacyBoard === 'main' ? 1_000 : 2_000
+      : 500;
+  const listingIdentity = {
+    securityId: template.symbol,
+    issuerId: template.id,
+    exchange: registeredListing.exchange,
+    board: registeredListing.board,
+    displayCode: registeredListing.displayCode,
+    shortName: template.shortName,
+    riskDesignation,
+    riskDesignationSinceDay:
+      riskDesignation === 'NONE' ? null : 1,
+    riskDesignationFactIds:
+      riskDesignation === 'NONE'
+        ? []
+        : [`fact_genesis_listing_risk_${template.symbol.toLowerCase()}`],
+    listingStatus: 'NORMAL',
+    ruleBookVersion: 'lzy-listing-rules-v1',
+    priceLimitPolicyId:
+      riskDesignation === 'NONE'
+        ? legacyBoard === 'main'
+          ? 'daily_limit_10pct'
+          : 'daily_limit_20pct'
+        : 'daily_limit_risk_5pct',
+    settlementPolicyId: 't_plus_one_cash_security_v1',
+    eligibility: {
+      margin: riskDesignation === 'NONE',
+      lending: riskDesignation === 'NONE',
+      futuresUnderlying: ['mega', 'large'].includes(size),
+      optionUnderlying:
+        template.symbol === 'LZA003' ||
+        template.symbol === 'LZM101',
+      indexMemberships: [],
+    },
+  };
   const kind = template.businessModel?.kind ?? 'industrial_operator';
   const balanceSheetModel =
     kind === 'commercial_bank'
@@ -1056,6 +1623,14 @@ function enrichCompanyTemplate(template) {
         : 'low';
   return {
     ...template,
+    board: legacyBoard,
+    dailyLimitBps,
+    exchange: registeredListing.exchange,
+    listingBoard: registeredListing.board,
+    displayCode: registeredListing.displayCode,
+    riskDesignation,
+    listingStatus: 'NORMAL',
+    listingIdentity,
     businessModel: template.businessModel ?? {
       kind,
       revenueDriver: '产销与服务',
@@ -1069,6 +1644,22 @@ function enrichCompanyTemplate(template) {
       clone(template.financialCounterpartyCompanyIds ?? []),
     investmentExposureCompanyIds:
       clone(template.investmentExposureCompanyIds ?? []),
+    products: clone(template.products ?? [
+      {
+        id: `${template.symbol}_core_product`,
+        name: `${template.shortName}核心产品与服务`,
+        status: 'commercial',
+      },
+    ]),
+    researchPrograms: clone(
+      template.researchPrograms ?? [
+        {
+          id: `${template.symbol}_continuous_improvement`,
+          name: '产品、工艺与服务持续改进',
+          stage: 'active',
+        },
+      ],
+    ),
   };
 }
 const LISTING_LIQUIDITY_PROFILES = Object.freeze({
@@ -1159,12 +1750,119 @@ const LISTING_LIQUIDITY_PROFILES = Object.freeze({
     makerInventoryCapacityUnits: 180_000,
     depthClass: 'small_cap_frontier',
   }),
+  ...Object.fromEntries(
+    COMPANY_TEMPLATES.slice(14).map(
+      (template, index) => [
+        template.symbol,
+        Object.freeze({
+          expectedDailyTurnoverBps:
+            template.riskDesignation === 'NONE'
+              ? template.board === 'main'
+                ? 45 + index * 7
+                : 130 + index * 11
+              : 220,
+          normalHalfSpreadTicks:
+            template.riskDesignation === 'NONE'
+              ? template.size === 'mega' ? 1 : 2
+              : 3,
+          makerInventoryCapacityUnits:
+            template.size === 'mega'
+              ? 2_000_000
+              : template.size === 'large'
+                ? 900_000
+                : template.size === 'mid'
+                  ? 420_000
+                  : 180_000,
+          depthClass:
+            template.riskDesignation === 'NONE'
+              ? `${template.size}_${template.board}_network`
+              : 'distressed_risk_designation',
+        }),
+      ],
+    ),
+  ),
+});
+
+const YUAN_IN_CENTS = 100;
+const YI_YUAN_IN_CENTS =
+  100_000_000 * YUAN_IN_CENTS;
+
+function frozenCapitalContract({
+  minimumCents,
+  maximumCents,
+  defaultCents,
+  ownership,
+  fundingLabel,
+}) {
+  return Object.freeze({
+    schemaVersion: CAPITAL_PROFILE_VERSION,
+    unit: 'cent',
+    minimumCents,
+    maximumCents,
+    defaultCents,
+    ownership,
+    fundingLabel,
+    sliderResolution: 1000,
+  });
+}
+
+const CAPITAL_CONTRACTS = Object.freeze({
+  household: frozenCapitalContract({
+    minimumCents: 0,
+    maximumCents: 20 * YI_YUAN_IN_CENTS,
+    defaultCents: 160_000 * YUAN_IN_CENTS,
+    ownership: 'private',
+    fundingLabel: '个人／家庭私人资金',
+  }),
+  professional: frozenCapitalContract({
+    minimumCents: 0,
+    maximumCents: 20 * YI_YUAN_IN_CENTS,
+    defaultCents: 720_000 * YUAN_IN_CENTS,
+    ownership: 'private_and_fiduciary_segregated',
+    fundingLabel: '个人资金与受托额度分账',
+  }),
+  operator: frozenCapitalContract({
+    minimumCents: 0,
+    maximumCents: 20 * YI_YUAN_IN_CENTS,
+    defaultCents: 420_000 * YUAN_IN_CENTS,
+    ownership: 'private',
+    fundingLabel: '个人证券资金；企业资金隔离',
+  }),
+  institution: frozenCapitalContract({
+    minimumCents: 1_000_000 * YUAN_IN_CENTS,
+    maximumCents: 100 * YI_YUAN_IN_CENTS,
+    defaultCents: 24_000_000 * YUAN_IN_CENTS,
+    ownership: 'fiduciary_segregated',
+    fundingLabel: '法人风险资本与客户受托资金分账',
+  }),
+  quant_institution: frozenCapitalContract({
+    minimumCents: 10_000_000 * YUAN_IN_CENTS,
+    maximumCents: 100 * YI_YUAN_IN_CENTS,
+    defaultCents: 100_000_000 * YUAN_IN_CENTS,
+    ownership: 'fiduciary_segregated',
+    fundingLabel: '量化法人资本与产品资金分账',
+  }),
+  stabilization_fund: frozenCapitalContract({
+    minimumCents: 100 * YI_YUAN_IN_CENTS,
+    maximumCents: 1_000 * YI_YUAN_IN_CENTS,
+    defaultCents: 200 * YI_YUAN_IN_CENTS,
+    ownership: 'public_mandate',
+    fundingLabel: '多主体公共授权预算；分别记账',
+  }),
+  private_whale: frozenCapitalContract({
+    minimumCents: 20 * YI_YUAN_IN_CENTS,
+    maximumCents: 1_000 * YI_YUAN_IN_CENTS,
+    defaultCents: 50 * YI_YUAN_IN_CENTS,
+    ownership: 'private',
+    fundingLabel: '玩家私人／家族实际受益所有资金',
+  }),
 });
 
 const PROFILE_TEMPLATES = Object.freeze({
   household: {
     label: '个人／家庭投资者',
     identity: '个人资产、负债、生活储备与证券账户。',
+    capitalContract: CAPITAL_CONTRACTS.household,
     low: {
       name: '稳步起家',
       capital: 160_000,
@@ -1189,6 +1887,7 @@ const PROFILE_TEMPLATES = Object.freeze({
   professional: {
     label: '职业投资者',
     identity: '受托账户，受授权、回撤与考核周期约束。',
+    capitalContract: CAPITAL_CONTRACTS.professional,
     low: {
       name: '小型资管研究员',
       capital: 720_000,
@@ -1213,6 +1912,7 @@ const PROFILE_TEMPLATES = Object.freeze({
   operator: {
     label: '企业经营者',
     identity: '企业现金、库存、产能、债务与证券账户联动。',
+    capitalContract: CAPITAL_CONTRACTS.operator,
     low: {
       name: '创业经营者',
       capital: 420_000,
@@ -1237,6 +1937,7 @@ const PROFILE_TEMPLATES = Object.freeze({
   institution: {
     label: '投资机构',
     identity: '自有资本与受托资产并行，受赎回和流动性约束。',
+    capitalContract: CAPITAL_CONTRACTS.institution,
     low: {
       name: '区域投资机构',
       capital: 3_200_000,
@@ -1258,7 +1959,429 @@ const PROFILE_TEMPLATES = Object.freeze({
       redemptionPressure: 0.08,
     },
   },
+  quant_institution: {
+    label: '量化交易投资机构',
+    identity: '研究、组合、执行、做市与风控分权运行，速度受容量和拥挤约束。',
+    capitalContract: CAPITAL_CONTRACTS.quant_institution,
+    low: {
+      name: '独立量化机构',
+      capital: 100_000_000,
+      otherAssets: 36_000_000,
+      liabilities: 18_000_000,
+      research: 22,
+      assetsUnderManagement: 500_000_000,
+      liquidityBufferRatio: 0.34,
+      redemptionPressure: 0.04,
+      technologyBudget: 18_000_000,
+      strategyCapacity: 0.42,
+    },
+    high: {
+      name: '多策略量化集团',
+      capital: 2_000_000_000,
+      otherAssets: 620_000_000,
+      liabilities: 380_000_000,
+      research: 28,
+      assetsUnderManagement: 10_000_000_000,
+      liquidityBufferRatio: 0.3,
+      redemptionPressure: 0.07,
+      technologyBudget: 480_000_000,
+      strategyCapacity: 0.72,
+    },
+  },
+  stabilization_fund: {
+    label: '稳定力量联合机制',
+    identity: '多个长期与公共资本主体在独立账簿和明确授权下协同行动。',
+    capitalContract: CAPITAL_CONTRACTS.stabilization_fund,
+    low: {
+      name: '常备稳定授权',
+      capital: 10_000_000_000,
+      otherAssets: 0,
+      liabilities: 0,
+      research: 24,
+      assetsUnderManagement: 20_000_000_000,
+      liquidityBufferRatio: 0.62,
+      redemptionPressure: 0,
+      mandateLegs: 6,
+    },
+    high: {
+      name: '系统稳定联合授权',
+      capital: 50_000_000_000,
+      otherAssets: 0,
+      liabilities: 0,
+      research: 28,
+      assetsUnderManagement: 100_000_000_000,
+      liquidityBufferRatio: 0.65,
+      redemptionPressure: 0,
+      mandateLegs: 6,
+    },
+  },
+  private_whale: {
+    label: '私人资本掌舵人',
+    identity: '私人／家族资本、控制权、披露、关联关系与退出约束共同运行。',
+    capitalContract: CAPITAL_CONTRACTS.private_whale,
+    low: {
+      name: '家族资本办公室',
+      capital: 2_000_000_000,
+      otherAssets: 1_600_000_000,
+      liabilities: 320_000_000,
+      research: 18,
+      cashReserve: 80_000_000,
+      monthlyIncome: 0,
+      livingExpense: 1_200_000,
+      beneficialOwnerExposure: 0.28,
+    },
+    high: {
+      name: '超大型私人资本掌舵人',
+      capital: 20_000_000_000,
+      otherAssets: 18_000_000_000,
+      liabilities: 4_000_000_000,
+      research: 22,
+      cashReserve: 500_000_000,
+      monthlyIncome: 0,
+      livingExpense: 4_800_000,
+      beneficialOwnerExposure: 0.62,
+    },
+  },
 });
+
+const CAPITAL_SCALE_BREAKS_CENTS = Object.freeze([
+  0,
+  100_000 * YUAN_IN_CENTS,
+  1_000_000 * YUAN_IN_CENTS,
+  10_000_000 * YUAN_IN_CENTS,
+  200_000_000 * YUAN_IN_CENTS,
+  2_000_000_000 * YUAN_IN_CENTS,
+  20_000_000_000 * YUAN_IN_CENTS,
+  100_000_000_000 * YUAN_IN_CENTS,
+]);
+
+const CAPITAL_SCALE_STEPS_CENTS = Object.freeze([
+  1_000 * YUAN_IN_CENTS,
+  10_000 * YUAN_IN_CENTS,
+  100_000 * YUAN_IN_CENTS,
+  1_000_000 * YUAN_IN_CENTS,
+  10_000_000 * YUAN_IN_CENTS,
+  100_000_000 * YUAN_IN_CENTS,
+  500_000_000 * YUAN_IN_CENTS,
+]);
+
+function capitalContractForRole(roleType) {
+  const contract = CAPITAL_CONTRACTS[roleType];
+  if (!contract) {
+    throw new RangeError(`Unknown capital role: ${roleType}`);
+  }
+  return contract;
+}
+
+function capitalScaleKnots(roleType) {
+  const contract = capitalContractForRole(roleType);
+  return [...new Set([
+    contract.minimumCents,
+    ...CAPITAL_SCALE_BREAKS_CENTS.filter(
+      (value) =>
+        value > contract.minimumCents &&
+        value < contract.maximumCents,
+    ),
+    contract.maximumCents,
+  ])].sort((left, right) => left - right);
+}
+
+function capitalScaleStepForUpperBound(upperCents) {
+  const index = CAPITAL_SCALE_BREAKS_CENTS.findIndex(
+    (boundary, boundaryIndex) =>
+      boundaryIndex > 0 && upperCents <= boundary,
+  );
+  return CAPITAL_SCALE_STEPS_CENTS[
+    index < 1
+      ? CAPITAL_SCALE_STEPS_CENTS.length - 1
+      : Math.min(index - 1, CAPITAL_SCALE_STEPS_CENTS.length - 1)
+  ];
+}
+
+function capitalKnotPositions(knots) {
+  return knots.map((_, index) =>
+    index === knots.length - 1
+      ? 1000
+      : Math.round(index * 1000 / (knots.length - 1)),
+  );
+}
+
+export function capitalCentsFromSliderPosition(
+  roleType,
+  requestedPosition,
+) {
+  const position = Math.round(Number(requestedPosition));
+  if (!Number.isFinite(position)) {
+    throw new RangeError('Capital slider position must be finite.');
+  }
+  const safePosition = clamp(position, 0, 1000);
+  const knots = capitalScaleKnots(roleType);
+  const positions = capitalKnotPositions(knots);
+  if (safePosition === 0) return knots[0];
+  if (safePosition === 1000) return knots.at(-1);
+  const segmentIndex = positions.findIndex(
+    (upperPosition) => upperPosition >= safePosition,
+  );
+  const lowerIndex = Math.max(0, segmentIndex - 1);
+  const upperIndex = Math.max(1, segmentIndex);
+  const lowerCents = knots[lowerIndex];
+  const upperCents = knots[upperIndex];
+  const lowerPosition = positions[lowerIndex];
+  const upperPosition = positions[upperIndex];
+  const numerator = BigInt(safePosition - lowerPosition);
+  const denominator = BigInt(upperPosition - lowerPosition);
+  const span = BigInt(upperCents - lowerCents);
+  const interpolated =
+    BigInt(lowerCents) + span * numerator / denominator;
+  const step = capitalScaleStepForUpperBound(upperCents);
+  const offset = Number(interpolated - BigInt(lowerCents));
+  const snapped =
+    lowerCents + Math.round(offset / step) * step;
+  return Math.min(upperCents, Math.max(lowerCents, snapped));
+}
+
+export function capitalSliderPositionFromCents(
+  roleType,
+  requestedCents,
+) {
+  const cents = Number(requestedCents);
+  const contract = capitalContractForRole(roleType);
+  if (
+    !Number.isSafeInteger(cents) ||
+    cents < contract.minimumCents ||
+    cents > contract.maximumCents
+  ) {
+    throw new RangeError('Capital amount is outside the role contract.');
+  }
+  if (cents === contract.minimumCents) return 0;
+  if (cents === contract.maximumCents) return 1000;
+  const knots = capitalScaleKnots(roleType);
+  const positions = capitalKnotPositions(knots);
+  const upperIndex = knots.findIndex(
+    (upperCents) => upperCents >= cents,
+  );
+  const lowerIndex = Math.max(0, upperIndex - 1);
+  const centsSpan = BigInt(knots[upperIndex] - knots[lowerIndex]);
+  const positionSpan = BigInt(
+    positions[upperIndex] - positions[lowerIndex],
+  );
+  const offset = BigInt(cents - knots[lowerIndex]);
+  const roundedOffset = Number(
+    (offset * positionSpan + centsSpan / 2n) / centsSpan,
+  );
+  return clamp(
+    positions[lowerIndex] + roundedOffset,
+    positions[lowerIndex],
+    positions[upperIndex],
+  );
+}
+
+function resolveStartingCapitalCents(
+  roleType,
+  config,
+  legacyProfile,
+) {
+  const contract = capitalContractForRole(roleType);
+  if (config.startingCapitalCents === undefined) {
+    return Math.round(legacyProfile.capital * YUAN_IN_CENTS);
+  }
+  const cents = Number(config.startingCapitalCents);
+  if (
+    !Number.isSafeInteger(cents) ||
+    cents < contract.minimumCents ||
+    cents > contract.maximumCents
+  ) {
+    throw new RangeError('Starting capital is outside the role capital contract.');
+  }
+  return cents;
+}
+
+const ISSUER_OWNERSHIP_CONTRACT_VERSION =
+  'lzy-issuer-ownership-v1';
+
+const STATE_CONTROLLED_COMPANY_IDS = Object.freeze(
+  new Set([
+    'company_anlan_grid',
+    'company_heyuan_bank',
+    'company_haifeng_new_energy',
+    'company_qianfeng_resources',
+    'company_yuangang_shipbuilding',
+    'company_guoheng_securities',
+    'company_hengqiao_asset_management',
+    'company_hailan_shipping',
+  ]),
+);
+
+const FOUNDER_CONTROLLED_COMPANY_IDS = Object.freeze(
+  new Set([
+    'company_frontier_semiconductor',
+    'company_horizon_software',
+    'company_qiming_robotics',
+    'company_tianyan_intelligence',
+    'company_qunxing_cloud',
+    'company_yuansheng_media',
+  ]),
+);
+
+function issuerControlProfile(template, index) {
+  if (STATE_CONTROLLED_COMPANY_IDS.has(template.id)) {
+    return {
+      registeredHolderName: `${template.shortName}国有资本控股`,
+      beneficialOwner: '历择公共资本委员会',
+      holderNature: 'state_owned_controller',
+      controlChain: [
+        '历择公共资本委员会',
+        `${template.shortName}国有资本控股`,
+        template.name,
+      ],
+      votesPerUnitBps: BPS_SCALE,
+      pledgeBps: 0,
+    };
+  }
+  if (FOUNDER_CONTROLLED_COMPANY_IDS.has(template.id)) {
+    const founder =
+      template.management?.chiefExecutive?.name ??
+      `${template.shortName}创始团队`;
+    const specialVoting =
+      template.id === 'company_tianyan_intelligence' ||
+      template.id === 'company_frontier_semiconductor';
+    return {
+      registeredHolderName: `${template.shortName}创始合伙企业`,
+      beneficialOwner: `${founder}与核心团队`,
+      holderNature: 'founder_controlled',
+      controlChain: [
+        `${founder}与核心团队`,
+        `${template.shortName}创始合伙企业`,
+        template.name,
+      ],
+      votesPerUnitBps: specialVoting ? 20_000 : BPS_SCALE,
+      pledgeBps: 700 + (index % 5) * 260,
+    };
+  }
+  return {
+    registeredHolderName: `${template.shortName}产业控股`,
+    beneficialOwner:
+      `${template.shortName}长期产业共同体`,
+    holderNature: 'industrial_controller',
+    controlChain: [
+      `${template.shortName}长期产业共同体`,
+      `${template.shortName}产业控股`,
+      template.name,
+    ],
+    votesPerUnitBps: BPS_SCALE,
+    pledgeBps: 350 + (index % 7) * 190,
+  };
+}
+
+function deriveIssuerOwnershipContract(
+  template,
+  {
+    outstandingUnits = template.sharesOutstanding,
+    floatUnits = Math.floor(
+      template.sharesOutstanding *
+        template.floatRatioBps /
+        BPS_SCALE,
+    ),
+  } = {},
+) {
+  const templateIndex = Math.max(
+    0,
+    COMPANY_TEMPLATES.findIndex(
+      (candidate) => candidate.id === template.id,
+    ),
+  );
+  const profile = issuerControlProfile(
+    template,
+    templateIndex,
+  );
+  const controllerUnits = Math.max(
+    0,
+    outstandingUnits - floatUnits,
+  );
+  const totalVotingWeight =
+    controllerUnits * profile.votesPerUnitBps +
+    floatUnits * BPS_SCALE;
+  const controllerId =
+    `holder_${template.symbol.toLowerCase()}_controller`;
+  const economicOwnershipBps =
+    outstandingUnits > 0
+      ? Math.round(
+          controllerUnits * BPS_SCALE /
+            outstandingUnits,
+        )
+      : 0;
+  const votingRightsBps =
+    totalVotingWeight > 0
+      ? Math.round(
+          controllerUnits *
+            profile.votesPerUnitBps *
+            BPS_SCALE /
+            totalVotingWeight,
+        )
+      : 0;
+  const pledgedUnits = Math.floor(
+    controllerUnits *
+      profile.pledgeBps /
+      BPS_SCALE,
+  );
+  return {
+    contractVersion: ISSUER_OWNERSHIP_CONTRACT_VERSION,
+    symbol: template.symbol,
+    issuerId: template.id,
+    issuedUnits: outstandingUnits,
+    registeredUnits: outstandingUnits,
+    floatUnits,
+    votingRightsBpsTotal: BPS_SCALE,
+    shareClasses: [
+      {
+        id: `${template.symbol}_CONTROLLER_A`,
+        label: '控股股东限售 A 股',
+        units: controllerUnits,
+        votesPerUnitBps: profile.votesPerUnitBps,
+        tradability: 'locked_controller',
+      },
+      {
+        id: `${template.symbol}_PUBLIC_A`,
+        label: '社会公众流通 A 股',
+        units: floatUnits,
+        votesPerUnitBps: BPS_SCALE,
+        tradability: 'public_float',
+      },
+    ],
+    controller: {
+      registeredHolderId: controllerId,
+      registeredHolderName:
+        profile.registeredHolderName,
+      beneficialOwner: profile.beneficialOwner,
+      holderNature: profile.holderNature,
+      controlChain: profile.controlChain,
+      economicUnits: controllerUnits,
+      economicOwnershipBps,
+      votesPerUnitBps: profile.votesPerUnitBps,
+      votingRightsBps,
+      pledgedUnits,
+      lockedUnits: controllerUnits,
+      locked: true,
+    },
+    publicFloat: {
+      economicUnits: floatUnits,
+      economicOwnershipBps:
+        BPS_SCALE - economicOwnershipBps,
+      votesPerUnitBps: BPS_SCALE,
+      locked: false,
+    },
+    relatedCompanyIds: [
+      ...(template.supplierCompanyIds ?? []),
+      ...(template.customerCompanyIds ?? []),
+      ...(template.financialCounterpartyCompanyIds ?? []),
+      ...(template.investmentExposureCompanyIds ?? []),
+    ].filter(
+      (companyId, position, values) =>
+        values.indexOf(companyId) === position,
+    ),
+    authority: 'issuer_register_and_live_custody_ledger',
+  };
+}
 
 const NPC_INVESTOR_TEMPLATES = Object.freeze([
   {
@@ -1286,23 +2409,102 @@ const NPC_INVESTOR_TEMPLATES = Object.freeze([
     tradingEnabled: true,
   },
   {
+    id: 'npc_quant_institution',
+    name: '千机量化交易机构',
+    strategy: 'cross_sectional_microstructure_ensemble',
+    cash: 30_000_000_000,
+    floatHoldingBps: 200,
+    tradingEnabled: true,
+    holderKind: 'active_investor',
+    holderNature: 'quantitative_investment_fund',
+    marketPriceWriteAuthority: 'none',
+    quantModel: {
+      contractVersion: 'lzy-quant-microstructure-ensemble-v1',
+      signals: [
+        'cross_sectional_residual_reversion',
+        'settled_tape_flow',
+        'queue_imbalance',
+        'inventory_and_fee_adjusted_exit',
+      ],
+      execution: 'finite_ioc_slices_through_realtime_book',
+      maxWorkingOrders: 6,
+      symbolsPerShard: 8,
+      fullUniverseSweepMaxMs: 4_800,
+      killSwitch: {
+        drawdownBps: 1_200,
+        fundingStressBps: 1_800,
+      },
+    },
+  },
+  {
+    id: 'npc_stabilization_fund',
+    name: '市场稳定力量联席组合',
+    strategy: 'systemic_stabilization',
+    cash: 100_000_000_000,
+    floatHoldingBps: 200,
+    tradingEnabled: true,
+    holderKind: 'public_mandate_investor',
+    holderNature: 'public_stabilization_composite',
+    beneficialOwner: '公共稳定授权分账联合体',
+    controlChain: [
+      '公共稳定授权',
+      '分账联席决策',
+      '市场稳定力量联席组合',
+    ],
+    constituents: [
+      '中央汇金',
+      '中国证金',
+      '证金资管',
+      '社保基金',
+      '中国国新',
+      '中国诚通',
+    ],
+    mandate: {
+      purpose: 'systemic_liquidity_and_market_function_stability',
+      activation: 'broad_market_stress_only',
+      execution: 'finite_orders_through_realtime_book',
+      guaranteedFloor: false,
+      marketPriceWriteAuthority: 'none',
+    },
+  },
+  {
     id: 'holder_public_custody',
     name: '社会公众托管汇总',
     strategy: 'passive_custody',
     cash: 0,
-    floatHoldingBps: 8_800,
+    floatHoldingBps: 8_600,
     tradingEnabled: false,
     holderKind: 'public_float',
   },
-  ...COMPANY_TEMPLATES.map((company) => ({
-    id: `holder_${company.symbol.toLowerCase()}_controller`,
-    name: `${company.shortName}产业控股`,
-    strategy: 'strategic_control',
-    cash: 0,
-    strategicIssuerId: company.id,
-    tradingEnabled: false,
-    holderKind: 'controlling_shareholder',
-  })),
+  ...COMPANY_TEMPLATES.map((company) => {
+    const ownership =
+      deriveIssuerOwnershipContract(company);
+    return {
+      id: ownership.controller.registeredHolderId,
+      name: ownership.controller.registeredHolderName,
+      strategy: 'strategic_control',
+      cash: 0,
+      strategicIssuerId: company.id,
+      tradingEnabled: false,
+      holderKind: 'controlling_shareholder',
+      beneficialOwner:
+        ownership.controller.beneficialOwner,
+      holderNature:
+        ownership.controller.holderNature,
+      controlChain:
+        ownership.controller.controlChain,
+      votesPerUnitBps:
+        ownership.controller.votesPerUnitBps,
+      pledgeBps:
+        ownership.controller.economicUnits > 0
+          ? Math.round(
+              ownership.controller.pledgedUnits *
+                BPS_SCALE /
+                ownership.controller.economicUnits,
+            )
+          : 0,
+    };
+  }),
 ]);
 
 function clone(value) {
@@ -1460,6 +2662,59 @@ function createRoleState(roleType, profile, openingCash) {
         redemptionPressure: profile.redemptionPressure,
         marketAttention: 0,
         concentration: 0,
+        mandateKind: 'investment_fiduciary',
+        technologyBudget: profile.technologyBudget ?? 0,
+        strategyCapacity: profile.strategyCapacity ?? null,
+        mandateLegs: profile.mandateLegs ?? null,
+      };
+    case 'quant_institution':
+      return {
+        assetsUnderManagement: profile.assetsUnderManagement,
+        productLiability: profile.assetsUnderManagement,
+        liquidityBufferRatio: profile.liquidityBufferRatio,
+        liquidityBaseCash: openingCash,
+        liquidityReserveFloor: money(
+          openingCash * profile.liquidityBufferRatio,
+        ),
+        redemptionPressure: profile.redemptionPressure,
+        marketAttention: 0,
+        concentration: 0,
+        mandateKind: 'quantitative_fiduciary',
+        technologyBudget: profile.technologyBudget ?? 0,
+        strategyCapacity: profile.strategyCapacity ?? null,
+        mandateLegs: null,
+        strategyLab: createQuantStrategyLab({
+          technologyBudget: profile.technologyBudget ?? 0,
+        }),
+      };
+    case 'stabilization_fund':
+      return {
+        assetsUnderManagement: profile.assetsUnderManagement,
+        productLiability: 0,
+        liquidityBufferRatio: profile.liquidityBufferRatio,
+        liquidityBaseCash: openingCash,
+        liquidityReserveFloor: money(
+          openingCash * profile.liquidityBufferRatio,
+        ),
+        redemptionPressure: 0,
+        marketAttention: 0,
+        concentration: 0,
+        mandateKind: 'public_market_stability',
+        technologyBudget: 0,
+        strategyCapacity: null,
+        mandateLegs: profile.mandateLegs ?? 6,
+        stabilityDesk: createStabilityDesk(),
+      };
+    case 'private_whale':
+      return {
+        cashReserve: profile.cashReserve,
+        monthlyIncome: profile.monthlyIncome,
+        livingExpense: profile.livingExpense,
+        familyLiquidity: 'stable',
+        beneficialOwnerExposure:
+          profile.beneficialOwnerExposure,
+        disclosureAttention: 0,
+        familyOfficeStatus: 'active',
       };
     default:
       throw new Error(`Unsupported role: ${roleType}`);
@@ -1552,6 +2807,10 @@ export function getLifeProjection(state) {
           : [],
     },
   };
+}
+
+export function getEntertainmentProjection(state, context = {}) {
+  return projectEntertainmentWorld(state, context);
 }
 
 function synchronizeSocialCareerProjection(state) {
@@ -1717,6 +2976,12 @@ function consumeSocialBusinessActions(state) {
 
 export function getSocialCareerProjection(state) {
   if (
+    state?.economy?.socialCareerPublic?.schemaVersion ===
+    'lzy-social-career-public-v1'
+  ) {
+    return clone(state.economy.socialCareerPublic);
+  }
+  if (
     state?.socialCareer?.schemaVersion ===
     socialCareerSchemaVersion()
   ) {
@@ -1724,42 +2989,146 @@ export function getSocialCareerProjection(state) {
       playerRoleType: state.player?.roleType,
     });
   }
-  if (
-    state?.economy?.socialCareerPublic?.schemaVersion ===
-    'lzy-social-career-public-v1'
-  ) {
-    return clone(state.economy.socialCareerPublic);
-  }
   return null;
 }
 
 function createNpcInvestors(securities) {
   return Object.fromEntries(
-    NPC_INVESTOR_TEMPLATES.map((template) => [
-      template.id,
-      {
+    NPC_INVESTOR_TEMPLATES.map((template) => {
+      const holdings = Object.fromEntries(
+        Object.keys(securities).map((symbol) => [
+          symbol,
+          investorTemplateHolding(
+            template,
+            securities[symbol],
+          ),
+        ]),
+      );
+      const lockedUnitsBySymbol = Object.fromEntries(
+        Object.keys(securities).map((symbol) => [
+          symbol,
+          template.strategicIssuerId ===
+            securities[symbol].issuerId
+            ? holdings[symbol]
+            : 0,
+        ]),
+      );
+      const pledgedUnitsBySymbol = Object.fromEntries(
+        Object.keys(securities).map((symbol) => [
+          symbol,
+          Math.floor(
+            lockedUnitsBySymbol[symbol] *
+              Number(template.pledgeBps ?? 0) /
+              BPS_SCALE,
+          ),
+        ]),
+      );
+      return [template.id, {
         id: template.id,
         name: template.name,
         strategy: template.strategy,
         cash: template.cash,
-        holdings: Object.fromEntries(
-          Object.keys(securities).map((symbol) => [
-            symbol,
-            investorTemplateHolding(
-              template,
-              securities[symbol],
-            ),
-          ]),
-        ),
+        holdings,
         tradingEnabled: template.tradingEnabled !== false,
         holderKind: template.holderKind ?? 'active_investor',
+        beneficialOwner:
+          template.beneficialOwner ?? template.name,
+        holderNature:
+          template.holderNature ??
+          (
+            template.holderKind === 'public_float'
+              ? 'public_custody'
+              : 'investment_fund'
+          ),
+        controlChain: clone(template.controlChain ?? [template.name]),
+        ...(template.constituents
+          ? { constituents: clone(template.constituents) }
+          : {}),
+        ...(template.mandate
+          ? { mandate: clone(template.mandate) }
+          : {}),
+        ...(template.quantModel
+          ? { quantModel: clone(template.quantModel) }
+          : {}),
+        ...(template.marketPriceWriteAuthority
+          ? {
+              marketPriceWriteAuthority:
+                template.marketPriceWriteAuthority,
+            }
+          : {}),
+        votesPerUnitBps:
+          template.votesPerUnitBps ?? BPS_SCALE,
+        lockedUnitsBySymbol,
+        pledgedUnitsBySymbol,
         memory: {
           lastTradeTick: null,
           visibleImpact: 0,
         },
-      },
-    ]),
+      }];
+    }),
   );
+}
+
+function hydrateInvestorOwnershipMetadata(state) {
+  for (const template of NPC_INVESTOR_TEMPLATES) {
+    const investor =
+      state.entities?.investors?.[template.id];
+    if (!investor) continue;
+    investor.name = template.name;
+    investor.holderKind =
+      template.holderKind ?? 'active_investor';
+    investor.beneficialOwner =
+      template.beneficialOwner ?? template.name;
+    investor.holderNature =
+      template.holderNature ??
+      (
+        template.holderKind === 'public_float'
+          ? 'public_custody'
+          : 'investment_fund'
+      );
+    investor.controlChain =
+      clone(template.controlChain ?? [template.name]);
+    if (template.constituents) {
+      investor.constituents =
+        clone(template.constituents);
+    }
+    if (template.mandate) {
+      investor.mandate = clone(template.mandate);
+    }
+    if (template.quantModel) {
+      investor.quantModel = clone(template.quantModel);
+    }
+    if (template.marketPriceWriteAuthority) {
+      investor.marketPriceWriteAuthority =
+        template.marketPriceWriteAuthority;
+    }
+    investor.votesPerUnitBps =
+      template.votesPerUnitBps ?? BPS_SCALE;
+    investor.lockedUnitsBySymbol ??= {};
+    investor.pledgedUnitsBySymbol ??= {};
+    for (const [symbol, security] of Object.entries(
+      state.market?.securities ?? {},
+    )) {
+      const quantity = Math.max(
+        0,
+        Math.trunc(
+          Number(investor.holdings?.[symbol]) || 0,
+        ),
+      );
+      const locked =
+        template.strategicIssuerId ===
+          security.issuerId
+          ? quantity
+          : 0;
+      investor.lockedUnitsBySymbol[symbol] = locked;
+      investor.pledgedUnitsBySymbol[symbol] =
+        Math.floor(
+          locked *
+            Number(template.pledgeBps ?? 0) /
+            BPS_SCALE,
+        );
+    }
+  }
 }
 
 function investorTemplateHolding(template, security) {
@@ -2248,12 +3617,17 @@ function createFinancialInstitutionCompany(template, index, financials) {
     shortName: template.shortName,
     role: template.role,
     description: template.description,
+    listingIdentity: clone(template.listingIdentity),
+    products: clone(template.products),
+    researchPrograms: clone(template.researchPrograms),
     industry: template.industry,
     lifecycle: template.lifecycle,
     sector: template.sector,
     size: template.size,
     balanceSheetModel: template.balanceSheetModel,
     businessModel: clone(template.businessModel),
+    ownershipContract:
+      deriveIssuerOwnershipContract(template),
     informationTransparencyBps:
       template.informationTransparencyBps,
     management: clone(template.management),
@@ -2294,7 +3668,9 @@ function createFinancialInstitutionCompany(template, index, financials) {
       baseDemand: null,
       productivity: 1,
       technology: 1,
-      marketShare: Number((0.31 + index * 0.025).toFixed(6)),
+      marketShare: Number(
+        (0.24 + (index % 11) * 0.021).toFixed(6),
+      ),
       pricingPower: 0,
       reinvestmentRate: 0,
       capacityPipeline: 0,
@@ -2310,6 +3686,7 @@ function createFinancialInstitutionCompany(template, index, financials) {
       lastSold: null,
       lastProfit: 0,
       utilization: null,
+      lastSettledTick: 0,
     },
     governance: {
       managementConfidence:
@@ -2375,12 +3752,17 @@ function createCompany(template, index) {
     shortName: template.shortName,
     role: template.role,
     description: template.description,
+    listingIdentity: clone(template.listingIdentity),
+    products: clone(template.products),
+    researchPrograms: clone(template.researchPrograms),
     industry: template.industry,
     lifecycle: template.lifecycle,
     sector: template.sector,
     size: template.size,
     balanceSheetModel: template.balanceSheetModel,
     businessModel: clone(template.businessModel),
+    ownershipContract:
+      deriveIssuerOwnershipContract(template),
     financialInstitution: template.financialInstitution
       ? clone(template.financialInstitution)
       : null,
@@ -2430,7 +3812,9 @@ function createCompany(template, index) {
       baseDemand: template.baseDemand,
       productivity: 1,
       technology: 1,
-      marketShare: Number((0.31 + index * 0.025).toFixed(6)),
+      marketShare: Number(
+        (0.24 + (index % 11) * 0.021).toFixed(6),
+      ),
       pricingPower: Number((0.02 + index * 0.006).toFixed(6)),
       reinvestmentRate: Number((0.09 + index * 0.012).toFixed(6)),
       capacityPipeline: 0,
@@ -2446,6 +3830,7 @@ function createCompany(template, index) {
       lastSold: 0,
       lastProfit: 0,
       utilization: 0.6,
+      lastSettledTick: 0,
     },
     governance: {
       managementConfidence:
@@ -2501,6 +3886,824 @@ function ensureDerivativeCommodityBalances(economy) {
   return economy.commodityBalances;
 }
 
+const BUSINESS_NETWORK_CONTRACT_VERSION =
+  'lzy-business-network-v1';
+const BUSINESS_NETWORK_MAX_LAG_DAYS = 3;
+const ADAPTIVE_WORLD_EVENTS_VERSION =
+  'lzy-adaptive-world-events-v1';
+const ADAPTIVE_PRICE_WINDOW_DAYS = 5;
+
+function businessNetworkEdge({
+  fromCompanyId,
+  toCompanyId,
+  relationship,
+  ordinal,
+}) {
+  const relationshipOffset = {
+    supplier: 0,
+    customer: 1,
+    credit: 2,
+    investment: 3,
+  }[relationship];
+  const edgeSeed =
+    hashString(
+      `${fromCompanyId}:${toCompanyId}:${relationship}:${ordinal}`,
+    ) >>> 0;
+  const channelByRelationship = {
+    supplier: [
+      'input_availability',
+      'unit_cost',
+    ],
+    customer: [
+      'end_demand',
+      'receivable_collection',
+    ],
+    credit: [
+      'funding_availability',
+      'funding_cost',
+    ],
+    investment: [
+      'investment_income',
+      'capital_buffer',
+    ],
+  };
+  return {
+    id: `business_edge_${hashString(
+      `${fromCompanyId}|${toCompanyId}|${relationship}`,
+    ).toString(16)}`,
+    fromCompanyId,
+    toCompanyId,
+    relationship,
+    transmissionChannels:
+      channelByRelationship[relationship],
+    weightBps:
+      2_200 + (edgeSeed % 3_601),
+    maxImpactBps:
+      700 + ((edgeSeed >>> 5) % 1_101),
+    lagDays:
+      relationshipOffset < 2
+        ? 1
+        : 2,
+    authority: 'settled_business_facts_only',
+  };
+}
+
+function createBusinessNetworkEdges() {
+  const edgeMap = new Map();
+  const addEdge = (config) => {
+    if (
+      !config.fromCompanyId ||
+      !config.toCompanyId ||
+      config.fromCompanyId === config.toCompanyId
+    ) {
+      return;
+    }
+    const key = `${config.relationship}:${config.fromCompanyId}:${config.toCompanyId}`;
+    if (!edgeMap.has(key)) {
+      edgeMap.set(
+        key,
+        businessNetworkEdge({
+          ...config,
+          ordinal: edgeMap.size,
+        }),
+      );
+    }
+  };
+  for (const company of COMPANY_TEMPLATES) {
+    for (const supplierId of new Set(
+      company.supplierCompanyIds ?? [],
+    )) {
+      addEdge({
+        fromCompanyId: supplierId,
+        toCompanyId: company.id,
+        relationship: 'supplier',
+      });
+    }
+    for (const customerId of new Set(
+      company.customerCompanyIds ?? [],
+    )) {
+      addEdge({
+        fromCompanyId: customerId,
+        toCompanyId: company.id,
+        relationship: 'customer',
+      });
+    }
+    for (const counterpartyId of new Set(
+      company.financialCounterpartyCompanyIds ?? [],
+    )) {
+      const companyIsFinancial = [
+        'commercial_bank',
+        'insurance_group',
+      ].includes(company.businessModel?.kind);
+      addEdge({
+        fromCompanyId: companyIsFinancial
+          ? company.id
+          : counterpartyId,
+        toCompanyId: companyIsFinancial
+          ? counterpartyId
+          : company.id,
+        relationship: 'credit',
+      });
+    }
+    for (const exposureId of new Set(
+      company.investmentExposureCompanyIds ?? [],
+    )) {
+      addEdge({
+        fromCompanyId: exposureId,
+        toCompanyId: company.id,
+        relationship: 'investment',
+      });
+    }
+  }
+  return [...edgeMap.values()].sort((left, right) =>
+    left.id.localeCompare(right.id),
+  );
+}
+
+function neutralBusinessNetworkSignal(companyId, tick = 0) {
+  return {
+    companyId,
+    asOfTick: tick,
+    authority: 'settled_business_facts_only',
+    demandBps: BPS_SCALE,
+    inputAvailabilityBps: BPS_SCALE,
+    unitCostBps: BPS_SCALE,
+    collectionBps: BPS_SCALE,
+    fundingAvailabilityBps: BPS_SCALE,
+    fundingCostBps: BPS_SCALE,
+    investmentIncomeBps: BPS_SCALE,
+    causes: [],
+  };
+}
+
+function createBusinessNetworkState() {
+  return {
+    contractVersion: BUSINESS_NETWORK_CONTRACT_VERSION,
+    authority: 'world_company_operating_ledger',
+    maxLagDays: BUSINESS_NETWORK_MAX_LAG_DAYS,
+    edges: createBusinessNetworkEdges(),
+    metricWindowByCompany: Object.fromEntries(
+      COMPANY_TEMPLATES.map((company) => [
+        company.id,
+        [],
+      ]),
+    ),
+    lastSignalsByCompany: Object.fromEntries(
+      COMPANY_TEMPLATES.map((company) => [
+        company.id,
+        neutralBusinessNetworkSignal(company.id),
+      ]),
+    ),
+    lastSettledTick: 0,
+  };
+}
+
+function canonicalCompanies(state) {
+  const companies = state.entities?.companies ?? {};
+  const ordered = [];
+  const seen = new Set();
+  for (const template of COMPANY_TEMPLATES) {
+    const company = companies[template.id];
+    if (!company) continue;
+    ordered.push(company);
+    seen.add(company.id);
+  }
+  for (const company of Object.values(companies)
+    .filter((candidate) => !seen.has(candidate.id))
+    .sort((left, right) => left.id.localeCompare(right.id))) {
+    ordered.push(company);
+  }
+  return ordered;
+}
+
+function companyNetworkMetric(company, tick) {
+  const operations = company.operations ?? {};
+  const baseDemand = Math.max(
+    1,
+    Number(operations.baseDemand) || 1,
+  );
+  const plannedProduction = Math.max(
+    1,
+    Number(operations.plannedProduction) || 1,
+  );
+  const produced = Math.max(
+    0,
+    Number(operations.lastProduced) || 0,
+  );
+  const sold = Math.max(
+    0,
+    Number(operations.lastSold) || 0,
+  );
+  const defaultPenaltyBps = {
+    current: 0,
+    watch: 900,
+    distressed: 2_100,
+    defaulted: 4_000,
+    delinquent: 2_100,
+    default: 4_000,
+  }[company.funding?.defaultStatus] ?? 2_600;
+  const unpaidRatioBps = Math.round(
+    clamp(
+      Number(company.funding?.unpaidObligations ?? 0) /
+        Math.max(1, Number(company.funding?.debtCeiling ?? 1)),
+      0,
+      0.2,
+    ) * BPS_SCALE,
+  );
+  const hasOperatingSettlement =
+    Number(operations.lastSettledTick ?? 0) > 0 ||
+    produced > 0 ||
+    sold > 0;
+  const deliveryReliabilityBps = clamp(
+    BPS_SCALE -
+      defaultPenaltyBps -
+      Math.round(unpaidRatioBps * 0.8) -
+      (
+        hasOperatingSettlement
+          ? Math.round(
+              Math.max(
+                0,
+                1 - produced / plannedProduction,
+              ) * 2_000,
+            )
+          : 0
+      ),
+    3_000,
+    11_000,
+  );
+  const demandHealthBps = clamp(
+    BPS_SCALE +
+      (
+        hasOperatingSettlement
+          ? Math.round(
+              clamp(
+                sold / baseDemand - 1,
+                -0.45,
+                0.45,
+              ) * 3_000,
+            )
+          : 0
+      ) -
+      Math.round(defaultPenaltyBps * 0.45),
+    6_500,
+    13_000,
+  );
+  const balanceCapacity = Math.max(
+    1,
+    Math.abs(Number(company.equity) || 0) +
+      Math.abs(Number(company.debt) || 0),
+  );
+  const profitBps = Math.round(
+    clamp(
+      Number(operations.lastProfit ?? 0) /
+        balanceCapacity,
+      -0.2,
+      0.2,
+    ) * BPS_SCALE,
+  );
+  return {
+    companyId: company.id,
+    tick,
+    deliveryReliabilityBps,
+    demandHealthBps,
+    creditHealthBps: clamp(
+      BPS_SCALE -
+        defaultPenaltyBps -
+        Math.round(unpaidRatioBps * 0.6) +
+        Math.round(profitBps * 0.25),
+      4_000,
+      12_000,
+    ),
+    investmentPerformanceBps: clamp(
+      BPS_SCALE + Math.round(profitBps * 1.6),
+      6_000,
+      14_000,
+    ),
+    sourceFactId:
+      company.publishedFinancialSnapshot?.sourceFactId ?? null,
+  };
+}
+
+function boundedEdgeImpact(edge, sourceBps) {
+  return clamp(
+    Math.round(
+      (sourceBps - BPS_SCALE) *
+        edge.weightBps /
+        BPS_SCALE,
+    ),
+    -edge.maxImpactBps,
+    edge.maxImpactBps,
+  );
+}
+
+function prepareBusinessNetworkSignals(state) {
+  state.economy.businessNetwork ??=
+    createBusinessNetworkState();
+  const network = state.economy.businessNetwork;
+  const companies = canonicalCompanies(state);
+  for (const company of companies) {
+    const window =
+      network.metricWindowByCompany[company.id] ?? [];
+    window.push(
+      companyNetworkMetric(company, state.world.tick),
+    );
+    if (window.length > BUSINESS_NETWORK_MAX_LAG_DAYS) {
+      window.splice(
+        0,
+        window.length - BUSINESS_NETWORK_MAX_LAG_DAYS,
+      );
+    }
+    network.metricWindowByCompany[company.id] = window;
+  }
+
+  const incomingByCompany = new Map();
+  for (const edge of network.edges) {
+    const incoming =
+      incomingByCompany.get(edge.toCompanyId) ?? [];
+    incoming.push(edge);
+    incomingByCompany.set(edge.toCompanyId, incoming);
+  }
+  const signals = {};
+  for (const company of companies) {
+    const signal = neutralBusinessNetworkSignal(
+      company.id,
+      state.world.tick,
+    );
+    for (const edge of incomingByCompany.get(company.id) ?? []) {
+      const window =
+        network.metricWindowByCompany[edge.fromCompanyId] ?? [];
+      const source =
+        window[Math.max(0, window.length - edge.lagDays)] ??
+        window[0];
+      if (!source) continue;
+      let sourceMetric;
+      let impact;
+      if (edge.relationship === 'supplier') {
+        sourceMetric = 'delivery_reliability';
+        impact = boundedEdgeImpact(
+          edge,
+          source.deliveryReliabilityBps,
+        );
+        signal.inputAvailabilityBps += impact;
+        signal.unitCostBps -= Math.round(impact * 0.65);
+      } else if (edge.relationship === 'customer') {
+        sourceMetric = 'customer_demand_health';
+        impact = boundedEdgeImpact(
+          edge,
+          source.demandHealthBps,
+        );
+        signal.demandBps += impact;
+        signal.collectionBps += Math.round(impact * 0.7);
+      } else if (edge.relationship === 'credit') {
+        sourceMetric = 'credit_capacity';
+        impact = boundedEdgeImpact(
+          edge,
+          source.creditHealthBps,
+        );
+        signal.fundingAvailabilityBps += impact;
+        signal.fundingCostBps -= Math.round(impact * 0.55);
+      } else {
+        sourceMetric = 'investee_operating_performance';
+        impact = boundedEdgeImpact(
+          edge,
+          source.investmentPerformanceBps,
+        );
+        signal.investmentIncomeBps += impact;
+      }
+      if (impact !== 0) {
+        signal.causes.push({
+          edgeId: edge.id,
+          counterpartyCompanyId: edge.fromCompanyId,
+          relationship: edge.relationship,
+          sourceMetric,
+          sourceValueBps:
+            source[
+              {
+                supplier: 'deliveryReliabilityBps',
+                customer: 'demandHealthBps',
+                credit: 'creditHealthBps',
+                investment: 'investmentPerformanceBps',
+              }[edge.relationship]
+            ],
+          impactBps: impact,
+          lagDays: edge.lagDays,
+          sourceFactId: source.sourceFactId,
+        });
+      }
+    }
+    signal.demandBps = clamp(signal.demandBps, 7_000, 13_000);
+    signal.inputAvailabilityBps = clamp(
+      signal.inputAvailabilityBps,
+      7_000,
+      11_500,
+    );
+    signal.unitCostBps = clamp(signal.unitCostBps, 8_500, 13_000);
+    signal.collectionBps = clamp(signal.collectionBps, 7_000, 12_500);
+    signal.fundingAvailabilityBps = clamp(
+      signal.fundingAvailabilityBps,
+      6_500,
+      12_000,
+    );
+    signal.fundingCostBps = clamp(
+      signal.fundingCostBps,
+      8_000,
+      14_000,
+    );
+    signal.investmentIncomeBps = clamp(
+      signal.investmentIncomeBps,
+      7_000,
+      13_000,
+    );
+    signals[company.id] = signal;
+  }
+  network.lastSignalsByCompany = signals;
+  network.lastSettledTick = state.world.tick;
+  return signals;
+}
+
+function normalizeBusinessNetworkState(state) {
+  const canonical = createBusinessNetworkState();
+  const current = state.economy?.businessNetwork;
+  if (
+    !current ||
+    current.contractVersion !== BUSINESS_NETWORK_CONTRACT_VERSION
+  ) {
+    state.economy.businessNetwork = canonical;
+    return true;
+  }
+  current.authority = canonical.authority;
+  current.maxLagDays = BUSINESS_NETWORK_MAX_LAG_DAYS;
+  current.edges = canonical.edges;
+  current.metricWindowByCompany ??= {};
+  current.lastSignalsByCompany ??= {};
+  for (const company of COMPANY_TEMPLATES) {
+    current.metricWindowByCompany[company.id] ??= [];
+    current.metricWindowByCompany[company.id] =
+      current.metricWindowByCompany[company.id]
+        .slice(-BUSINESS_NETWORK_MAX_LAG_DAYS);
+    current.lastSignalsByCompany[company.id] ??=
+      neutralBusinessNetworkSignal(
+        company.id,
+        state.world?.tick ?? 0,
+      );
+  }
+  current.lastSettledTick = Math.min(
+    Number.isSafeInteger(current.lastSettledTick)
+      ? current.lastSettledTick
+      : 0,
+    state.world?.tick ?? 0,
+  );
+  return false;
+}
+
+function adaptiveWorldEventTracker(template) {
+  const openingTicks = Math.max(
+    1,
+    Math.round(template.openingPrice * 100),
+  );
+  return {
+    companyId: template.id,
+    symbol: template.symbol,
+    priceWindowTicks: [openingTicks],
+    referenceWindowTicks: [openingTicks],
+    lastTriggerTickByKind: {},
+    lastProductivity:
+      null,
+    latestNoticeFactId: null,
+  };
+}
+
+function createAdaptiveWorldEventsState() {
+  return {
+    contractVersion: ADAPTIVE_WORLD_EVENTS_VERSION,
+    authority: 'settled_fact_trigger_engine',
+    priceWindowDays: ADAPTIVE_PRICE_WINDOW_DAYS,
+    trackersByCompany: Object.fromEntries(
+      COMPANY_TEMPLATES.map((template) => [
+        template.id,
+        adaptiveWorldEventTracker(template),
+      ]),
+    ),
+    latestByCompany: {},
+    lastSettledTick: 0,
+  };
+}
+
+function normalizeAdaptiveWorldEventsState(state) {
+  const canonical = createAdaptiveWorldEventsState();
+  const current = state.economy?.adaptiveWorldEvents;
+  if (
+    !current ||
+    current.contractVersion !==
+      ADAPTIVE_WORLD_EVENTS_VERSION
+  ) {
+    state.economy.adaptiveWorldEvents = canonical;
+    return true;
+  }
+  current.authority = canonical.authority;
+  current.priceWindowDays =
+    ADAPTIVE_PRICE_WINDOW_DAYS;
+  current.trackersByCompany ??= {};
+  current.latestByCompany ??= {};
+  for (const template of COMPANY_TEMPLATES) {
+    const tracker =
+      current.trackersByCompany[template.id] ??
+      adaptiveWorldEventTracker(template);
+    tracker.companyId = template.id;
+    tracker.symbol = template.symbol;
+    tracker.priceWindowTicks = Array.isArray(
+      tracker.priceWindowTicks,
+    )
+      ? tracker.priceWindowTicks
+          .filter(
+            (value) =>
+              Number.isSafeInteger(value) && value > 0,
+          )
+          .slice(-ADAPTIVE_PRICE_WINDOW_DAYS)
+      : [];
+    tracker.referenceWindowTicks = Array.isArray(
+      tracker.referenceWindowTicks,
+    )
+      ? tracker.referenceWindowTicks
+          .filter(
+            (value) =>
+              Number.isSafeInteger(value) && value > 0,
+          )
+          .slice(-ADAPTIVE_PRICE_WINDOW_DAYS)
+      : [];
+    if (tracker.priceWindowTicks.length === 0) {
+      tracker.priceWindowTicks.push(
+        Math.round(template.openingPrice * 100),
+      );
+    }
+    if (tracker.referenceWindowTicks.length === 0) {
+      tracker.referenceWindowTicks.push(
+        Math.round(template.openingPrice * 100),
+      );
+    }
+    tracker.lastTriggerTickByKind ??= {};
+    tracker.latestNoticeFactId ??= null;
+    current.trackersByCompany[template.id] = tracker;
+  }
+  current.lastSettledTick = Math.min(
+    Number.isSafeInteger(current.lastSettledTick)
+      ? current.lastSettledTick
+      : 0,
+    state.world?.tick ?? 0,
+  );
+  return false;
+}
+
+function adaptiveTriggerAvailable(
+  tracker,
+  kind,
+  tick,
+  cooldownDays,
+) {
+  const lastTick =
+    tracker.lastTriggerTickByKind[kind];
+  return (
+    !Number.isSafeInteger(lastTick) ||
+    tick - lastTick >= cooldownDays
+  );
+}
+
+function addAdaptiveCompanyNotice(
+  state,
+  company,
+  tracker,
+  {
+    kind,
+    factType,
+    eventType,
+    summary,
+    value,
+    cooldownDays,
+    parentEventId,
+  },
+) {
+  if (
+    !adaptiveTriggerAvailable(
+      tracker,
+      kind,
+      state.world.tick,
+      cooldownDays,
+    )
+  ) {
+    return null;
+  }
+  const event = addEvent(state, {
+    type: eventType,
+    actorId: company.id,
+    authority: 'adaptive_settled_fact_trigger_v1',
+    affectedEntities: [company.id, company.symbol],
+    parentIds: [parentEventId].filter(Boolean),
+    summary,
+  });
+  const fact = addFact(state, {
+    type: factType,
+    entityId: company.id,
+    eventId: event.id,
+    summary,
+    value: {
+      ...value,
+      symbol: company.symbol,
+      triggerKind: kind,
+      priceWasWrittenByAnnouncement: false,
+    },
+  });
+  state.narratives.push({
+    id: nextId(state, 'narrative'),
+    factId: fact.id,
+    tick: state.world.tick,
+    authority: 'fact_explanation_only',
+    perspective: 'public_record_summary',
+    text: summary,
+  });
+  tracker.lastTriggerTickByKind[kind] =
+    state.world.tick;
+  tracker.latestNoticeFactId = fact.id;
+  state.economy.adaptiveWorldEvents
+    .latestByCompany[company.id] = {
+      factId: fact.id,
+      eventId: event.id,
+      kind,
+      tick: state.world.tick,
+    };
+  return { event, fact };
+}
+
+function signedWindowMoveBps(values) {
+  const first = values[0];
+  const last = values.at(-1);
+  if (
+    !Number.isSafeInteger(first) ||
+    first <= 0 ||
+    !Number.isSafeInteger(last) ||
+    last <= 0
+  ) {
+    return 0;
+  }
+  return Math.round(
+    (last - first) * BPS_SCALE / first,
+  );
+}
+
+function settleAdaptiveWorldEvents(
+  state,
+  companyReceipts,
+) {
+  normalizeAdaptiveWorldEventsState(state);
+  const adaptive =
+    state.economy.adaptiveWorldEvents;
+  const receiptByCompany = new Map(
+    companyReceipts.map((receipt) => [
+      receipt.fact.entityId,
+      receipt,
+    ]),
+  );
+  const settled = [];
+  for (const company of canonicalCompanies(state)) {
+    const security =
+      state.market.securities[company.symbol];
+    const tracker =
+      adaptive.trackersByCompany[company.id];
+    const lastPriceTicks = Math.max(
+      1,
+      Math.round(Number(security.lastPrice) * 100),
+    );
+    const referenceTicks = Math.max(
+      1,
+      Math.round(
+        Number(security.referenceValue) * 100,
+      ),
+    );
+    tracker.priceWindowTicks.push(lastPriceTicks);
+    tracker.referenceWindowTicks.push(referenceTicks);
+    if (
+      tracker.priceWindowTicks.length >
+      ADAPTIVE_PRICE_WINDOW_DAYS
+    ) {
+      tracker.priceWindowTicks.shift();
+    }
+    if (
+      tracker.referenceWindowTicks.length >
+      ADAPTIVE_PRICE_WINDOW_DAYS
+    ) {
+      tracker.referenceWindowTicks.shift();
+    }
+    const priceMoveBps = signedWindowMoveBps(
+      tracker.priceWindowTicks,
+    );
+    const fundamentalMoveBps = signedWindowMoveBps(
+      tracker.referenceWindowTicks,
+    );
+    const dislocationBps = Math.round(
+      (lastPriceTicks - referenceTicks) *
+        BPS_SCALE /
+        referenceTicks,
+    );
+    const informationOpacityBps =
+      BPS_SCALE -
+      Number(company.informationTransparencyBps);
+    const abnormalThresholdBps = Math.round(
+      1_350 + informationOpacityBps * 0.08,
+    );
+    const receipt = receiptByCompany.get(company.id);
+    let notice = null;
+    if (
+      Math.abs(dislocationBps) >=
+        abnormalThresholdBps &&
+      Math.abs(priceMoveBps - fundamentalMoveBps) >=
+        abnormalThresholdBps
+    ) {
+      const direction =
+        dislocationBps > 0 ? '上涨' : '下跌';
+      notice = addAdaptiveCompanyNotice(
+        state,
+        company,
+        tracker,
+        {
+          kind: 'price_fundamental_dislocation',
+          factType:
+            'company_abnormal_trading_announcement',
+          eventType:
+            'company_abnormal_trading_announcement_settled',
+          summary:
+            `${company.name}披露异常交易核查：近期价格显著${direction}，当前经营结算与公开事实未形成同幅变化；公告不改写成交价格。`,
+          value: {
+            lastPriceTicks,
+            referenceTicks,
+            priceMoveBps,
+            fundamentalMoveBps,
+            dislocationBps,
+            reviewConclusion:
+              'no_matching_settled_fundamental_change',
+          },
+          cooldownDays: 5,
+          parentEventId: receipt?.event.id,
+        },
+      );
+    }
+    const networkSignal =
+      state.economy.businessNetwork
+        .lastSignalsByCompany[company.id];
+    if (
+      !notice &&
+      networkSignal.inputAvailabilityBps < 9_500
+    ) {
+      const counterparties = networkSignal.causes
+        .filter(
+          (cause) =>
+            cause.relationship === 'supplier' &&
+            cause.impactBps < 0,
+        )
+        .map((cause) => {
+          const counterparty =
+            state.entities.companies[
+              cause.counterpartyCompanyId
+            ];
+          return {
+            companyId: cause.counterpartyCompanyId,
+            companyName:
+              counterparty?.shortName ??
+              counterparty?.name ??
+              '未披露供应方',
+            impactBps: cause.impactBps,
+            sourceFactId: cause.sourceFactId,
+          };
+        });
+      notice = addAdaptiveCompanyNotice(
+        state,
+        company,
+        tracker,
+        {
+          kind: 'supply_chain_impairment',
+          factType: 'company_supply_chain_notice',
+          eventType:
+            'company_supply_chain_notice_settled',
+          summary:
+            `${company.name}披露供应链经营提示：已结算的交付与信用事实降低了投入可得性，公司正在调整排产。`,
+          value: {
+            inputAvailabilityBps:
+              networkSignal.inputAvailabilityBps,
+            unitCostBps:
+              networkSignal.unitCostBps,
+            counterparties,
+          },
+          cooldownDays: 4,
+          parentEventId: receipt?.event.id,
+        },
+      );
+    }
+    if (notice) settled.push(notice);
+    tracker.lastProductivity =
+      Number(company.operations.productivity) || null;
+  }
+  adaptive.lastSettledTick = state.world.tick;
+  return settled;
+}
+
 function createEconomyState() {
   return {
     currency: 'LZY-CNY',
@@ -2515,6 +4718,9 @@ function createEconomyState() {
     creditSpreadBps: 260,
     structuralGrowthBps: 360,
     regime: 'balanced_expansion',
+    businessNetwork: createBusinessNetworkState(),
+    adaptiveWorldEvents:
+      createAdaptiveWorldEventsState(),
     commodityBalances:
       createDerivativeCommodityBalances(),
   };
@@ -2563,6 +4769,14 @@ function createPublishedFinancialValue(
     productivity: company.operations.productivity,
     technology: company.operations.technology,
     marketShare: company.operations.marketShare,
+    businessNetworkSignal: clone(
+      economy.businessNetwork
+        ?.lastSignalsByCompany?.[company.id] ??
+        neutralBusinessNetworkSignal(
+          company.id,
+          economy.businessNetwork?.lastSettledTick ?? 0,
+        ),
+    ),
     expectedGrowthBps:
       company.operations.structuralExpectedGrowthBps,
     developmentIndex: economy.developmentIndex,
@@ -2689,6 +4903,20 @@ function createListedSecurity(template) {
     symbol: template.symbol,
     issuerId: template.id,
     name: template.name,
+    exchange: template.exchange,
+    listingBoard: template.listingBoard,
+    displayCode: template.displayCode,
+    riskDesignation: template.riskDesignation,
+    listingStatus: template.listingStatus,
+    listingIdentity: clone(template.listingIdentity),
+    listingIdentityHistory: [
+      {
+        ...clone(template.listingIdentity),
+        effectiveDay: 1,
+        effectiveEventId: 'event_genesis',
+        supersededDay: null,
+      },
+    ],
     board: template.board,
     dailyLimitBps: template.dailyLimitBps,
     previousCloseTicks: Math.round(
@@ -2920,6 +5148,26 @@ function addJournal(state, journal) {
   return completed;
 }
 
+function initialSecurityLendingInventory(security) {
+  return Math.max(
+    10_000,
+    Math.floor(
+      Number(
+        security.floatUnits ??
+          security.outstandingUnits,
+      ) / 1_000,
+    ),
+  );
+}
+
+// Genesis allocations may move billions of yuan into the player portfolio,
+// but they cannot consume the finite inventory that forms the first real
+// continuous-auction asks.  This reserve is ownership, not synthetic depth:
+// the two maker accounts still place, cancel and settle every share through
+// the authoritative order book.
+const INITIAL_CONTINUOUS_MARKET_INVENTORY_UNITS =
+  20_000;
+
 function initializeHoldings(state, equityBudget) {
   const holdings = {};
   const establishedSymbols = new Set(
@@ -2941,8 +5189,31 @@ function initializeHoldings(state, equityBudget) {
           1,
           COMPANY_TEMPLATES.length - establishedSymbols.size,
         );
-    const units = Math.floor(
+    const requestedUnits = Math.floor(
       symbolBudget / template.openingPrice,
+    );
+    const ringFencedLendingUnits =
+      initialSecurityLendingInventory(
+        state.market.securities[template.symbol],
+      );
+    const allocatableMakerUnits = Math.max(
+      0,
+      Math.floor(
+        Number(
+          state.market.maker.holdings[
+            template.symbol
+          ],
+        ) || 0,
+      ) -
+        ringFencedLendingUnits -
+        INITIAL_CONTINUOUS_MARKET_INVENTORY_UNITS,
+    );
+    const units = Math.min(
+      Math.max(
+        0,
+        allocatableMakerUnits,
+      ),
+      Math.max(0, requestedUnits),
     );
     holdings[template.symbol] = units;
     state.market.maker.holdings[template.symbol] -= units;
@@ -3272,6 +5543,23 @@ export function applyCanonicalSecurityCorporateAction(
   next.accounting.currentSecurityUnits[
     symbol
   ] = adjustedCurrentUnits;
+  const issuerTemplate = COMPANY_TEMPLATES.find(
+    (template) => template.symbol === symbol,
+  );
+  const issuerCompany =
+    next.entities.companies[security.issuerId];
+  if (issuerTemplate && issuerCompany) {
+    issuerCompany.ownershipContract =
+      deriveIssuerOwnershipContract(
+        issuerTemplate,
+        {
+          outstandingUnits:
+            security.outstandingUnits,
+          floatUnits: security.floatUnits,
+        },
+      );
+  }
+  hydrateInvestorOwnershipMetadata(next);
 
   const securityTransfers =
     holderAdjustments
@@ -3455,7 +5743,7 @@ function bindResearchReportSnapshots(
 }
 
 function createMarketDataEntitlements(roleType) {
-  const startsActive = roleType === 'institution';
+  const startsActive = isInstitutionalRole(roleType);
   return {
     [LEVEL2_DEPTH_PRODUCT_ID]: {
       status: startsActive ? 'active' : 'locked',
@@ -4741,14 +7029,8 @@ function createEmbeddedDerivatives(state) {
       Object.entries(state.market.securities).map(
         ([symbol, security]) => [
           symbol,
-          Math.max(
-            10_000,
-            Math.floor(
-              Number(
-                security.floatUnits ??
-                  security.outstandingUnits,
-              ) / 1_000,
-            ),
+          initialSecurityLendingInventory(
+            security,
           ),
         ],
       ),
@@ -4786,6 +7068,7 @@ function embeddedDerivativesWorldCommand(
     atMs = derivativeAuthorityTimeMs(state),
     source = 'world_settlement',
     testingAccessOpen = false,
+    playerExternalReservedCashCents = null,
   } = {},
 ) {
   const playerFacilityCollateralAuthority =
@@ -4823,7 +7106,11 @@ function embeddedDerivativesWorldCommand(
       Math.round(Number(state.player.cash) * 100),
     ),
     playerExternalReservedCashCents:
-      playerStockReservedCashCents(state),
+      Number.isSafeInteger(
+        playerExternalReservedCashCents,
+      ) && playerExternalReservedCashCents >= 0
+        ? playerExternalReservedCashCents
+        : playerStockReservedCashCents(state),
     playerExternalCollateralCents:
       derivativeExternalCollateralCents(state),
     playerFacilityEligibleCollateralCents:
@@ -4991,6 +7278,67 @@ export function synchronizeEmbeddedDerivatives(state) {
   });
 }
 
+/**
+ * Synchronizes only the stock cash reserved by a non-executing stock order.
+ * Stock marks, collateral and derivative risk continue to advance through the
+ * scheduled derivative cadence. If the shared player cash authority itself
+ * changed, this narrow path fails over to the complete world synchronization.
+ */
+export function synchronizeEmbeddedDerivativeReservations(
+  state,
+) {
+  const current =
+    ensureCanonicalEmbeddedDerivatives(state);
+  const playerCashCents = Math.max(
+    0,
+    Math.round(Number(state.player.cash) * 100),
+  );
+  const playerExternalReservedCashCents =
+    playerStockReservedCashCents(state);
+  if (
+    current.accounts.player.cashCents !==
+      playerCashCents ||
+    !Number.isSafeInteger(
+      current.access.lastTotalEquivalentAssetCents,
+    )
+  ) {
+    return synchronizeEmbeddedDerivatives(state);
+  }
+  if (
+    (
+      current.accounts.player
+        .externalReservedCashCents ?? 0
+    ) === playerExternalReservedCashCents
+  ) {
+    return {
+      status: 'unchanged',
+      atMs: current.nowMs,
+    };
+  }
+  const result = reduceDerivatives(current, {
+    type: 'SYNC_WORLD',
+    atMs: current.nowMs,
+    totalEquivalentAssetCents:
+      current.access.lastTotalEquivalentAssetCents,
+    playerCashCents:
+      current.accounts.player.cashCents,
+    playerExternalReservedCashCents,
+    playerExternalCollateralCents:
+      current.accounts.player.externalCollateralCents,
+    playerFacilityEligibleCollateralCents:
+      current.accounts.player
+        .facilityEligibleCollateralCents,
+    source: 'stock_order_reservation',
+  });
+  if (result.receipt.status !== 'applied') {
+    throw new Error(
+      `Derivative reservation synchronization failed: ${result.receipt.reason}`,
+    );
+  }
+  state.derivatives = result.state;
+  return result.receipt;
+}
+
 function reconcileDerivativePlayerAccount(
   state,
   beforeAccount,
@@ -5099,7 +7447,10 @@ function recordDerivativeCashSettlement(
 
 export function advanceEmbeddedDerivativesMarket(
   state,
-  { atMs } = {},
+  {
+    atMs,
+    playerExternalReservedCashCents = null,
+  } = {},
 ) {
   if (!state?.world || !state?.market) {
     throw new TypeError(
@@ -5128,6 +7479,7 @@ export function advanceEmbeddedDerivativesMarket(
       type: 'ADVANCE_MARKET_CADENCE',
       atMs,
       source: 'realtime_quote_frame',
+      playerExternalReservedCashCents,
     }),
   );
   if (result.receipt.status !== 'applied') {
@@ -5755,8 +8107,20 @@ export function createWorld(config = {}) {
     : 'low';
   const seed = String(config.seed || 'LZY-DEFAULT-WORLD').trim() || 'LZY-DEFAULT-WORLD';
   const profile = PROFILE_TEMPLATES[roleType][strengthTier];
+  const startingCapitalCents =
+    resolveStartingCapitalCents(
+      roleType,
+      config,
+      profile,
+    );
+  const capitalContract =
+    capitalContractForRole(roleType);
   const allocation = normalizeAllocation(config.allocation);
-  const openingPlayerCash = money(profile.capital * allocation.cash);
+  const openingPlayerCash = money(
+    startingCapitalCents /
+      YUAN_IN_CENTS *
+      allocation.cash,
+  );
 
   const companies = Object.fromEntries(
     COMPANY_TEMPLATES.map((template, index) => [
@@ -5816,7 +8180,7 @@ export function createWorld(config = {}) {
 
   const state = {
     world: {
-      id: `world_${hashString(`${seed}:${roleType}:${strengthTier}`).toString(16)}`,
+      id: `world_${hashString(`${seed}:${roleType}:${strengthTier}:${startingCapitalCents}`).toString(16)}`,
       name: `历择衍 · ${seed.slice(0, 18)}`,
       seed,
       tick: 0,
@@ -5836,14 +8200,47 @@ export function createWorld(config = {}) {
           ? 'testing_open'
           : 'standard',
     },
+    spatial: createWorldSpatialState(),
+    entertainment: createEntertainmentWorldState(),
+    openWorldCityAuthority:
+      createOpenWorldCityAuthorityState(),
     player: {
       id: 'player',
-      profileId: `${roleType}_${strengthTier}`,
+      profileId:
+        config.startingCapitalCents === undefined
+          ? `${roleType}_${strengthTier}`
+          : `${roleType}_capital_${startingCapitalCents}`,
       roleType,
       roleLabel: PROFILE_TEMPLATES[roleType].label,
       profileName: profile.name,
       identity: PROFILE_TEMPLATES[roleType].identity,
       strengthTier,
+      legacyStrengthTier: strengthTier,
+      capitalProfile: {
+        schemaVersion: CAPITAL_PROFILE_VERSION,
+        controlledCapitalCents:
+          startingCapitalCents,
+        exactInputCents: startingCapitalCents,
+        ownership: capitalContract.ownership,
+        fundingLabel: capitalContract.fundingLabel,
+        source:
+          String(config.capitalSource ?? '')
+            .trim()
+            .slice(0, 80) ||
+          (roleType === 'private_whale'
+            ? 'family_office_genesis'
+            : roleType === 'stabilization_fund'
+              ? 'public_mandate_genesis'
+              : 'role_contract_genesis'),
+        sliderApproximationCents:
+          capitalCentsFromSliderPosition(
+            roleType,
+            capitalSliderPositionFromCents(
+              roleType,
+              startingCapitalCents,
+            ),
+          ),
+      },
       cash: openingPlayerCash,
       otherAssets: profile.otherAssets,
       liabilities: profile.liabilities,
@@ -5912,6 +8309,32 @@ export function createWorld(config = {}) {
           confidence: 1,
         };
       }),
+      ...COMPANY_TEMPLATES
+        .filter(
+          (template) =>
+            template.riskDesignation !== 'NONE',
+        )
+        .map((template) => ({
+          id: `fact_genesis_listing_risk_${template.symbol.toLowerCase()}`,
+          tick: 0,
+          publishedAtMs:
+            -SYNTHETIC_WORLD_DAY_MS,
+          authority: 'exchange_listing_fact',
+          type: 'listing_risk_designation',
+          entityId: template.id,
+          summary:
+            `${template.name}以${template.riskDesignation === 'STAR_ST' ? '*ST' : 'ST'}风险标识进入本期交易。`,
+          value: {
+            symbol: template.symbol,
+            riskDesignation:
+              template.riskDesignation,
+            effectiveDay: 1,
+            priceLimitBps:
+              template.dailyLimitBps,
+          },
+          visibility: 'public',
+          confidence: 1,
+        })),
       {
         id: 'fact_genesis_inventory',
         tick: 0,
@@ -6027,8 +8450,38 @@ export function createWorld(config = {}) {
     LIFE_ITEM_BY_ID,
   );
   synchronizeSocialCareerProjection(state);
-  const equityBudget = profile.capital * allocation.equity;
+  const equityBudget =
+    startingCapitalCents /
+    YUAN_IN_CENTS *
+    allocation.equity;
   state.player.holdings = initializeHoldings(state, equityBudget);
+  const investedCapitalCents =
+    Object.entries(state.player.holdings).reduce(
+      (sum, [symbol, quantity]) =>
+        sum +
+        quantity *
+          Math.round(
+            state.market.securities[symbol]
+              .lastPrice * YUAN_IN_CENTS,
+          ),
+      0,
+    );
+  state.player.cash = money(
+    Math.max(
+      0,
+      startingCapitalCents - investedCapitalCents,
+    ) / YUAN_IN_CENTS,
+  );
+  if (isInstitutionalRole(roleType)) {
+    state.player.roleState.liquidityBaseCash =
+      state.player.cash;
+    state.player.roleState.liquidityReserveFloor =
+      money(
+        state.player.cash *
+          state.player.roleState
+            .liquidityBufferRatio,
+      );
+  }
   state.accounting.playerInitialEquivalentCapitalCents =
     Math.round(
       (
@@ -6053,7 +8506,7 @@ export function createWorld(config = {}) {
   state.accounting.playerDayStartTick = 0;
   state.derivatives = createEmbeddedDerivatives(state);
   syncEmbeddedDerivatives(state);
-  if (roleType === 'institution') {
+  if (isInstitutionalRole(roleType)) {
     state.player.roleState.concentration =
       calculateInstitutionConcentration(state);
   }
@@ -6372,7 +8825,7 @@ function tradeFee(gross) {
 }
 
 function calculateInstitutionConcentration(state) {
-  if (state.player.roleType !== 'institution') return 0;
+  if (!isInstitutionalRole(state.player.roleType)) return 0;
   const denominator = Math.max(
     1,
     state.player.roleState.assetsUnderManagement,
@@ -6387,13 +8840,16 @@ function calculateInstitutionConcentration(state) {
 }
 
 function availableTradingCash(state) {
-  if (state.player.roleType === 'household') {
+  if (
+    state.player.roleType === 'household' ||
+    state.player.roleType === 'private_whale'
+  ) {
     return Math.max(
       0,
       state.player.cash - state.player.roleState.cashReserve,
     );
   }
-  if (state.player.roleType === 'institution') {
+  if (isInstitutionalRole(state.player.roleType)) {
     return Math.max(
       0,
       state.player.cash - state.player.roleState.liquidityReserveFloor,
@@ -6621,7 +9077,7 @@ function placeOrder(state, action) {
     });
   }
 
-  if (next.player.roleType === 'institution') {
+  if (isInstitutionalRole(next.player.roleType)) {
     const totalDepth = sourceLevels.reduce(
       (sum, level) => sum + level.quantity,
       0,
@@ -6677,14 +9133,17 @@ function placeOrder(state, action) {
 
 function roleAction(state, action) {
   const expected = ROLE_ACTIONS[state.player.roleType];
-  if (action.command !== expected) {
+  const allowed = ROLE_ALLOWED_ACTIONS[state.player.roleType];
+  if (!allowed?.has(action.command)) {
     return rejected(state, 'ROLE_NOT_AUTHORIZED', {
       expectedCommand: expected,
+      allowedCommands: allowed ? [...allowed] : [expected],
     });
   }
   const next = clone(state);
   let summary = '';
   let extra = {};
+  let journal = null;
 
   if (action.command === 'set_reserve') {
     const amount = money(Number(action.amount));
@@ -6775,6 +9234,201 @@ function roleAction(state, action) {
     summary = `机构流动性缓冲目标调整为 ${(ratio * 100).toFixed(0)}%。`;
   }
 
+  if (action.command === 'configure_quant_automation') {
+    const lab = next.player.roleState.strategyLab;
+    let configuration;
+    try {
+      configuration = validateQuantConfiguration(lab, action);
+    } catch {
+      return rejected(state, 'INVALID_QUANT_CONFIGURATION');
+    }
+    Object.assign(lab, configuration);
+    lab.revision += 1;
+    summary = lab.automationEnabled
+      ? `自动交易已启用，${lab.selectedStrategyIds.length} 套策略按组合权重运行。`
+      : '自动交易已暂停，策略与研究记录保留。';
+    extra = {
+      strategyLabRevision: lab.revision,
+      selectedStrategyIds: [...lab.selectedStrategyIds],
+    };
+  }
+
+  if (action.command === 'research_quant_strategy') {
+    const lab = next.player.roleState.strategyLab;
+    const strategyId = String(action.strategyId ?? '');
+    const strategy = quantStrategyDefinition(lab, strategyId);
+    const strategyState = lab.strategies?.[strategyId];
+    const researchCost = researchCostForStrategy(strategyId);
+    if (!strategy || !strategyState || researchCost === null) {
+      return rejected(state, 'QUANT_STRATEGY_NOT_FOUND');
+    }
+    if (strategyState.unlocked) {
+      return rejected(state, 'QUANT_STRATEGY_ALREADY_RESEARCHED');
+    }
+    if (next.player.resources.research < researchCost) {
+      return rejected(state, 'INSUFFICIENT_RESEARCH');
+    }
+    next.player.resources.research -= researchCost;
+    strategyState.unlocked = true;
+    strategyState.researchSpent += researchCost;
+    lab.revision += 1;
+    summary = `${strategy.label}研究完成，已进入可选策略池。`;
+    extra = { strategyId, researchCost, strategyLabRevision: lab.revision };
+  }
+
+  if (action.command === 'upgrade_quant_strategy') {
+    const lab = next.player.roleState.strategyLab;
+    const strategyId = String(action.strategyId ?? '');
+    const strategy = quantStrategyDefinition(lab, strategyId);
+    const cost = quantStrategyUpgradeCost(lab, strategyId);
+    if (!strategy) {
+      return rejected(state, 'QUANT_STRATEGY_NOT_FOUND');
+    }
+    if (!cost) {
+      return rejected(state, 'QUANT_STRATEGY_UPGRADE_LIMIT');
+    }
+    if (next.player.resources.research < cost.researchCost) {
+      return rejected(state, 'INSUFFICIENT_RESEARCH');
+    }
+    if (next.player.cash < cost.cashCost) {
+      return rejected(state, 'INSUFFICIENT_CASH');
+    }
+    if (lab.technologyBudgetRemaining < cost.technologyCost) {
+      return rejected(state, 'INSUFFICIENT_TECHNOLOGY_BUDGET');
+    }
+    const strategyState =
+      lab.strategies[strategyId] ?? {
+        unlocked: true,
+        level: 1,
+        researchSpent: 0,
+        cashSpent: 0,
+        technologySpent: 0,
+      };
+    lab.strategies[strategyId] = strategyState;
+    next.player.resources.research -= cost.researchCost;
+    next.player.cash = money(next.player.cash - cost.cashCost);
+    next.economy.cashPool = money(
+      next.economy.cashPool + cost.cashCost,
+    );
+    lab.technologyBudgetRemaining = money(
+      lab.technologyBudgetRemaining - cost.technologyCost,
+    );
+    next.player.roleState.technologyBudget =
+      lab.technologyBudgetRemaining;
+    strategyState.level = cost.nextLevel;
+    strategyState.researchSpent += cost.researchCost;
+    strategyState.cashSpent = money(
+      strategyState.cashSpent + cost.cashCost,
+    );
+    strategyState.technologySpent = money(
+      strategyState.technologySpent + cost.technologyCost,
+    );
+    lab.revision += 1;
+    journal = addJournal(next, {
+      type: 'quant_strategy_upgrade_settlement',
+      description: `升级${strategy.label}的研究与执行设施`,
+      postings: [
+        {
+          account: 'economy.quant_research_and_infrastructure',
+          debit: cost.cashCost,
+          credit: 0,
+        },
+        {
+          account: 'player.quant_institution_cash',
+          debit: 0,
+          credit: cost.cashCost,
+        },
+      ],
+    });
+    summary = `${strategy.label}升级至 ${cost.nextLevel} 级；提升容量与执行边界，不保证收益。`;
+    extra = {
+      strategyId,
+      level: cost.nextLevel,
+      ...cost,
+      strategyLabRevision: lab.revision,
+    };
+  }
+
+  if (action.command === 'import_quant_strategy') {
+    const lab = next.player.roleState.strategyLab;
+    if (lab.customStrategies.length >= maximumCustomStrategies()) {
+      return rejected(state, 'QUANT_CUSTOM_STRATEGY_LIMIT');
+    }
+    let manifest;
+    try {
+      manifest = importPlayerStrategyManifest(action.manifest);
+    } catch {
+      return rejected(state, 'INVALID_QUANT_STRATEGY_FILE');
+    }
+    if (
+      quantStrategyDefinition(lab, manifest.id) ||
+      lab.customStrategies.some(
+        (strategy) => strategy.digest === manifest.digest,
+      )
+    ) {
+      return rejected(state, 'QUANT_STRATEGY_ALREADY_EXISTS');
+    }
+    lab.revision += 1;
+    manifest.importedAtRevision = lab.revision;
+    lab.customStrategies.push(manifest);
+    lab.strategies[manifest.id] = {
+      unlocked: true,
+      level: 1,
+      researchSpent: 0,
+      cashSpent: 0,
+      technologySpent: 0,
+    };
+    summary = `${manifest.name}已通过字段、范围与执行边界校验。`;
+    extra = {
+      strategyId: manifest.id,
+      strategyDigest: manifest.digest,
+      strategyLabRevision: lab.revision,
+    };
+  }
+
+  if (action.command === 'remove_quant_strategy') {
+    const lab = next.player.roleState.strategyLab;
+    const strategyId = String(action.strategyId ?? '');
+    const index = lab.customStrategies.findIndex(
+      (strategy) => strategy.id === strategyId,
+    );
+    if (index < 0) {
+      return rejected(state, 'QUANT_CUSTOM_STRATEGY_NOT_FOUND');
+    }
+    if (lab.selectedStrategyIds.includes(strategyId)) {
+      return rejected(state, 'QUANT_STRATEGY_STILL_SELECTED');
+    }
+    const [removed] = lab.customStrategies.splice(index, 1);
+    delete lab.strategies[strategyId];
+    lab.revision += 1;
+    summary = `${removed.name}已从自编策略池移除。`;
+    extra = { strategyId, strategyLabRevision: lab.revision };
+  }
+
+  if (action.command === 'configure_stabilization_automation') {
+    const desk = next.player.roleState.stabilityDesk;
+    let configuration;
+    try {
+      configuration = validateStabilityConfiguration(desk, action);
+    } catch {
+      return rejected(state, 'INVALID_STABILIZATION_CONFIGURATION');
+    }
+    Object.assign(desk, configuration);
+    desk.revision += 1;
+    summary = desk.automationEnabled
+      ? '自动稳定协议已启用；仅在公开压力条件满足时用真实订单进场。'
+      : '自动稳定协议已暂停，手动进场权限保留。';
+    extra = { stabilityDeskRevision: desk.revision };
+  }
+
+  const proprietary = [
+    'configure_quant_automation',
+    'research_quant_strategy',
+    'upgrade_quant_strategy',
+    'import_quant_strategy',
+    'remove_quant_strategy',
+  ].includes(action.command);
+
   const event = addEvent(next, {
     type: `role_${action.command}`,
     actorId: 'player',
@@ -6783,9 +9437,14 @@ function roleAction(state, action) {
       action.command === 'schedule_production'
         ? [next.player.roleState.controlledCompanyId]
         : ['player'],
-    visibility: action.command === 'record_dissent' ? 'private' : 'public',
+    ledgerEntryIds: journal ? [journal.id] : [],
+    visibility:
+      action.command === 'record_dissent' || proprietary
+        ? 'private'
+        : 'public',
     summary,
   });
+  if (journal) journal.eventId = event.id;
   const fact = addFact(next, {
     type: `role_action_${action.command}`,
     eventId: event.id,
@@ -6794,7 +9453,10 @@ function roleAction(state, action) {
         ? next.player.roleState.controlledCompanyId
         : 'player',
     summary,
-    visibility: action.command === 'record_dissent' ? 'private' : 'public',
+    visibility:
+      action.command === 'record_dissent' || proprietary
+        ? 'private'
+        : 'public',
   });
   addMemory(next, fact, {
     ownerId:
@@ -6834,6 +9496,12 @@ function roleLongFeedback(command) {
     record_dissent: '职业备忘已归档。',
     schedule_production: '新增排产与锁定现金已写入企业账簿。',
     set_liquidity_buffer: '缓冲目标与可配置现金已同步。',
+    configure_quant_automation: '策略组合会在下一次自动决策时生效。',
+    research_quant_strategy: '研究成果已经解锁，不代表未来收益。',
+    upgrade_quant_strategy: '升级只改变容量、频率和执行边界。',
+    import_quant_strategy: '文件被编译为受限参数，不会执行脚本。',
+    remove_quant_strategy: '后续自动决策不再读取该策略。',
+    configure_stabilization_automation: '协议和手动交易共用同一真实订单簿。',
   }[command];
 }
 
@@ -7190,7 +9858,13 @@ function lifeAction(state, action) {
       });
       journal.eventId = event.id;
     } else {
-      if (!item.eligibleRoles.includes(next.player.roleType)) {
+      if (
+        !item.eligibleRoles.includes(
+          lifeEligibilityRoleType(
+            next.player.roleType,
+          ),
+        )
+      ) {
         return rejected(state, 'LIFE_ROLE_NOT_ELIGIBLE');
       }
       const supplyEntry = city.supply.entries[item.id];
@@ -7964,6 +10638,342 @@ function lifeAction(state, action) {
   return { state: next, receipt };
 }
 
+function entertainmentAction(state, action) {
+  if (
+    action.actorId !== undefined &&
+    action.actorId !== 'player'
+  ) {
+    return rejected(state, 'ACTOR_NOT_AUTHORIZED', {
+      actorId: action.actorId,
+    });
+  }
+  const next = clone(state);
+  normalizeEntertainmentWorldState(next);
+  const settlement = deriveEntertainmentSettlement(next, {
+    ...action,
+    request: {
+      ...(action.request ?? {}),
+      actorId: 'player',
+    },
+  });
+  if (settlement.status !== 'accepted') {
+    return rejected(state, settlement.reason, {
+      recoverable: true,
+    });
+  }
+  const costCents = settlement.costCents;
+  const availableCashCents = Number.isSafeInteger(
+    action.availableCashCents,
+  )
+    ? Math.max(0, action.availableCashCents)
+    : Math.round(next.player.cash * YUAN_IN_CENTS);
+  if (costCents > availableCashCents) {
+    return rejected(state, 'INSUFFICIENT_CASH', {
+      requiredCents: costCents,
+      availableCents: availableCashCents,
+    });
+  }
+
+  let journal = null;
+  if (costCents > 0) {
+    const cost = money(costCents / YUAN_IN_CENTS);
+    next.player.cash = money(next.player.cash - cost);
+    next.economy.cashPool = money(next.economy.cashPool + cost);
+    journal = addJournal(next, {
+      type: 'entertainment_local_settlement',
+      description: `${settlement.labelZh}本地结算`,
+      postings: [
+        {
+          account: 'economy.local_entertainment_pool',
+          debit: cost,
+          credit: 0,
+        },
+        {
+          account: 'player.cash',
+          debit: 0,
+          credit: cost,
+        },
+      ],
+    });
+  }
+
+  applyEntertainmentSettlement(next, settlement);
+  next.player.life.actionCount += 1;
+  const fact = addFact(next, {
+    type:
+      settlement.outcomeKind === 'activity_completed'
+        ? 'entertainment_activity_completed'
+        : 'entertainment_offer_settled',
+    entityId: 'player',
+    authority: 'local_entertainment_settlement',
+    visibility: 'player',
+    summary: settlement.summaryZh,
+    value: {
+      placeId: settlement.placeId,
+      outcomeKind: settlement.outcomeKind,
+      costCents,
+    },
+  });
+  const event = addEvent(next, {
+    type:
+      settlement.outcomeKind === 'activity_completed'
+        ? 'entertainment_activity_completed'
+        : 'entertainment_offer_settled',
+    actorId: 'player',
+    authority: 'local_entertainment_settlement',
+    affectedEntities: [
+      'player',
+      settlement.placeId,
+      settlement.counterpartyId,
+    ],
+    factIds: [fact.id],
+    ledgerEntryIds: journal ? [journal.id] : [],
+    visibility: 'player',
+    summary: settlement.summaryZh,
+    worldlineEffect: {
+      domain: 'life',
+      materialEntityIds: [
+        'player',
+        settlement.placeId,
+      ],
+      unresolvedTensions: [],
+      resourceConstraints: [],
+      branchingConditions: [
+        `place_familiarity:${settlement.placeId}`,
+      ],
+    },
+  });
+  fact.eventId = event.id;
+  if (journal) journal.eventId = event.id;
+  const receipt = {
+    id: event.id,
+    tick: next.world.tick,
+    status: 'accepted',
+    type: 'entertainment_action',
+    outcomeKind: settlement.outcomeKind,
+    placeId: settlement.placeId,
+    labelZh: settlement.labelZh,
+    costCents,
+    shortFeedback: settlement.summaryZh,
+  };
+  next.replay.push({
+    id: nextId(next, 'replay'),
+    tick: next.world.tick,
+    actionEventId: event.id,
+    factId: fact.id,
+    process: {
+      type: 'entertainment_action',
+      outcomeKind: settlement.outcomeKind,
+      placeId: settlement.placeId,
+    },
+    result: receipt.shortFeedback,
+    unknown: '下一次体验仍取决于地点、时间、余量与玩家当时的状态。',
+  });
+  next.ui.lastReceipt = receipt;
+  return { state: next, receipt };
+}
+
+function openWorldCityAction(state, action) {
+  const next = clone(state);
+  normalizeOpenWorldCityAuthorityState(next);
+  const settlement = beginOpenWorldCityAction(next, action);
+  if (settlement.status !== 'accepted') {
+    return rejected(state, settlement.reason, {
+      recoverable: true,
+    });
+  }
+  const availableCashCents = Number.isSafeInteger(
+    action.availableCashCents,
+  )
+    ? Math.max(0, action.availableCashCents)
+    : Math.round(next.player.cash * YUAN_IN_CENTS);
+  if (settlement.costCents > availableCashCents) {
+    return rejected(state, 'INSUFFICIENT_CASH', {
+      requiredCents: settlement.costCents,
+      availableCents: availableCashCents,
+    });
+  }
+
+  let journal = null;
+  if (settlement.costCents > 0) {
+    const cost = money(
+      settlement.costCents / YUAN_IN_CENTS,
+    );
+    next.player.cash = money(next.player.cash - cost);
+    next.economy.cashPool = money(
+      next.economy.cashPool + cost,
+    );
+    journal = addJournal(next, {
+      type: 'open_world_city_local_settlement',
+      description: `${settlement.labelZh}本地结算`,
+      postings: [
+        {
+          account: 'economy.local_city_service_pool',
+          debit: cost,
+          credit: 0,
+        },
+        {
+          account: 'player.cash',
+          debit: 0,
+          credit: cost,
+        },
+      ],
+    });
+  }
+  const summary = `已开始${settlement.labelZh}，需要真实世界时间完成。`;
+  const fact = addFact(next, {
+    type: 'open_world_city_commitment_started',
+    entityId: 'player',
+    authority: 'open_world_city_settlement',
+    visibility: 'player',
+    summary,
+    value: {
+      commitmentId: settlement.commitmentId,
+      placeId: settlement.placeId,
+      costCents: settlement.costCents,
+      completesAtVirtualTime:
+        settlement.completesAtVirtualTime,
+    },
+  });
+  const event = addEvent(next, {
+    type: 'open_world_city_commitment_started',
+    actorId: 'player',
+    authority: 'open_world_city_settlement',
+    affectedEntities: ['player', settlement.placeId],
+    factIds: [fact.id],
+    ledgerEntryIds: journal ? [journal.id] : [],
+    visibility: 'player',
+    summary,
+    worldlineEffect: {
+      domain: 'life',
+      materialEntityIds: ['player', settlement.placeId],
+      unresolvedTensions: [],
+      resourceConstraints: [
+        `time_committed_until:${settlement.completesAtVirtualTime}`,
+      ],
+      branchingConditions: [],
+    },
+  });
+  fact.eventId = event.id;
+  if (journal) journal.eventId = event.id;
+  const receipt = {
+    id: event.id,
+    tick: next.world.tick,
+    status: 'accepted',
+    type: 'open_world_city_action',
+    commitmentId: settlement.commitmentId,
+    completionStatus: settlement.completionStatus,
+    completesAtVirtualTime:
+      settlement.completesAtVirtualTime,
+    costCents: settlement.costCents,
+    placeId: settlement.placeId,
+    labelZh: settlement.labelZh,
+    scheduledCompletion: {
+      type: 'open_world_city_completion',
+      commitmentId: settlement.commitmentId,
+      scheduledMs: settlement.completesAtVirtualTime,
+    },
+    shortFeedback: summary,
+  };
+  next.replay.push({
+    id: nextId(next, 'replay'),
+    tick: next.world.tick,
+    actionEventId: event.id,
+    factId: fact.id,
+    process: {
+      type: 'open_world_city_action',
+      commitmentId: settlement.commitmentId,
+      placeId: settlement.placeId,
+    },
+    result: summary,
+    unknown: '完成前仍受时间、地点与世界状态约束。',
+  });
+  next.ui.lastReceipt = receipt;
+  return { state: next, receipt };
+}
+
+export function settleOpenWorldCityCompletion(
+  state,
+  commitmentId,
+  { authorityCommitSeq, virtualTime } = {},
+) {
+  const settlement = completeOpenWorldCityCommitment(
+    state,
+    commitmentId,
+    { authorityCommitSeq, virtualTime },
+  );
+  if (settlement.status !== 'accepted') {
+    return {
+      status: 'rejected',
+      type: 'open_world_city_completion',
+      reason: settlement.reason,
+      commitmentId,
+      shortFeedback: '这项生活安排未能完成。',
+    };
+  }
+  const summary = `${settlement.labelZh}已完成。`;
+  const fact = addFact(state, {
+    type: 'open_world_city_commitment_completed',
+    entityId: 'player',
+    authority: 'open_world_city_settlement',
+    visibility: 'player',
+    summary,
+    value: {
+      commitmentId,
+      placeId: settlement.placeId,
+      destinationPlaceId: settlement.destinationPlaceId,
+      completedAtVirtualTime:
+        settlement.completedAtVirtualTime,
+    },
+  });
+  const event = addEvent(state, {
+    type: 'open_world_city_commitment_completed',
+    actorId: 'player',
+    authority: 'open_world_city_settlement',
+    affectedEntities: [
+      'player',
+      settlement.placeId,
+      ...(settlement.destinationPlaceId
+        ? [settlement.destinationPlaceId]
+        : []),
+    ],
+    factIds: [fact.id],
+    ledgerEntryIds: [],
+    visibility: 'player',
+    summary,
+    worldlineEffect: {
+      domain: 'life',
+      materialEntityIds: [
+        'player',
+        settlement.destinationPlaceId ?? settlement.placeId,
+      ],
+      unresolvedTensions: [],
+      resourceConstraints: [],
+      branchingConditions: [
+        `place_familiarity:${
+          settlement.destinationPlaceId ?? settlement.placeId
+        }`,
+      ],
+    },
+  });
+  fact.eventId = event.id;
+  const receipt = {
+    id: event.id,
+    tick: state.world.tick,
+    status: 'accepted',
+    type: 'open_world_city_completion',
+    commitmentId,
+    eventKind: settlement.eventKind,
+    placeId: settlement.placeId,
+    destinationPlaceId: settlement.destinationPlaceId,
+    completedAtVirtualTime:
+      settlement.completedAtVirtualTime,
+    shortFeedback: summary,
+  };
+  state.ui.lastReceipt = receipt;
+  return receipt;
+}
+
 function socialCareerAction(state, action) {
   if (
     action.actorId !== undefined &&
@@ -8193,7 +11203,10 @@ const ACTIONS_REQUIRING_DERIVATIVE_ACCOUNT_SYNC = new Set([
   'place_order',
   'activate_market_data',
   'life_action',
+  'entertainment_action',
+  'open_world_city_action',
   'social_action',
+  'role_action',
 ]);
 
 export function applyAction(state, action = {}) {
@@ -8225,6 +11238,12 @@ export function applyAction(state, action = {}) {
       break;
     case 'life_action':
       result = lifeAction(state, action);
+      break;
+    case 'entertainment_action':
+      result = entertainmentAction(state, action);
+      break;
+    case 'open_world_city_action':
+      result = openWorldCityAction(state, action);
       break;
     case 'social_action':
       result = socialCareerAction(state, action);
@@ -8270,7 +11289,7 @@ function settleNpcOrders(state, company, index, operatingSignal) {
   const security = state.market.securities[company.symbol];
   const valuationGap =
     (security.referenceValue - security.lastPrice) /
-    Math.max(1, security.lastPrice);
+    Math.max(MIN_LISTED_PRICE_YUAN, security.lastPrice);
   const discoverySignal = clamp(
     operatingSignal + valuationGap * 0.08,
     -0.035,
@@ -8289,13 +11308,13 @@ function settleNpcOrders(state, company, index, operatingSignal) {
   const askNoise = (nextRandom(state) - 0.5) * 0.004;
   const bidPrice = price(
     Math.max(
-      1,
+      MIN_LISTED_PRICE_YUAN,
       security.lastPrice * (1 + discoverySignal + 0.004 + bidNoise),
     ),
   );
   const askPrice = price(
     Math.max(
-      1,
+      MIN_LISTED_PRICE_YUAN,
       security.lastPrice * (1 + discoverySignal - 0.004 + askNoise),
     ),
   );
@@ -8305,7 +11324,10 @@ function settleNpcOrders(state, company, index, operatingSignal) {
     Math.min(
       desiredQuantity,
       seller.holdings[company.symbol] ?? 0,
-      Math.floor(buyer.cash / Math.max(askPrice, 1)),
+      Math.floor(
+        buyer.cash /
+          Math.max(MIN_LISTED_PRICE_YUAN, askPrice),
+      ),
     ),
   );
   const buyOrder = {
@@ -8426,6 +11448,30 @@ function settleNpcOrders(state, company, index, operatingSignal) {
   });
   rebuildBook(state, company.symbol, executionPrice, index);
   return trade;
+}
+
+function rollNextWorldDayPriceReferences(state) {
+  for (const security of Object.values(
+    state.market.securities,
+  )) {
+    const closingPriceTicks = Math.round(
+      Number(security.lastPrice) * 100,
+    );
+    if (
+      !Number.isSafeInteger(closingPriceTicks) ||
+      closingPriceTicks < 1
+    ) {
+      throw new Error(
+        `Invalid world-day closing price: ${security.symbol}`,
+      );
+    }
+    // This is the next session's exchange reference, not a price write. The
+    // closing price itself was produced above by finite matched NPC orders (or
+    // retained from the realtime matching authority). Keeping the reference
+    // at the old genesis value would make a mature world's lawful daily band
+    // reject its own settled close when realtime trading is opened later.
+    security.previousCloseTicks = closingPriceTicks;
+  }
 }
 
 function recordFinancialPeriod(
@@ -8923,6 +11969,13 @@ function settleFinancialInstitutionCycle(
 ) {
   const model = company.operations.model;
   const institution = company.financialInstitution;
+  const networkSignal =
+    state.economy.businessNetwork
+      ?.lastSignalsByCompany?.[company.id] ??
+    neutralBusinessNetworkSignal(
+      company.id,
+      state.world.tick,
+    );
   const annualDays = company.financials.annualTradingDays;
   let revenue;
   let netIncome;
@@ -9189,10 +12242,17 @@ function settleFinancialInstitutionCycle(
         1.28,
       ) * 1_000_000,
     );
+    const networkAdjustedInvestmentYieldBps =
+      roundedIntegerRatio(
+        institution.investmentYieldBps,
+        networkSignal.investmentIncomeBps,
+        BPS_SCALE,
+        'network adjusted insurance investment yield',
+      );
     const investmentReturnCents =
       roundedIntegerRatio(
         institution.investedAssetsCents,
-        institution.investmentYieldBps *
+        networkAdjustedInvestmentYieldBps *
           investmentPressurePpm,
         BPS_SCALE * annualDays * 1_000_000,
         'insurance investment return',
@@ -9301,9 +12361,13 @@ function settleFinancialInstitutionCycle(
       claimsRatioBps: institution.claimsRatioBps,
       investmentYieldBps: institution.investmentYieldBps,
       solvencyRatioBps: institution.solvencyRatioBps,
+      businessNetworkSignal:
+        clone(networkSignal),
     };
   }
 
+  resultValue.businessNetworkSignal =
+    clone(networkSignal);
   const netCash = transferInstitutionFreeCashFlow(
     state,
     company,
@@ -9314,6 +12378,7 @@ function settleFinancialInstitutionCycle(
   company.operations.lastSold = null;
   company.operations.plannedProduction = null;
   company.operations.utilization = null;
+  company.operations.lastSettledTick = state.world.tick;
   company.equity = money(company.equity + netIncome);
   reconcileFinancialInstitutionBalanceSheet(company);
   recordFinancialPeriod(company, state.world.tick, {
@@ -9445,20 +12510,45 @@ function settleCompanyCycle(state, company, index, options = {}) {
       options,
     );
   }
+  const networkSignal =
+    state.economy.businessNetwork
+      ?.lastSignalsByCompany?.[company.id] ??
+    neutralBusinessNetworkSignal(
+      company.id,
+      state.world.tick,
+    );
   const demandNoise = 0.82 + nextRandom(state) * 0.38;
   const cycleInfluence = 1 + state.economy.industrialCycle * 0.08;
   const demand = Math.max(
     8,
-    Math.round(company.operations.baseDemand * demandNoise * cycleInfluence),
+    Math.round(
+      company.operations.baseDemand *
+        demandNoise *
+        cycleInfluence *
+        networkSignal.demandBps /
+        BPS_SCALE,
+    ),
   );
-  const planned = Math.max(0, company.operations.plannedProduction);
+  const planned = Math.max(
+    0,
+    Math.floor(
+      company.operations.plannedProduction *
+        networkSignal.inputAvailabilityBps /
+        BPS_SCALE,
+    ),
+  );
   const unitScale = company.financials.economicUnitScale;
   const unitProductionCost = Math.max(
     0.01,
-    company.operations.unitCost * unitScale,
+    company.operations.unitCost *
+      unitScale *
+      networkSignal.unitCostBps /
+      BPS_SCALE,
   );
   const availableDebtCapacity = Math.min(
-    Math.max(0, company.funding.debtCeiling - company.debt),
+    Math.max(0, company.funding.debtCeiling - company.debt) *
+      networkSignal.fundingAvailabilityBps /
+      BPS_SCALE,
     state.economy.cashPool,
   );
   const productionLiquidity =
@@ -9506,7 +12596,9 @@ function settleCompanyCycle(state, company, index, options = {}) {
     company.debt *
       company.financials.annualInterestRateBps /
       10_000 /
-      company.financials.annualTradingDays,
+      company.financials.annualTradingDays *
+      networkSignal.fundingCostBps /
+      BPS_SCALE,
   );
   const maintenanceCapex = money(
     revenue * company.financials.maintenanceCapexRatio,
@@ -9527,9 +12619,13 @@ function settleCompanyCycle(state, company, index, options = {}) {
     0.38,
   );
   const receivableCollectionRate = clamp(
-    0.16 +
-      company.governance.managementConfidence * 0.08 +
-      (nextRandom(state) - 0.5) * 0.025,
+    (
+      0.16 +
+        company.governance.managementConfidence * 0.08 +
+        (nextRandom(state) - 0.5) * 0.025
+    ) *
+      networkSignal.collectionBps /
+      BPS_SCALE,
     0.1,
     0.32,
   );
@@ -9602,7 +12698,9 @@ function settleCompanyCycle(state, company, index, options = {}) {
   const borrowed = money(
     Math.min(
       fundingNeed,
-      Math.max(0, company.funding.debtCeiling - company.debt),
+      Math.max(0, company.funding.debtCeiling - company.debt) *
+        networkSignal.fundingAvailabilityBps /
+        BPS_SCALE,
       state.economy.cashPool,
     ),
   );
@@ -9709,6 +12807,7 @@ function settleCompanyCycle(state, company, index, options = {}) {
   company.operations.lastProduced = produced;
   company.operations.lastSold = sold;
   company.operations.lastProfit = netIncome;
+  company.operations.lastSettledTick = state.world.tick;
   company.operations.utilization = Number(
     (produced / Math.max(1, company.capacity)).toFixed(4),
   );
@@ -9815,6 +12914,8 @@ function settleCompanyCycle(state, company, index, options = {}) {
       productionCashPayments,
       receivables: company.receivables,
       payables: company.payables,
+      businessNetworkSignal:
+        clone(networkSignal),
     },
   });
   const publishedValue = createPublishedFinancialValue(
@@ -9870,7 +12971,10 @@ function settleCompanyCycle(state, company, index, options = {}) {
 
 function applyRoleObligations(state) {
   const role = state.player.roleType;
-  if (role === 'household' && state.world.tick % 20 === 0) {
+  if (
+    (role === 'household' || role === 'private_whale') &&
+    state.world.tick % 20 === 0
+  ) {
     const income = Math.min(
       state.economy.cashPool,
       money(state.player.roleState.monthlyIncome),
@@ -9950,7 +13054,7 @@ function applyRoleObligations(state) {
     );
   }
 
-  if (role === 'institution') {
+  if (role === 'institution' || role === 'quant_institution') {
     const attention = state.player.roleState.marketAttention;
     const buffer = state.player.roleState.liquidityBufferRatio;
     const pressureDelta = Math.max(
@@ -10061,6 +13165,22 @@ function applyRoleObligations(state) {
     }
     state.player.roleState.marketAttention = Number(
       Math.max(0, attention * 0.94).toFixed(5),
+    );
+  }
+
+  if (role === 'stabilization_fund') {
+    const desk = state.player.roleState.stabilityDesk;
+    const attention = state.player.roleState.marketAttention;
+    desk.oversightPressureBps = Math.round(
+      clamp(
+        desk.oversightPressureBps * 0.92 + attention * 120,
+        0,
+        10_000,
+      ),
+    );
+    state.player.roleState.redemptionPressure = 0;
+    state.player.roleState.marketAttention = Number(
+      Math.max(0, attention * 0.9).toFixed(5),
     );
   }
 }
@@ -10913,12 +14033,18 @@ function advanceOneTick(
   );
   evolveEconomicStructure(next);
   evolveDerivativeCommodityBalances(next);
-  Object.values(next.entities.companies).forEach(
+  canonicalCompanies(next).forEach(
     (company, index) =>
       evolveCompanyStructure(next, company, index),
   );
-  const companyReceipts = Object.values(next.entities.companies).map(
+  prepareBusinessNetworkSignals(next);
+  const companyReceipts = canonicalCompanies(next).map(
     (company, index) => settleCompanyCycle(next, company, index, options),
+  );
+  rollNextWorldDayPriceReferences(next);
+  const adaptiveNotices = settleAdaptiveWorldEvents(
+    next,
+    companyReceipts,
   );
   applyRoleObligations(next);
   settleLifeDay(next);
@@ -10980,6 +14106,7 @@ function advanceOneTick(
     affectedEntities: Object.keys(next.entities.companies),
     parentIds: [
       ...companyReceipts.map((item) => item.event.id),
+      ...adaptiveNotices.map((item) => item.event.id),
       socialEvent.id,
       derivativesSettlement.event.id,
     ],
@@ -11063,6 +14190,50 @@ function securityTotals(state) {
 
 export function auditWorld(state) {
   const errors = [];
+  const spatialAudit = auditWorldSpatialState(state);
+  errors.push(
+    ...spatialAudit.errors.map(
+      (error) => `SPATIAL:${error}`,
+    ),
+  );
+  const entertainmentAudit = auditEntertainmentWorld(state);
+  errors.push(
+    ...entertainmentAudit.errors.map(
+      (error) => `ENTERTAINMENT:${error}`,
+    ),
+  );
+  const openWorldCityAudit =
+    auditOpenWorldCityAuthorityState(state);
+  errors.push(
+    ...openWorldCityAudit.errors.map(
+      (error) => `OPEN_WORLD_CITY:${error}`,
+    ),
+  );
+  const capitalContract =
+    CAPITAL_CONTRACTS[state.player?.roleType];
+  const capitalProfile =
+    state.player?.capitalProfile;
+  if (
+    !capitalContract ||
+    capitalProfile?.schemaVersion !==
+      CAPITAL_PROFILE_VERSION ||
+    !Number.isSafeInteger(
+      capitalProfile?.controlledCapitalCents,
+    ) ||
+    capitalProfile.controlledCapitalCents <
+      capitalContract.minimumCents ||
+    capitalProfile.controlledCapitalCents >
+      capitalContract.maximumCents ||
+    capitalProfile.ownership !==
+      capitalContract.ownership
+  ) {
+    errors.push('INVALID_CAPITAL_PROFILE');
+  }
+  const roleStrategyAudit = auditRoleStrategyState(
+    state.player?.roleType,
+    state.player?.roleState,
+  );
+  errors.push(...roleStrategyAudit.errors);
   const worldlineAudit = auditWorldlineState(
     state.worldline,
     {
@@ -11132,6 +14303,11 @@ export function auditWorld(state) {
       'INCOMPLETE_STOCK_UNIVERSE',
     );
   }
+  const requiredCompanyIds = new Set(
+    COMPANY_TEMPLATES.map(
+      (template) => template.id,
+    ),
+  );
   for (const template of COMPANY_TEMPLATES) {
     const security =
       state.market?.securities?.[
@@ -11149,6 +14325,214 @@ export function auditWorld(state) {
       errors.push(
         `INVALID_STOCK_CATALOG ${template.symbol}`,
       );
+    }
+    if (
+      security?.listingIdentity?.securityId !==
+        template.symbol ||
+      security?.listingIdentity?.issuerId !==
+        template.id ||
+      security?.listingIdentity?.exchange !==
+        template.exchange ||
+      security?.listingIdentity?.board !==
+        template.listingBoard ||
+      security?.listingIdentity?.displayCode !==
+        template.displayCode ||
+      security?.listingIdentity?.riskDesignation !==
+        template.riskDesignation ||
+      security?.listingIdentity?.listingStatus !==
+        template.listingStatus ||
+      !Array.isArray(
+        security?.listingIdentityHistory,
+      ) ||
+      security.listingIdentityHistory.length < 1
+    ) {
+      errors.push(
+        `INVALID_LISTING_IDENTITY ${template.symbol}`,
+      );
+    }
+    const relationshipIds = [
+      ...(company?.supplierCompanyIds ?? []),
+      ...(company?.customerCompanyIds ?? []),
+      ...(company?.financialCounterpartyCompanyIds ?? []),
+      ...(company?.investmentExposureCompanyIds ?? []),
+    ];
+    if (
+      relationshipIds.some(
+        (relatedId) =>
+          relatedId === template.id ||
+          !requiredCompanyIds.has(relatedId),
+      )
+    ) {
+      errors.push(
+        `INVALID_COMPANY_RELATIONSHIP ${template.symbol}`,
+      );
+    }
+    if (company && security) {
+      const expectedOwnership =
+        deriveIssuerOwnershipContract(template, {
+          outstandingUnits:
+            security.outstandingUnits,
+          floatUnits: security.floatUnits,
+        });
+      const controller =
+        state.entities?.investors?.[
+          expectedOwnership.controller
+            .registeredHolderId
+        ];
+      if (
+        JSON.stringify(company.ownershipContract) !==
+          JSON.stringify(expectedOwnership) ||
+        controller?.holdings?.[template.symbol] !==
+          expectedOwnership.controller.economicUnits ||
+        controller?.lockedUnitsBySymbol?.[
+          template.symbol
+        ] !==
+          expectedOwnership.controller.lockedUnits ||
+        controller?.pledgedUnitsBySymbol?.[
+          template.symbol
+        ] !==
+          expectedOwnership.controller.pledgedUnits ||
+        controller?.beneficialOwner !==
+          expectedOwnership.controller.beneficialOwner ||
+        controller?.holderNature !==
+          expectedOwnership.controller.holderNature
+      ) {
+        errors.push(
+          `INVALID_ISSUER_OWNERSHIP ${template.symbol}`,
+        );
+      }
+    }
+  }
+  const businessNetwork =
+    state.economy?.businessNetwork;
+  const canonicalBusinessEdges =
+    createBusinessNetworkEdges();
+  if (
+    businessNetwork?.contractVersion !==
+      BUSINESS_NETWORK_CONTRACT_VERSION ||
+    businessNetwork.authority !==
+      'world_company_operating_ledger' ||
+    businessNetwork.maxLagDays !==
+      BUSINESS_NETWORK_MAX_LAG_DAYS ||
+    JSON.stringify(businessNetwork.edges) !==
+      JSON.stringify(canonicalBusinessEdges) ||
+    !Number.isSafeInteger(
+      businessNetwork.lastSettledTick,
+    ) ||
+    businessNetwork.lastSettledTick < 0 ||
+    businessNetwork.lastSettledTick >
+      state.world.tick
+  ) {
+    errors.push('INVALID_BUSINESS_NETWORK_CONTRACT');
+  } else {
+    for (const companyId of requiredCompanyIds) {
+      const signal =
+        businessNetwork.lastSignalsByCompany?.[
+          companyId
+        ];
+      const metricWindow =
+        businessNetwork.metricWindowByCompany?.[
+          companyId
+        ];
+      if (
+        !signal ||
+        signal.companyId !== companyId ||
+        signal.authority !==
+          'settled_business_facts_only' ||
+        !Number.isSafeInteger(signal.asOfTick) ||
+        signal.asOfTick < 0 ||
+        signal.asOfTick > state.world.tick ||
+        ![
+          'demandBps',
+          'inputAvailabilityBps',
+          'unitCostBps',
+          'collectionBps',
+          'fundingAvailabilityBps',
+          'fundingCostBps',
+          'investmentIncomeBps',
+        ].every(
+          (field) =>
+            Number.isSafeInteger(signal[field]) &&
+            signal[field] >= 6_000 &&
+            signal[field] <= 14_000,
+        ) ||
+        !Array.isArray(signal.causes) ||
+        !Array.isArray(metricWindow) ||
+        metricWindow.length >
+          BUSINESS_NETWORK_MAX_LAG_DAYS ||
+        metricWindow.some(
+          (metric) =>
+            metric.companyId !== companyId ||
+            !Number.isSafeInteger(metric.tick) ||
+            metric.tick < 0 ||
+            metric.tick > state.world.tick,
+        )
+      ) {
+        errors.push(
+          `INVALID_BUSINESS_NETWORK_STATE ${companyId}`,
+        );
+      }
+    }
+  }
+  const adaptiveWorldEvents =
+    state.economy?.adaptiveWorldEvents;
+  if (
+    adaptiveWorldEvents?.contractVersion !==
+      ADAPTIVE_WORLD_EVENTS_VERSION ||
+    adaptiveWorldEvents.authority !==
+      'settled_fact_trigger_engine' ||
+    adaptiveWorldEvents.priceWindowDays !==
+      ADAPTIVE_PRICE_WINDOW_DAYS ||
+    !Number.isSafeInteger(
+      adaptiveWorldEvents.lastSettledTick,
+    ) ||
+    adaptiveWorldEvents.lastSettledTick < 0 ||
+    adaptiveWorldEvents.lastSettledTick >
+      state.world.tick
+  ) {
+    errors.push('INVALID_ADAPTIVE_WORLD_EVENTS');
+  } else {
+    for (const template of COMPANY_TEMPLATES) {
+      const tracker =
+        adaptiveWorldEvents.trackersByCompany?.[
+          template.id
+        ];
+      if (
+        !tracker ||
+        tracker.companyId !== template.id ||
+        tracker.symbol !== template.symbol ||
+        !Array.isArray(tracker.priceWindowTicks) ||
+        tracker.priceWindowTicks.length < 1 ||
+        tracker.priceWindowTicks.length >
+          ADAPTIVE_PRICE_WINDOW_DAYS ||
+        tracker.priceWindowTicks.some(
+          (value) =>
+            !Number.isSafeInteger(value) || value <= 0,
+        ) ||
+        !Array.isArray(
+          tracker.referenceWindowTicks,
+        ) ||
+        tracker.referenceWindowTicks.length < 1 ||
+        tracker.referenceWindowTicks.length >
+          ADAPTIVE_PRICE_WINDOW_DAYS ||
+        tracker.referenceWindowTicks.some(
+          (value) =>
+            !Number.isSafeInteger(value) || value <= 0,
+        ) ||
+        !tracker.lastTriggerTickByKind ||
+        Object.values(
+          tracker.lastTriggerTickByKind,
+        ).some(
+          (tick) =>
+            !Number.isSafeInteger(tick) ||
+            tick < 0 ||
+            tick > state.world.tick,
+        )
+      ) {
+        errors.push(
+          `INVALID_ADAPTIVE_WORLD_EVENT_TRACKER ${template.symbol}`,
+        );
+      }
     }
   }
   for (const owner of [
@@ -11916,6 +15300,73 @@ export function serializeWorld(state) {
   return JSON.stringify(state);
 }
 
+function migrateLegacyCapitalProfile(state) {
+  const roleType = state.player.roleType;
+  const contract = capitalContractForRole(roleType);
+  const existing = state.player.capitalProfile;
+  if (existing !== undefined) {
+    const cents = Number(
+      existing.controlledCapitalCents,
+    );
+    if (
+      existing.schemaVersion !==
+        CAPITAL_PROFILE_VERSION ||
+      !Number.isSafeInteger(cents) ||
+      cents < contract.minimumCents ||
+      cents > contract.maximumCents ||
+      existing.ownership !== contract.ownership
+    ) {
+      throw new Error(
+        'Invalid or incompatible LZY capital profile.',
+      );
+    }
+    existing.exactInputCents ??= cents;
+    existing.fundingLabel ??=
+      contract.fundingLabel;
+    existing.source ??= 'restored_capital_profile';
+    existing.sliderApproximationCents ??=
+      capitalCentsFromSliderPosition(
+        roleType,
+        capitalSliderPositionFromCents(
+          roleType,
+          cents,
+        ),
+      );
+    state.player.legacyStrengthTier ??=
+      state.player.strengthTier;
+    return;
+  }
+  const legacyTier = STRENGTH_TIERS.includes(
+    state.player.strengthTier,
+  )
+    ? state.player.strengthTier
+    : 'low';
+  const legacyProfile =
+    PROFILE_TEMPLATES[roleType]?.[legacyTier];
+  const controlledCapitalCents = legacyProfile
+    ? Math.round(
+        legacyProfile.capital * YUAN_IN_CENTS,
+      )
+    : contract.defaultCents;
+  state.player.legacyStrengthTier = legacyTier;
+  state.player.capitalProfile = {
+    schemaVersion: CAPITAL_PROFILE_VERSION,
+    controlledCapitalCents,
+    exactInputCents: controlledCapitalCents,
+    ownership: contract.ownership,
+    fundingLabel: contract.fundingLabel,
+    source: 'legacy_strength_tier_migration',
+    sliderApproximationCents:
+      capitalCentsFromSliderPosition(
+        roleType,
+        capitalSliderPositionFromCents(
+          roleType,
+          controlledCapitalCents,
+        ),
+      ),
+  };
+}
+
 function migrateLegacyLifeState(state) {
   const hadLifeState = Boolean(
     state.player.life && typeof state.player.life === 'object',
@@ -12029,6 +15480,15 @@ const LEGACY_EIGHT_STOCK_SYMBOLS = Object.freeze([
   'LZE401',
   'LZF501',
 ]);
+const LEGACY_FOURTEEN_STOCK_SYMBOLS = Object.freeze([
+  ...LEGACY_EIGHT_STOCK_SYMBOLS,
+  'LZG601',
+  'LZH701',
+  'LZI801',
+  'LZJ901',
+  'LZK011',
+  'LZL121',
+]);
 
 function sameSortedValues(actual, expected) {
   if (!Array.isArray(actual) || actual.length !== expected.length) {
@@ -12072,6 +15532,231 @@ function migrateSecurityIssuanceAccounting(state) {
   }
 }
 
+function migrateLegacyStabilizationInvestor(state) {
+  const investors = state.entities?.investors;
+  if (!investors || investors.npc_stabilization_fund) {
+    return false;
+  }
+  const template = NPC_INVESTOR_TEMPLATES.find(
+    (candidate) =>
+      candidate.id === 'npc_stabilization_fund',
+  );
+  const publicCustody =
+    investors.holder_public_custody;
+  const maker = state.market?.maker;
+  if (!template || !publicCustody || !maker) {
+    throw new Error(
+      'Invalid legacy stabilization-fund custody source.',
+    );
+  }
+  const minimumMakerCash = Math.min(
+    maker.cash,
+    20_000_000_000,
+  );
+  const migratedCash = Math.max(
+    0,
+    Math.min(
+      template.cash,
+      money(maker.cash - minimumMakerCash),
+    ),
+  );
+  const canonical =
+    createNpcInvestors(
+      state.market.securities,
+    )[template.id];
+  canonical.cash = migratedCash;
+  const securityTransfers = [];
+  for (const [symbol, quantity] of Object.entries(
+    canonical.holdings,
+  )) {
+    const available =
+      publicCustody.holdings?.[symbol] ?? 0;
+    if (
+      !Number.isSafeInteger(quantity) ||
+      quantity < 0 ||
+      !Number.isSafeInteger(available) ||
+      available < quantity
+    ) {
+      throw new Error(
+        `Insufficient legacy public custody for ${symbol}.`,
+      );
+    }
+    publicCustody.holdings[symbol] =
+      available - quantity;
+    securityTransfers.push({
+      symbol,
+      from: publicCustody.id,
+      to: canonical.id,
+      quantity,
+    });
+  }
+  maker.cash = money(maker.cash - migratedCash);
+  investors[canonical.id] = canonical;
+  const journal = addJournal(state, {
+    type: 'stabilization_fund_ledger_migration',
+    description:
+      '补录市场稳定力量联席组合的分账现金与托管',
+    postings: migratedCash > 0
+      ? [
+          {
+            account:
+              'world.stabilization_fund.cash',
+            debit: migratedCash,
+            credit: 0,
+          },
+          {
+            account:
+              'world.market_maker.cash',
+            debit: 0,
+            credit: migratedCash,
+          },
+        ]
+      : [],
+    securityTransfers,
+  });
+  const event = addEvent(state, {
+    type: 'stabilization_fund_ledger_migrated',
+    actorId: 'world_registry',
+    authority:
+      'canonical_save_migration_v1',
+    affectedEntities: [
+      canonical.id,
+      publicCustody.id,
+      maker.id,
+    ],
+    ledgerEntryIds: [journal.id],
+    visibility: 'private',
+    summary:
+      '旧存档的稳定力量现金与证券托管已守恒补录。',
+  });
+  journal.eventId = event.id;
+  return true;
+}
+
+function migrateLegacyQuantInvestor(state) {
+  const investors = state.entities?.investors;
+  if (!investors || investors.npc_quant_institution) {
+    return false;
+  }
+  const template = NPC_INVESTOR_TEMPLATES.find(
+    (candidate) =>
+      candidate.id === 'npc_quant_institution',
+  );
+  const publicCustody =
+    investors.holder_public_custody;
+  const maker = state.market?.maker;
+  if (!template || !publicCustody || !maker) {
+    throw new Error(
+      'Invalid legacy quant-institution custody source.',
+    );
+  }
+  const canonical =
+    createNpcInvestors(
+      state.market.securities,
+    )[template.id];
+  const minimumMakerCash = Math.min(
+    maker.cash,
+    20_000_000_000,
+  );
+  const makerContribution = Math.max(
+    0,
+    Math.min(
+      canonical.cash,
+      money(maker.cash - minimumMakerCash),
+    ),
+  );
+  const remainingCash = money(
+    canonical.cash - makerContribution,
+  );
+  const economyContribution = Math.min(
+    remainingCash,
+    Math.max(0, Number(state.economy?.cashPool) || 0),
+  );
+  canonical.cash = money(
+    makerContribution + economyContribution,
+  );
+  maker.cash = money(
+    maker.cash - makerContribution,
+  );
+  state.economy.cashPool = money(
+    state.economy.cashPool - economyContribution,
+  );
+  const securityTransfers = [];
+  for (const [symbol, quantity] of Object.entries(
+    canonical.holdings,
+  )) {
+    const available =
+      publicCustody.holdings?.[symbol] ?? 0;
+    if (
+      !Number.isSafeInteger(quantity) ||
+      quantity < 0 ||
+      !Number.isSafeInteger(available) ||
+      available < quantity
+    ) {
+      throw new Error(
+        `Insufficient legacy public custody for quant institution: ${symbol}.`,
+      );
+    }
+    publicCustody.holdings[symbol] =
+      available - quantity;
+    securityTransfers.push({
+      symbol,
+      from: publicCustody.id,
+      to: canonical.id,
+      quantity,
+    });
+  }
+  investors[canonical.id] = canonical;
+  const journal = addJournal(state, {
+    type: 'quant_institution_ledger_migration',
+    description:
+      '补录千机量化交易机构的分账现金与托管',
+    postings: canonical.cash > 0
+      ? [
+          {
+            account:
+              'world.quant_institution.cash',
+            debit: canonical.cash,
+            credit: 0,
+          },
+          ...(makerContribution > 0
+            ? [{
+                account:
+                  'world.market_maker.cash',
+                debit: 0,
+                credit: makerContribution,
+              }]
+            : []),
+          ...(economyContribution > 0
+            ? [{
+                account:
+                  'world.economy.cash_pool',
+                debit: 0,
+                credit: economyContribution,
+              }]
+            : []),
+        ]
+      : [],
+    securityTransfers,
+  });
+  const event = addEvent(state, {
+    type: 'quant_institution_ledger_migrated',
+    actorId: 'world_registry',
+    authority: 'canonical_save_migration_v1',
+    affectedEntities: [
+      canonical.id,
+      publicCustody.id,
+      maker.id,
+    ],
+    ledgerEntryIds: [journal.id],
+    visibility: 'private',
+    summary:
+      '旧存档的量化机构现金与证券托管已守恒补录。',
+  });
+  journal.eventId = event.id;
+  return true;
+}
+
 function migrateLegacyStockUniverseState(state) {
   migrateSecurityIssuanceAccounting(state);
   const currentSymbols = COMPANY_TEMPLATES.map(
@@ -12090,6 +15775,10 @@ function migrateLegacyStockUniverseState(state) {
     sameSortedValues(
       actualSymbols,
       LEGACY_EIGHT_STOCK_SYMBOLS,
+    ) ||
+    sameSortedValues(
+      actualSymbols,
+      LEGACY_FOURTEEN_STOCK_SYMBOLS,
     );
   if (
     !sameSortedValues(actualSymbols, currentSymbols) &&
@@ -12111,8 +15800,27 @@ function migrateLegacyStockUniverseState(state) {
         template.balanceSheetModel;
       company.businessModel ??=
         clone(template.businessModel);
+      company.listingIdentity ??=
+        clone(template.listingIdentity);
+      company.products ??=
+        clone(template.products);
+      company.researchPrograms ??=
+        clone(template.researchPrograms);
+      company.supplierCompanyIds ??=
+        clone(template.supplierCompanyIds ?? []);
+      company.customerCompanyIds ??=
+        clone(template.customerCompanyIds ?? []);
+      company.financialCounterpartyCompanyIds ??=
+        clone(template.financialCounterpartyCompanyIds ?? []);
+      company.investmentExposureCompanyIds ??=
+        clone(template.investmentExposureCompanyIds ?? []);
       company.operations.model ??=
         template.businessModel.kind;
+      company.operations.lastSettledTick ??=
+        Math.min(
+          state.world.tick,
+          company.publishedFinancialSnapshot?.asOfTick ?? 0,
+        );
       if (template.financialInstitution) {
         company.financialInstitution =
           normalizeFinancialInstitutionState(
@@ -12148,6 +15856,13 @@ function migrateLegacyStockUniverseState(state) {
           'depthProfile',
         ]);
       for (const field of [
+        'exchange',
+        'listingBoard',
+        'displayCode',
+        'riskDesignation',
+        'listingStatus',
+        'listingIdentity',
+        'listingIdentityHistory',
         'board',
         'dailyLimitBps',
         'industry',
@@ -12175,7 +15890,20 @@ function migrateLegacyStockUniverseState(state) {
         security[field] = clone(canonical[field]);
       }
     }
+    if (company && security) {
+      company.ownershipContract =
+        deriveIssuerOwnershipContract(template, {
+          outstandingUnits:
+            security.outstandingUnits,
+          floatUnits: security.floatUnits,
+        });
+    }
   }
+  normalizeBusinessNetworkState(state);
+  normalizeAdaptiveWorldEventsState(state);
+  migrateLegacyStabilizationInvestor(state);
+  migrateLegacyQuantInvestor(state);
+  hydrateInvestorOwnershipMetadata(state);
   if (sameSortedValues(actualSymbols, currentSymbols)) {
     return {
       migrated: false,
@@ -12276,6 +16004,21 @@ function migrateLegacyStockUniverseState(state) {
           template.tradingEnabled !== false,
         holderKind:
           template.holderKind ?? 'active_investor',
+        beneficialOwner:
+          template.beneficialOwner ?? template.name,
+        holderNature:
+          template.holderNature ??
+          (
+            template.holderKind === 'public_float'
+              ? 'public_custody'
+              : 'investment_fund'
+          ),
+        controlChain:
+          clone(template.controlChain ?? [template.name]),
+        votesPerUnitBps:
+          template.votesPerUnitBps ?? BPS_SCALE,
+        lockedUnitsBySymbol: {},
+        pledgedUnitsBySymbol: {},
         memory: {
           lastTradeTick: null,
           visibleImpact: 0,
@@ -12284,20 +16027,43 @@ function migrateLegacyStockUniverseState(state) {
       state.entities.investors[template.id] =
         investor;
     }
+    investor.name = template.name;
+    investor.holderKind =
+      template.holderKind ?? 'active_investor';
+    investor.beneficialOwner =
+      template.beneficialOwner ?? template.name;
+    investor.holderNature =
+      template.holderNature ??
+      (
+        template.holderKind === 'public_float'
+          ? 'public_custody'
+          : 'investment_fund'
+      );
+    investor.controlChain =
+      clone(template.controlChain ?? [template.name]);
+    investor.votesPerUnitBps =
+      template.votesPerUnitBps ?? BPS_SCALE;
     investor.holdings ??= {};
+    investor.lockedUnitsBySymbol ??= {};
+    investor.pledgedUnitsBySymbol ??= {};
     for (const symbol of currentSymbols) {
-      if (
-        Object.hasOwn(
-          investor.holdings,
-          symbol,
-        )
-      ) {
-        continue;
+      if (!Object.hasOwn(investor.holdings, symbol)) {
+        investor.holdings[symbol] =
+          investorTemplateHolding(
+            template,
+            state.market.securities[symbol],
+          );
       }
-      investor.holdings[symbol] =
-        investorTemplateHolding(
-          template,
-          state.market.securities[symbol],
+      investor.lockedUnitsBySymbol[symbol] =
+        template.strategicIssuerId ===
+          state.market.securities[symbol].issuerId
+          ? investor.holdings[symbol]
+          : 0;
+      investor.pledgedUnitsBySymbol[symbol] =
+        Math.floor(
+          investor.lockedUnitsBySymbol[symbol] *
+            Number(template.pledgeBps ?? 0) /
+            BPS_SCALE,
         );
     }
   }
@@ -12435,7 +16201,7 @@ function migrateLegacyStockUniverseState(state) {
     };
   }
   synchronizeWorldValuations(state);
-  if (state.player.roleType === 'institution') {
+  if (isInstitutionalRole(state.player.roleType)) {
     state.player.roleState.concentration =
       calculateInstitutionConcentration(state);
   }
@@ -12460,6 +16226,14 @@ function migrateLegacyDerivativesState(state) {
 }
 
 export function migrateEmbeddedWorldStateForRestore(state) {
+  normalizeWorldSpatialState(state);
+  normalizeEntertainmentWorldState(state);
+  normalizeOpenWorldCityAuthorityState(state);
+  migrateLegacyCapitalProfile(state);
+  normalizeRoleStrategyState(
+    state.player.roleType,
+    state.player.roleState,
+  );
   if (
     !state.player.life ||
     state.player.life.schemaVersion !== 'lzy-life-v2' ||
@@ -12506,6 +16280,9 @@ export function deserializeWorld(payload) {
   ) {
     throw new Error('Invalid or incompatible LZY save.');
   }
+  normalizeWorldSpatialState(state);
+  normalizeEntertainmentWorldState(state);
+  normalizeOpenWorldCityAuthorityState(state);
   if (state.player.life) {
     const legacyVersion = state.player.life.schemaVersion;
     if (
@@ -12544,6 +16321,11 @@ export function deserializeWorld(payload) {
   ) {
   migrateLegacyLifeState(state);
   }
+  migrateLegacyCapitalProfile(state);
+  normalizeRoleStrategyState(
+    state.player.roleType,
+    state.player.roleState,
+  );
   migrateLegacySocialCareerState(state);
   migrateLegacyStockUniverseState(state);
   bindResearchReportSnapshots(state, {

@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 768" data-semantic-category="interior" role="img" aria-label="江湾可进入室内规则化源资产">
+  <g id="room-shell" data-material="mat_jiangwan_interior_v1">
+    <path d="M96 192 512 64l416 128-416 160z" fill="#e7e0d2"/>
+    <path d="M96 192v384l416 128V352z" fill="#c5b89c" stroke="#5c5144" stroke-width="8"/>
+    <path d="M928 192v384L512 704V352z" fill="#ad9d7e" stroke="#5c5144" stroke-width="8"/>
+    <path d="M96 576 512 704l416-128-416-160z" fill="#8d7456" stroke="#5c5144" stroke-width="8"/>
+  </g>
+  <g id="counter">
+    <path d="m240 420 272 88 240-76v96l-240 84-272-92z" fill="#76593e" stroke="#4c382a" stroke-width="8"/>
+    <path d="m256 388 256 80 224-72 32 36-256 80-288-88z" fill="#d4b56a"/>
+  </g>
+  <g id="seat-anchor" data-anchor="seat">
+    <path d="m680 532 96 32-96 36-96-32z" fill="#3f725f"/>
+    <path d="m600 568 80 32v72l-80-28zM760 568l-80 32v72l80-28z" fill="#315847"/>
+  </g>
+  <g id="service-details" fill="none" stroke="#596866" stroke-width="10">
+    <path d="M200 256v112l176 56V312zM648 312v112l176-56V256z"/>
+    <path d="m424 176 88-28 88 28-88 32z"/>
+  </g>
+</svg>

@@ -310,6 +310,31 @@ export function mergeWorldAuthorityPublication(previous, envelope) {
       ? next.experience
       : null;
   const records = object(experience?.records);
+  const previousWorld2D = prior.experience?.world2d;
+  const nextWorld2D = experience?.world2d;
+  const previousSpatialCommitSeq = Number(
+    previousWorld2D?.authorityCommitSeq,
+  );
+  const nextSpatialCommitSeq = Number(
+    nextWorld2D?.authorityCommitSeq,
+  );
+  const mergedWorld2D =
+    Number.isSafeInteger(previousSpatialCommitSeq) &&
+    Number.isSafeInteger(nextSpatialCommitSeq) &&
+    nextSpatialCommitSeq < previousSpatialCommitSeq
+      ? previousWorld2D
+      : nextWorld2D ?? previousWorld2D;
+  const mergedExperience = experience
+    ? {
+        ...object(prior.experience),
+        ...experience,
+        ...(mergedWorld2D ? { world2d: mergedWorld2D } : {}),
+        records: {
+          ...object(prior.experience?.records),
+          ...records,
+        },
+      }
+    : prior.experience;
 
   return {
     ...prior,
@@ -342,7 +367,7 @@ export function mergeWorldAuthorityPublication(previous, envelope) {
         next.market?.securities,
       ),
     },
-    experience: experience ?? prior.experience,
+    experience: mergedExperience,
     clues: array(records.clues, array(prior.clues)),
     facts: array(records.facts, array(prior.facts)),
     memories: array(records.memories, array(prior.memories)),

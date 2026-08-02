@@ -2,9 +2,9 @@ import {
   auditDerivativesState,
   createDerivativesState,
   reduceDerivatives,
-} from './engine.js?v=20260801-01';
-import { ACCESS_THRESHOLD_CENTS } from './eligibility.js?v=20260801-01';
-import { markAccountEquity } from './risk.js?v=20260801-01';
+} from './engine.js?v=20260803-02';
+import { ACCESS_THRESHOLD_CENTS } from './eligibility.js?v=20260803-02';
+import { markAccountEquity } from './risk.js?v=20260803-02';
 
 export const STRESS_RULE_VERSION =
   'lzy-derivatives-stress-v1';
@@ -180,14 +180,28 @@ function outcomeSign(value) {
   return 'flat';
 }
 
-function underlyingSpots(state, synthTicks) {
+function underlyingSpots(
+  state,
+  synthTicks,
+  openingSpots = null,
+  openingSynthTicks = null,
+) {
   return Object.fromEntries(
     Object.values(state.universe.underlyings).map(
       (underlying) => [
         underlying.id,
         underlying.id === 'SYNTH300'
           ? synthTicks
-          : underlying.spotTicks,
+          : openingSpots && openingSynthTicks > 0
+            ? Math.max(
+                1,
+                Math.round(
+                  openingSpots[underlying.id] *
+                    synthTicks /
+                    openingSynthTicks,
+                ),
+              )
+            : underlying.spotTicks,
       ],
     ),
   );
@@ -220,6 +234,21 @@ export function runDerivativeStressScenario({
     playerCashCents: 100_000_000,
     playerExternalCollateralCents: 100_000_000,
   });
+  const openingUnderlyingSpots = Object.fromEntries(
+    Object.values(state.universe.underlyings).map(
+      (underlying) => [
+        underlying.id,
+        underlying.spotTicks,
+      ],
+    ),
+  );
+  const scenarioUnderlyingSpots = (ticks) =>
+    underlyingSpots(
+      state,
+      ticks,
+      openingUnderlyingSpots,
+      spotPathTicks[0],
+    );
   const openingSystemCashCents = systemCashCents(state);
   const openingActorCashCents = Object.fromEntries(
     Object.keys(state.actors).map((actorId) => [
@@ -252,8 +281,7 @@ export function runDerivativeStressScenario({
     type: 'SYNC_WORLD',
     atMs: 0,
     totalEquivalentAssetCents: ACCESS_THRESHOLD_CENTS,
-    underlyingSpots: underlyingSpots(
-      state,
+    underlyingSpots: scenarioUnderlyingSpots(
       spotPathTicks[0],
     ),
     playerExternalCollateralCents: 100_000_000,
@@ -278,10 +306,8 @@ export function runDerivativeStressScenario({
       atMs: settlementAtMs - 2_000,
       totalEquivalentAssetCents:
         ACCESS_THRESHOLD_CENTS,
-      underlyingSpots: underlyingSpots(
-        state,
-        current,
-      ),
+      underlyingSpots:
+        scenarioUnderlyingSpots(current),
       playerExternalCollateralCents: 100_000_000,
       regimeSignalBps,
       jumpRiskBps:
@@ -301,10 +327,8 @@ export function runDerivativeStressScenario({
     ({ state } = reduceDerivatives(state, {
       type: 'EXPIRE_CONTRACTS',
       atMs: settlementAtMs,
-      underlyingSettlementTicks: underlyingSpots(
-        state,
-        current,
-      ),
+      underlyingSettlementTicks:
+        scenarioUnderlyingSpots(current),
       source: 'stress_harness',
     }));
   }

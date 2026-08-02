@@ -1,4 +1,6 @@
 import {
+  capitalCentsFromSliderPosition,
+  capitalSliderPositionFromCents,
   createWorld,
   getCompanyCatalog,
   getLifeCatalog,
@@ -6,52 +8,78 @@ import {
   getRoleCatalog,
   getSocialCareerProjection,
   getDerivativesProjection,
-} from './engine.js?v=20260801-01';
+} from './engine.js?v=20260803-02';
 import {
   clearSavedWorld,
   exportSavedGameArchive,
   getSaveMeta,
   hasSavedWorld,
   hasStoredSaveArchive,
+  importSavedGameArchive,
   loadGameState,
   saveGameState,
   saveGameStateAsync,
-} from './storage.js?v=20260801-01';
+} from './storage.js?v=20260803-02';
 import {
   createMarketClient,
   createVisibleFramePublicationGate,
-} from './market/client.js?v=20260801-01';
-import { mountMarketStage } from './market/stage.js?v=20260801-01';
-import { MARKET_CLOCK_ORIGIN_OFFSET_MS } from './market/chart-domain.js?v=20260801-01';
+} from './market/client.js?v=20260803-02';
+import { mountMarketStage } from './market/stage.js?v=20260803-02';
+import { MARKET_CLOCK_ORIGIN_OFFSET_MS } from './market/chart-domain.js?v=20260803-02';
+import {
+  QUANT_STRATEGY_CATALOG,
+  playerStrategyTemplate,
+  quantStrategyDefinition,
+  quantStrategyUpgradeCost,
+} from './role-strategies.js?v=20260803-02';
 import {
   mergeWorldAuthorityPublication,
-} from './market/world-publication.js?v=20260801-01';
-import { projectWorldExperience } from './experience/world-experience.js?v=20260801-01';
+} from './market/world-publication.js?v=20260803-02';
+import { projectWorldExperience } from './experience/world-experience.js?v=20260803-02';
 import {
   renderWorldlinePanel,
-} from './experience/worldline-view.js?v=20260801-01';
-import { projectPlayerWealth } from './experience/player-wealth.js?v=20260801-01';
-import { renderPlayerWealth } from './experience/player-wealth-view.js?v=20260801-01';
+} from './experience/worldline-view.js?v=20260803-02';
+import { projectPlayerWealth } from './experience/player-wealth.js?v=20260803-02';
+import { renderPlayerWealth } from './experience/player-wealth-view.js?v=20260803-02';
 import {
   mountMarketIntelligence,
-} from './experience/market-intelligence-view.js?v=20260801-01';
+} from './experience/market-intelligence-view.js?v=20260803-02';
 import {
   renderCityAssetActions,
   renderCityPlaceGrid,
   renderCityResponsibilityPanel,
   renderCityServicePanel,
-} from './experience/city-life-view.js?v=20260801-01';
+} from './experience/city-life-view.js?v=20260803-02';
+import {
+  renderOpenWorldCityPanel,
+} from './experience/open-world-city-view.js?v=20260803-02';
 import {
   renderSocialCareerView,
   socialCareerActionFromDataset,
-} from './experience/social-career-view.js?v=20260801-01';
+} from './experience/social-career-view.js?v=20260803-02';
 import {
   isPublishedDerivativesProjection,
   mergePublishedDerivativesProjection,
-} from './experience/derivatives-view.js?v=20260801-01';
+} from './experience/derivatives-view.js?v=20260803-02';
+import { mountWorld2DRuntime } from './game2d/runtime.js?v=20260803-02';
 
 const root = document.querySelector('#app');
 const ROLE_CATALOG = getRoleCatalog();
+const INSTITUTIONAL_PLAYER_ROLES = new Set([
+  'institution',
+  'quant_institution',
+  'stabilization_fund',
+]);
+
+function institutionalPlayerRole(roleType) {
+  return INSTITUTIONAL_PLAYER_ROLES.has(roleType);
+}
+
+function lifeEligibilityRole(roleType) {
+  if (institutionalPlayerRole(roleType)) return 'institution';
+  if (roleType === 'private_whale') return 'household';
+  return roleType;
+}
 const COMPANY_CATALOG = getCompanyCatalog();
 const COMPANY_BY_ID = Object.fromEntries(
   COMPANY_CATALOG.map((company) => [company.id, company]),
@@ -174,6 +202,17 @@ const REJECTION_LABELS = {
     '异地联络需要一部完好并设为常用的手机。',
   SOCIAL_ATTENTION_REQUIRED: '今天能分给这件事的注意力不够。',
   SOCIAL_CASH_REQUIRED: '当前可用现金不足。',
+  INTERACTION_TOO_FAR: '还没有走到这个地点。',
+  UNKNOWN_INTERACTABLE: '这个地点现在不可用。',
+  PORTAL_NOT_AVAILABLE: '这条通路现在没有开放。',
+  PORTAL_DESTINATION_INVALID: '目的地暂时无法安全到达。',
+  INTERACTION_NOT_SETTLEABLE: '这个互动暂时不能结算。',
+  STALE_ENTERTAINMENT_PROJECTION: '地点里的活动刚刚发生变化，请按最新内容再试一次。',
+  ACTIVITY_ALREADY_COMPLETED_TODAY: '今天已经完成过这项活动，明天再来会有新的体验。',
+  NO_AVAILABLE_ACTIVITY: '这项活动当前没有开放。',
+  NO_EXECUTABLE_COUNTERPARTY: '当前没有可以真实结算的服务方。',
+  STALE_ACTIVITY_REFERENCE: '活动安排已经更新，请按最新安排再试。',
+  STALE_OFFER_REFERENCE: '这份报价已经更新，请按最新报价再试。',
   SOCIAL_OFFER_REFUSED: '这个条件对方没有接受。',
   SOCIAL_GIFT_REFUSED: '对方没有收下这份心意。',
   SOCIAL_TARGET_COMMITTED: '对方已有不能随意放下的工作约定。',
@@ -216,6 +255,11 @@ let errorMessage = '';
 let marketClient = null;
 let marketStage = null;
 let marketIntelligenceView = null;
+let world2dRuntime = null;
+let world2dControlTail = Promise.resolve();
+let world2dCommandOrdinal = 0;
+let pendingWorld2DInteraction = null;
+let intelligenceInitialRoute = { page: 'overview' };
 let marketSnapshot = null;
 let marketCheckpoint = null;
 let latestMarketReceipt = null;
@@ -242,7 +286,13 @@ let selectedDerivativeContractId = null;
 let derivativesProjection = null;
 let historyLayer = 'facts';
 let saveRecoveryAvailable = false;
-const AUTO_SAVE_DEBOUNCE_MS = 1_200;
+// Persist a canonical barrier after a short quiet window. Building the exact
+// checkpoint is intentionally heavier than an order acknowledgement; firing
+// it 1.2s after opening Level-2 routinely put that barrier immediately ahead
+// of the player's first order in the same Worker queue. Five seconds still
+// coalesces ordinary play promptly while keeping active ticket interaction out
+// of the save critical section.
+const AUTO_SAVE_DEBOUNCE_MS = 5_000;
 
 function cloneValue(value) {
   if (value == null) return value;
@@ -372,6 +422,11 @@ function viewTitle() {
 function render() {
   destroyMarketStage();
   destroyMarketIntelligence();
+  if (screen === 'game' && world && world2dRuntime) {
+    world2dRuntime.suspend();
+  } else {
+    destroyWorld2DRuntime();
+  }
   root.setAttribute('aria-busy', 'false');
   if (screen === 'create') {
     root.innerHTML = renderCreateScreen();
@@ -382,6 +437,7 @@ function render() {
   }
   mountCurrentMarketStage();
   mountCurrentMarketIntelligence();
+  mountCurrentWorld2DRuntime();
 }
 
 function renderWelcomeScreen() {
@@ -449,6 +505,11 @@ function renderWelcomeScreen() {
             type="button" data-action="new-world" data-testid="new-game">
             ${resumable ? '新建另一世界' : '进入新世界'}
           </button>
+          <label class="button button-quiet button-wide" data-testid="import-save">
+            导入存档副本
+            <input type="file" accept="application/json,.json"
+              data-testid="import-save-input" hidden>
+          </label>
           ${
             archivePresent && (!resumable || saveRecoveryAvailable)
               ? `
@@ -481,7 +542,11 @@ function renderCreateScreen() {
             data-testid="role-${roleType}" />
           <span class="create-role-index" aria-hidden="true">${index + 1}</span>
           <strong>${escapeHtml(role.label)}</strong>
-          <small>${money(role.low.capital)} 起</small>
+          <small>${money(
+            role.capitalContract.minimumCents / 100,
+          )}—${money(
+            role.capitalContract.maximumCents / 100,
+          )}</small>
         </label>
       `,
     )
@@ -508,19 +573,39 @@ function renderCreateScreen() {
         </fieldset>
 
         <div class="create-control-grid">
-          <fieldset class="create-block create-strength-block">
-            <legend>实力</legend>
-            <div class="create-strength-toggle">
-              <label>
-                <input type="radio" name="strengthTier" value="low" checked
-                  data-testid="strength-low" />
-                <span>低档</span>
-              </label>
-              <label>
-                <input type="radio" name="strengthTier" value="high"
-                  data-testid="strength-high" />
-                <span>高档</span>
-              </label>
+          <fieldset class="create-block create-capital-block">
+            <legend>可控资本</legend>
+            <div class="create-capital-control">
+              <input id="capital-slider" class="range" type="range"
+                min="0" max="1000" step="1"
+                value="${capitalSliderPositionFromCents(
+                  'household',
+                  ROLE_CATALOG.household.capitalContract.defaultCents,
+                )}"
+                data-testid="capital-slider" />
+              <label for="capital-input">精确金额（元）</label>
+              <input id="capital-input" class="input data-number create-capital-input"
+                type="number" name="startingCapitalYuan" step="1"
+                min="${ROLE_CATALOG.household.capitalContract.minimumCents / 100}"
+                max="${ROLE_CATALOG.household.capitalContract.maximumCents / 100}"
+                value="${capitalCentsFromSliderPosition(
+                  'household',
+                  capitalSliderPositionFromCents(
+                    'household',
+                    ROLE_CATALOG.household.capitalContract.defaultCents,
+                  ),
+                ) / 100}"
+                inputmode="numeric" required data-testid="capital-input" />
+              <div class="create-capital-bounds">
+                <small data-testid="capital-minimum">最低 ${money(
+                  ROLE_CATALOG.household.capitalContract.minimumCents / 100,
+                )}</small>
+                <small data-testid="capital-maximum">最高 ${money(
+                  ROLE_CATALOG.household.capitalContract.maximumCents / 100,
+                )}</small>
+              </div>
+              <small id="capital-validation" class="capital-validation"
+                role="status" aria-live="polite"></small>
             </div>
           </fieldset>
 
@@ -548,7 +633,10 @@ function renderCreateScreen() {
 
         <div id="profile-preview" class="create-vitals"
           data-testid="create-vitals">
-          ${renderProfilePreview('household', 'low')}
+          ${renderProfilePreview(
+            'household',
+            ROLE_CATALOG.household.capitalContract.defaultCents,
+          )}
         </div>
 
         <div class="create-actions">
@@ -564,9 +652,12 @@ function renderCreateScreen() {
   `;
 }
 
-function renderProfilePreview(roleType, strengthTier) {
+function renderProfilePreview(
+  roleType,
+  startingCapitalCents,
+) {
   const role = ROLE_CATALOG[roleType];
-  const profile = role[strengthTier];
+  const profile = role.low;
   const roleDetail = {
     household: ['生活储备', money(profile.cashReserve)],
     professional: ['回撤边界', percent(
@@ -581,6 +672,15 @@ function renderProfilePreview(roleType, strengthTier) {
       profile.liquidityBufferRatio,
       0,
     )],
+    quant_institution: ['策略容量', percent(
+      profile.strategyCapacity,
+      0,
+    )],
+    stabilization_fund: ['授权主体', `${profile.mandateLegs} 组`],
+    private_whale: ['实际受益人暴露', percent(
+      profile.beneficialOwnerExposure,
+      0,
+    )],
   }[roleType];
 
   return `
@@ -588,7 +688,9 @@ function renderProfilePreview(roleType, strengthTier) {
       <small>${escapeHtml(role.label)}</small>
       <strong>${escapeHtml(profile.name)}</strong>
     </span>
-    <span><small>资本</small><strong>${money(profile.capital)}</strong></span>
+    <span><small>可控资本</small><strong>${money(
+      startingCapitalCents / 100,
+    )}</strong></span>
     <span><small>负债</small><strong>${money(profile.liabilities)}</strong></span>
     <span><small>${escapeHtml(roleDetail[0])}</small><strong>${escapeHtml(
       roleDetail[1],
@@ -599,9 +701,6 @@ function renderProfilePreview(roleType, strengthTier) {
 
 function renderGameScreen() {
   const [title, summary] = viewTitle();
-  const life = getLifeProjection(world);
-  const homeNavLabel =
-    life.kind === 'organization' ? '运营' : life.homeLabel;
   const mode = interfaceMode === 'expert' ? 'detail' : 'compact';
   const saveLabel =
     saveState === 'error'
@@ -690,30 +789,21 @@ function renderGameScreen() {
         <div class="primary-nav-inner">
           <button class="nav-button" type="button" data-action="route" data-route="today"
             aria-current="${routeIs('today')}"
-            aria-label="世界场景" data-testid="nav-today">世界</button>
-          <button class="nav-button" type="button" data-action="route" data-route="market"
-            aria-current="${routeIs('market')}"
-            aria-label="实时市场终端" data-testid="nav-market">市场</button>
+            aria-label="城市与当前地点" data-testid="nav-city">城市</button>
+          <button class="nav-button" type="button" data-action="route"
+            data-route="information" aria-current="${routeIs('information')}"
+            aria-label="手机与城市信息" data-testid="nav-phone">手机</button>
           <button class="nav-button" type="button" data-action="life-place"
-            data-life-section="home"
+            data-life-section="bag"
             aria-current="${
-              activeRoute === 'life' && lifeSection === 'home'
+              activeRoute === 'life' && lifeSection === 'bag'
                 ? 'page'
                 : 'false'
             }"
-            aria-label="${escapeHtml(homeNavLabel)}"
-            data-testid="nav-home">${escapeHtml(homeNavLabel)}</button>
-          <button class="nav-button" type="button" data-action="life-place"
-            data-life-section="shop"
-            aria-current="${
-              activeRoute === 'life' && lifeSection === 'shop'
-                ? 'page'
-                : 'false'
-            }"
-            aria-label="商店" data-testid="nav-shop">商店</button>
+            aria-label="随身物品" data-testid="nav-bag">随身</button>
           <button class="nav-button" type="button" data-action="route" data-route="decision"
             aria-current="${routeIs('decision')}"
-            aria-label="工作" data-testid="nav-decision">工作</button>
+            aria-label="角色、工作与关系" data-testid="nav-self">我</button>
         </div>
       </nav>
 
@@ -784,6 +874,28 @@ function renderActiveRoute() {
 function renderRoleCard() {
   const state = world.player.roleState;
   const { familyLiquidity, controlledCompanyId } = state;
+  const institutionalDetail = `
+    <div class="metric"><span>管理资产</span><strong>${money(
+      state.assetsUnderManagement,
+    )}</strong></div>
+    <div class="metric"><span>产品负债</span><strong>${money(
+      state.productLiability,
+    )}</strong></div>
+    <div class="metric"><span>缓冲目标</span><strong>${percent(
+      state.liquidityBufferRatio,
+      0,
+    )}</strong></div>
+    <div class="metric"><span>赎回压力</span><strong>${percent(
+      state.redemptionPressure,
+    )}</strong></div>
+    <div class="metric"><span>市场关注</span><strong>${number(
+      state.marketAttention,
+      2,
+    )}</strong></div>
+    <div class="metric"><span>组合集中度</span><strong>${percent(
+      state.concentration,
+    )}</strong></div>
+  `;
   const detail = {
     household: `
       <div class="metric"><span>现金储备边界</span><strong>${money(
@@ -824,27 +936,33 @@ function renderRoleCard() {
         state.expansionCredit,
       )}</strong></div>
     `,
-    institution: `
-      <div class="metric"><span>管理资产</span><strong>${money(
-        state.assetsUnderManagement,
+    institution: institutionalDetail,
+    quant_institution: `${institutionalDetail}
+      <div class="metric"><span>技术预算</span><strong>${money(
+        state.technologyBudget,
       )}</strong></div>
-      <div class="metric"><span>产品负债</span><strong>${money(
-        state.productLiability,
+      <div class="metric"><span>策略容量</span><strong>${percent(
+        state.strategyCapacity,
       )}</strong></div>
-      <div class="metric"><span>缓冲目标</span><strong>${percent(
-        state.liquidityBufferRatio,
-        0,
+    `,
+    stabilization_fund: `${institutionalDetail}
+      <div class="metric"><span>机制授权</span><strong>稳定市场功能</strong></div>
+      <div class="metric"><span>独立账簿</span><strong>${number(
+        state.mandateLegs,
+      )} 组</strong></div>
+    `,
+    private_whale: `
+      <div class="metric"><span>私人储备边界</span><strong>${money(
+        state.cashReserve,
       )}</strong></div>
-      <div class="metric"><span>赎回压力</span><strong>${percent(
-        state.redemptionPressure,
+      <div class="metric"><span>受益所有人暴露</span><strong>${percent(
+        state.beneficialOwnerExposure,
       )}</strong></div>
-      <div class="metric"><span>市场关注</span><strong>${number(
-        state.marketAttention,
+      <div class="metric"><span>披露关注</span><strong>${number(
+        state.disclosureAttention,
         2,
       )}</strong></div>
-      <div class="metric"><span>组合集中度</span><strong>${percent(
-        state.concentration,
-      )}</strong></div>
+      <div class="metric"><span>家族办公室</span><strong>运行中</strong></div>
     `,
   }[world.player.roleType];
 
@@ -880,13 +998,16 @@ function portfolioValue() {
 }
 
 function availableTradingCashView() {
-  if (world.player.roleType === 'household') {
+  if (
+    world.player.roleType === 'household' ||
+    world.player.roleType === 'private_whale'
+  ) {
     return Math.max(
       0,
       world.player.cash - world.player.roleState.cashReserve,
     );
   }
-  if (world.player.roleType === 'institution') {
+  if (institutionalPlayerRole(world.player.roleType)) {
     return Math.max(
       0,
       world.player.cash -
@@ -989,145 +1110,674 @@ function renderObservableActorNodes(nodes) {
     .join('');
 }
 
-function renderTodayView() {
-  const view = projectWorldExperience(world, marketSnapshot, {
-    includeSignals: false,
-  });
-  const wealthMarkup = renderPlayerWealth(
-    projectPlayerWealth(world, marketSnapshot),
-    { variant: 'home' },
-  );
-  const life = getLifeProjection(world);
-  const playerNode = view.nodes.find((node) => node.kind === 'player');
-  const companyNodes = view.nodes.filter((node) => node.kind === 'company');
-  const actorNodes = view.nodes.filter((node) => node.kind === 'actor');
-  const clockText = virtualClockText(
-    view.clock.virtualMs,
-    marketSnapshot?.marketClockOffsetMs,
-  );
-  const nodesMarkup = companyNodes
+function compactMoney(value) {
+  const amount = Number(value) || 0;
+  if (Math.abs(amount) >= 100_000_000_000) {
+    return `${number(amount / 100_000_000_000, 2)} 千亿`;
+  }
+  if (Math.abs(amount) >= 100_000_000) {
+    return `${number(amount / 100_000_000, 2)} 亿`;
+  }
+  if (Math.abs(amount) >= 10_000) {
+    return `${number(amount / 10_000, 1)} 万`;
+  }
+  return money(amount);
+}
+
+function renderWorldMarketPulse(market, actorNodes) {
+  const movers = market.topMovers
     .map(
-      (node) => `
-        <button class="world-node world-node-company" type="button"
-          style="--node-x:${node.x}%;--node-y:${node.y}%;--node-weight:${node.weight};--node-tension:${node.tension}"
-          data-action="choose-security" data-symbol="${escapeHtml(node.symbol)}"
-          data-world-node="${escapeHtml(node.symbol)}"
-          aria-label="${escapeHtml(node.label)}，持仓 ${number(
-            node.holdingUnits,
-          )} 股，价格 ${money(node.lastPriceTicks / 100)}">
-          <span class="world-node-aura" aria-hidden="true"></span>
-          <strong>${escapeHtml(node.label)}</strong>
-          <span>${escapeHtml(node.symbol)}</span>
-          <small data-world-node-price>${money(node.lastPriceTicks / 100)}</small>
-          <small class="${marketDirectionClass(node.deltaBps)}"
-            data-world-node-change>${node.deltaBps >= 0 ? '+' : ''}${number(
-              node.deltaBps / 100,
-              1,
-            )}%</small>
+      (company) => `
+        <div class="world-market-row">
+          <button type="button" class="world-market-row__quote"
+            data-action="choose-security"
+            data-symbol="${escapeHtml(company.symbol)}"
+            aria-label="打开 ${escapeHtml(company.companyName)} 股票行情">
+            <span>
+              <strong>${escapeHtml(company.companyName)}</strong>
+              <small>${escapeHtml(company.displayCode)} · ${escapeHtml(
+                company.boardLabel,
+              )}${
+                company.riskLabel
+                  ? ` · ${escapeHtml(company.riskLabel)}`
+                  : ''
+              }</small>
+            </span>
+            <span class="data-number">
+              <strong>${money(company.lastPriceTicks / 100)}</strong>
+              <small class="${marketDirectionClass(company.deltaBps)}">${
+                company.deltaBps >= 0 ? '+' : ''
+              }${number(company.deltaBps / 100, 2)}%</small>
+            </span>
+          </button>
+          <button type="button" class="world-inline-link"
+            data-action="open-company-information"
+            data-company-id="${escapeHtml(company.companyId)}"
+            data-section="quote">档案 ↗</button>
+        </div>
+      `,
+    )
+    .join('');
+  const actors = actorNodes.length
+    ? actorNodes
+        .slice(0, 3)
+        .map(
+          (actor) => `
+            <button type="button" data-action="open-market-mode"
+              data-market-mode="stocks">
+              <span>${escapeHtml(actor.label)}</span>
+              <strong>${number(actor.activityCount)} 次公开活动</strong>
+            </button>
+          `,
+        )
+        .join('')
+    : '<span>当前公开席位活动尚未形成可披露聚合。</span>';
+  return `
+    <section class="world-overview-card world-market-pulse"
+      data-testid="world-market-pulse">
+      <header class="world-card-heading">
+        <div><small>股票市场</small><h2>全市场脉搏</h2></div>
+        <button type="button" data-action="open-market-mode"
+          data-market-mode="stocks">进入股票行情 ↗</button>
+      </header>
+      <div class="world-pulse-metrics">
+        <span><small>上涨</small><strong class="market-up">${number(
+          market.advancers,
+        )}</strong></span>
+        <span><small>下跌</small><strong class="market-down">${number(
+          market.decliners,
+        )}</strong></span>
+        <span><small>平盘</small><strong>${number(market.unchanged)}</strong></span>
+        <span><small>涨停 / 跌停</small><strong>${number(
+          market.limitUpCount,
+        )} / ${number(market.limitDownCount)}</strong></span>
+        <span><small>全场成交额</small><strong>${compactMoney(
+          market.totalTurnoverCents / 100,
+        )}</strong></span>
+      </div>
+      <div class="world-market-list">${movers}</div>
+      <div class="world-actor-activity" data-testid="world-actor-layer"
+        aria-label="公开市场主体活动">
+        ${actors}
+      </div>
+    </section>
+  `;
+}
+
+function renderWorldEconomyNetwork(economy, network) {
+  const relationshipLabels = {
+    supplier: '供应交付',
+    customer: '客户需求',
+    credit: '信用融资',
+    investment: '投资敞口',
+  };
+  const pressures = network.pressures.length
+    ? network.pressures
+        .map(
+          (pressure) => `
+            <button type="button" class="world-network-row"
+              data-action="open-company-information"
+              data-company-id="${escapeHtml(pressure.companyId)}"
+              data-section="supply-demand">
+              <span>
+                <strong>${escapeHtml(pressure.companyName)}</strong>
+                <small>${escapeHtml(
+                  pressure.counterpartyName
+                    ? `${pressure.counterpartyName} · ${
+                        relationshipLabels[pressure.relationship] || '经营关联'
+                      }`
+                    : '综合经营传导',
+                )}</small>
+              </span>
+              <em>${number(pressure.deviationBps / 100, 2)}%</em>
+            </button>
+          `,
+        )
+        .join('')
+    : '<p class="world-card-empty">当前产业链传导接近中性；点击查看完整关联网络。</p>';
+  return `
+    <section class="world-overview-card world-economy-network"
+      data-testid="world-economy-network">
+      <header class="world-card-heading">
+        <div><small>实体经济</small><h2>${escapeHtml(economy.regime)}</h2></div>
+        <button type="button" data-action="route"
+          data-route="information">产业与公司网络 ↗</button>
+      </header>
+      <div class="world-economy-metrics">
+        <span><small>工业周期</small><strong>${number(
+          economy.industrialCycle,
+          3,
+        )}</strong></span>
+        <span><small>发展指数</small><strong>${number(
+          economy.developmentIndex,
+          3,
+        )}</strong></span>
+        <span><small>技术前沿</small><strong>${number(
+          economy.technologyFrontier,
+          3,
+        )}</strong></span>
+        <span><small>需求潜力</small><strong>${number(
+          economy.potentialDemandIndex,
+          3,
+        )}</strong></span>
+        <span><small>无风险利率</small><strong>${number(
+          economy.riskFreeRateBps / 100,
+          2,
+        )}%</strong></span>
+        <span><small>信用利差</small><strong>${number(
+          economy.creditSpreadBps / 100,
+          2,
+        )}%</strong></span>
+      </div>
+      <div class="world-network-summary">
+        <div><strong>经营传导</strong><small>${number(
+          network.edgeCount,
+        )} 条有类型关系 · 第 ${number(
+          network.lastSettledTick,
+        )} 日结算</small></div>
+        ${pressures}
+      </div>
+    </section>
+  `;
+}
+
+function renderWorldDerivativesPulse(derivatives) {
+  return `
+    <section class="world-overview-card world-derivatives-pulse"
+      data-testid="world-derivatives-pulse">
+      <header class="world-card-heading">
+        <div><small>跨资产市场</small><h2>期货与期权</h2></div>
+        <span>${number(derivatives.tradeCount)} 笔真实成交</span>
+      </header>
+      <div class="world-derivative-metrics">
+        <span><small>期货合约</small><strong>${number(
+          derivatives.futuresCount,
+        )}</strong></span>
+        <span><small>期权合约</small><strong>${number(
+          derivatives.optionsCount,
+        )}</strong></span>
+        <span><small>有限市场主体</small><strong>${number(
+          derivatives.actorCount,
+        )}</strong></span>
+        <span><small>实时订单簿</small><strong>${number(
+          derivatives.liveBookCount,
+        )}</strong></span>
+        <span><small>跳跃风险</small><strong>${number(
+          derivatives.jumpRiskBps / 100,
+          2,
+        )}%</strong></span>
+        <span><small>流动性风险</small><strong>${number(
+          derivatives.liquidityRiskBps / 100,
+          2,
+        )}%</strong></span>
+      </div>
+      <div class="world-card-actions">
+        <button type="button" data-action="open-market-mode"
+          data-market-mode="futures">期货行情与交易 ↗</button>
+        <button type="button" data-action="open-market-mode"
+          data-market-mode="options">期权行情与交易 ↗</button>
+      </div>
+    </section>
+  `;
+}
+
+function renderWorldBriefing(briefing) {
+  return `
+    <section class="world-overview-card world-public-briefing"
+      data-testid="world-public-briefing">
+      <header class="world-card-heading">
+        <div><small>事实优先</small><h2>公开简报</h2></div>
+        <button type="button" data-action="route"
+          data-route="history">全部世界记录 ↗</button>
+      </header>
+      <div class="world-briefing-list">
+        ${briefing
+          .map(
+            (item) => `
+              <button type="button"
+                data-action="open-company-information"
+                ${
+                  item.companyId
+                    ? `data-company-id="${escapeHtml(item.companyId)}"`
+                    : ''
+                }
+                data-section="${escapeHtml(item.route.section || 'disclosures')}">
+                <span>${escapeHtml(item.category)}</span>
+                <strong>${escapeHtml(item.title)}</strong>
+                <small>第 ${number(item.tick)} 日 · ${escapeHtml(
+                  item.sourceLabel,
+                )}</small>
+              </button>
+            `,
+          )
+          .join('')}
+      </div>
+    </section>
+  `;
+}
+
+function renderWorldCompanyUniverse(companies) {
+  return `
+    <details class="world-company-universe" open
+      data-testid="world-company-universe">
+      <summary>
+        <span><small>完整上市公司体系</small><strong>${number(
+          companies.length,
+        )} 家公司 · 四个板块 · 经营关系实时结算</strong></span>
+        <span>展开 / 收起</span>
+      </summary>
+      <div class="world-company-table" tabindex="0">
+        <table>
+          <thead><tr><th>公司</th><th>板块</th><th>行业</th><th>现价</th><th>涨跌</th><th>市值</th><th>产业传导</th><th>入口</th></tr></thead>
+          <tbody>
+            ${companies
+              .map(
+                (company) => `
+                  <tr>
+                    <th scope="row">
+                      <strong>${escapeHtml(company.companyName)}</strong>
+                      <small>${escapeHtml(company.displayCode)}${
+                        company.riskLabel
+                          ? ` · ${escapeHtml(company.riskLabel)}`
+                          : ''
+                      }</small>
+                    </th>
+                    <td>${escapeHtml(company.boardLabel)}</td>
+                    <td>${escapeHtml(company.industry)}</td>
+                    <td class="data-number">${money(
+                      company.lastPriceTicks / 100,
+                    )}</td>
+                    <td class="data-number ${marketDirectionClass(
+                      company.deltaBps,
+                    )}">${company.deltaBps >= 0 ? '+' : ''}${number(
+                      company.deltaBps / 100,
+                      2,
+                    )}%</td>
+                    <td class="data-number">${compactMoney(
+                      company.marketCapCents / 100,
+                    )}</td>
+                    <td>${
+                      company.networkDeviationBps > 0
+                        ? `${number(
+                            company.networkDeviationBps / 100,
+                            2,
+                          )}% · ${number(company.networkCauseCount)} 项`
+                        : '中性'
+                    }</td>
+                    <td><span class="world-company-actions">
+                      <button type="button" data-action="choose-security"
+                        data-symbol="${escapeHtml(company.symbol)}">交易</button>
+                      <button type="button" data-action="open-company-information"
+                        data-company-id="${escapeHtml(company.companyId)}">档案</button>
+                    </span></td>
+                  </tr>
+                `,
+              )
+              .join('')}
+          </tbody>
+        </table>
+      </div>
+    </details>
+  `;
+}
+
+function currentWorld2DProjection() {
+  return world?.experience?.world2d ?? null;
+}
+
+function currentEntertainmentProjection() {
+  return world?.experience?.entertainment ?? null;
+}
+
+function currentOpenWorldCityProjection() {
+  return world?.experience?.openWorldCity ?? null;
+}
+
+function compileOpenWorldCityRequestFromDataset(dataset) {
+  const kind = dataset.openWorldKind;
+  const version = Number(dataset.openWorldVersion);
+  if (
+    ![
+      'move_to',
+      'accept_offer',
+      'join_activity',
+      'board_transit',
+      'use_asset',
+    ].includes(kind) ||
+    !Number.isSafeInteger(version)
+  ) {
+    return null;
+  }
+  if (kind === 'move_to') {
+    if (!dataset.openWorldRoute || !dataset.openWorldPlace) return null;
+    return {
+      kind,
+      routeId: dataset.openWorldRoute,
+      routeVersion: version,
+      toPlaceId: dataset.openWorldPlace,
+    };
+  }
+  if (kind === 'accept_offer') {
+    const quantity = Number(dataset.openWorldQuantity);
+    if (
+      !dataset.openWorldOffer ||
+      !Number.isSafeInteger(quantity) ||
+      quantity <= 0
+    ) {
+      return null;
+    }
+    return {
+      kind,
+      offerId: dataset.openWorldOffer,
+      offerVersion: version,
+      quantity,
+    };
+  }
+  if (kind === 'join_activity') {
+    if (!dataset.openWorldActivity) return null;
+    return {
+      kind,
+      activityId: dataset.openWorldActivity,
+      activityVersion: version,
+    };
+  }
+  if (kind === 'board_transit') {
+    const seats = Number(dataset.openWorldSeats);
+    if (
+      !dataset.openWorldRun ||
+      !Number.isSafeInteger(seats) ||
+      seats <= 0
+    ) {
+      return null;
+    }
+    return {
+      kind,
+      runId: dataset.openWorldRun,
+      runVersion: version,
+      seats,
+    };
+  }
+  if (!dataset.openWorldAsset || !dataset.openWorldAffordance) return null;
+  return {
+    kind,
+    assetId: dataset.openWorldAsset,
+    assetVersion: version,
+    affordanceId: dataset.openWorldAffordance,
+  };
+}
+
+function world2dWeatherLabel(environmentState) {
+  const weather = {
+    light_rain: '小雨',
+    rain: '雨',
+    clear: '晴',
+    cloudy: '多云',
+    overcast: '阴',
+  }[environmentState?.weather] ?? '天气变化中';
+  const light = {
+    morning: '清晨',
+    day: '白天',
+    evening: '傍晚',
+    night: '夜间',
+  }[environmentState?.light] ?? '';
+  return `${light} · ${weather}`;
+}
+
+function renderWorld2DEntertainment(entertainment) {
+  if (!entertainment?.schema) return '';
+  const offers = (entertainment.executableOffers ?? [])
+    .map(
+      (offer) => `
+        <button type="button" class="world2d-entertainment-action"
+          data-action="entertainment-intent"
+          data-entertainment-kind="accept_offer"
+          data-entertainment-id="${escapeHtml(offer.offerId)}"
+          data-entertainment-version="${offer.offerVersion}"
+          data-testid="entertainment-offer-${escapeHtml(offer.offerId)}">
+          <span><small>本地消费 · 余 ${number(
+            offer.availableQuantity,
+          )} 份</small><strong>${escapeHtml(offer.labelZh)}</strong></span>
+          <span><b>${money(offer.unitPriceCents / 100)}</b><em>付款体验 ↗</em></span>
+          <p>${escapeHtml(offer.descriptionZh)}</p>
         </button>
       `,
     )
     .join('');
-  const workPlace = {
-    household: '街区',
-    professional: '办公室',
-    operator: '企业现场',
-    institution: '机构总部',
-  }[world.player.roleType];
-  const homePlace =
-    life.kind === 'organization'
-      ? organizationOperationLabel(world.player.roleType)
-      : life.homeLabel;
-  const shopPlace =
-    world.player.roleType === 'operator'
-      ? '企业采购'
-      : life.kind === 'organization'
-        ? '机构服务'
-        : '街区商店';
+  const activities = (entertainment.activityOptions ?? [])
+    .map(
+      (activity) => `
+        <button type="button" class="world2d-entertainment-action"
+          data-action="entertainment-intent"
+          data-entertainment-kind="join_activity"
+          data-entertainment-id="${escapeHtml(activity.activityId)}"
+          data-entertainment-version="${activity.activityVersion}"
+          data-testid="entertainment-activity-${escapeHtml(
+            activity.activityId,
+          )}">
+          <span><small>现场活动 · ${number(
+            activity.durationMs / 60_000,
+          )} 分钟</small><strong>${escapeHtml(activity.labelZh)}</strong></span>
+          <span><b>免费</b><em>参加活动 ↗</em></span>
+          <p>${escapeHtml(activity.descriptionZh)}</p>
+        </button>
+      `,
+    )
+    .join('');
+  const recent = (entertainment.recentOutcomes ?? [])
+    .slice(-3)
+    .reverse()
+    .map(
+      (outcome) => `
+        <li>${
+          outcome.outcomeKind === 'activity_completed'
+            ? `完成${escapeHtml(outcome.labelZh)}。`
+            : `已享用${escapeHtml(outcome.labelZh)}。`
+        }</li>
+      `,
+    )
+    .join('');
+  const hasLocalActions = Boolean(offers || activities);
   return `
-    <section class="world-scene panel-enter" data-testid="world-scene">
-      <header class="world-scene-head">
+    <section class="world2d-entertainment"
+      data-testid="world2d-entertainment">
+      <header>
+        <div><span class="eyebrow">开放世界生活</span>
+          <strong>${hasLocalActions ? '此刻可以享受' : '走进城市，才会发生'}</strong></div>
+        <span>${entertainment.currentPlaceId ? '已到达' : '移动中'}</span>
+      </header>
+      <div class="world2d-entertainment-metrics">
+        <span data-testid="entertainment-metric-wellbeing"
+          data-value="${entertainment.metrics.wellbeing}"><small>愉悦</small><strong>${number(
+            entertainment.metrics.wellbeing,
+          )}</strong></span>
+        <span><small>熟悉度</small><strong>${number(
+          entertainment.metrics.cityFamiliarity,
+        )}</strong></span>
+        <span><small>社交活力</small><strong>${number(
+          entertainment.metrics.socialEnergy,
+        )}</strong></span>
+      </div>
+      <div class="world2d-entertainment-actions">
+        ${
+          hasLocalActions
+            ? `${activities}${offers}`
+            : '<p>走到河岸、球场、早餐店或公交站，现场内容才会出现。</p>'
+        }
+      </div>
+      ${recent ? `<ul class="world2d-entertainment-recent">${recent}</ul>` : ''}
+    </section>
+  `;
+}
+
+function renderTodayView() {
+  const spatial = currentWorld2DProjection();
+  if (!spatial?.scene || !spatial?.playerPose) {
+    return `
+      <section class="panel panel-enter" data-testid="world2d-stage">
+        <div class="empty-state">
+          <strong>正在连接当前地点</strong>
+          <span>世界权威状态尚未送达。</span>
+        </div>
+      </section>
+    `;
+  }
+  const view = projectWorldExperience(world, marketSnapshot, {
+    includeSignals: false,
+  });
+  const wealth = projectPlayerWealth(world, marketSnapshot);
+  const wealthMarkup = renderPlayerWealth(wealth, {
+    variant: 'home',
+  });
+  const life = getLifeProjection(world);
+  const entertainment = currentEntertainmentProjection();
+  const openWorldCity = currentOpenWorldCityProjection();
+  const outdoor = spatial.scene.id === 'jiangwan_outdoor';
+  const legacyEntertainmentOwnsLocalActions = Boolean(
+    entertainment?.executableOffers?.length ||
+      entertainment?.activityOptions?.length,
+  );
+  const clockText = virtualClockText(
+    marketSnapshot?.nowMs,
+    marketSnapshot?.marketClockOffsetMs,
+  );
+  const semanticObjects = spatial.interactables
+    .map(
+      (entry) => `
+        <li>
+          <strong>${escapeHtml(entry.labelZh)}</strong>
+          <span>${escapeHtml(entry.hintZh)}</span>
+        </li>
+      `,
+    )
+    .join('');
+  const actionButtons = spatial.interactables
+    .map((entry) => {
+      const nearby = entry.distanceQ <= entry.maxDistanceQ;
+      const distance = number(
+        entry.distanceQ / spatial.scene.coordinateScale,
+        1,
+      );
+      return `
+        <button class="world2d-interaction ${nearby ? 'is-nearby' : ''}"
+          type="button" data-action="world2d-interaction"
+          data-entity-id="${escapeHtml(entry.entityId)}"
+          data-target-anchor="${escapeHtml(entry.standAnchorId)}"
+          data-testid="world2d-action-${escapeHtml(entry.entityId)}"
+          ${entry.available ? '' : 'disabled'}>
+          <span class="world2d-object-verb">${escapeHtml(entry.verbZh)}</span>
+          <strong>${escapeHtml(entry.labelZh)}</strong>
+          <span class="world2d-object-hint" data-world2d-distance="${escapeHtml(
+            entry.entityId,
+          )}">${
+            entry.available
+              ? nearby
+                ? '就在身边 · 点击互动'
+                : `相距 ${distance} 米 · 点击走过去`
+              : escapeHtml(entry.unavailableReason)
+          }</span>
+        </button>
+      `;
+    })
+    .join('');
+
+  return `
+    <section class="world2d-stage panel-enter" data-testid="world2d-stage"
+      data-scene-id="${escapeHtml(spatial.scene.id)}"
+      aria-labelledby="world2d-location-title">
+      <header class="world2d-hud">
         <div>
           <span class="world-running-dot ${
             playbackState === 'running' ? '' : 'is-paused'
           }" aria-hidden="true"></span>
-          <strong data-world-bind="scene-date">${escapeHtml(worldDate())}</strong>
-          <span data-world-bind="scene-clock">${clockText}</span>
+          <span class="eyebrow">${escapeHtml(spatial.scene.districtZh)}</span>
+          <h1 id="world2d-location-title">${escapeHtml(spatial.scene.nameZh)}</h1>
+          <span>${escapeHtml(
+            world2dWeatherLabel(spatial.scene.environmentState),
+          )} · <span data-world-bind="scene-clock">${clockText}</span></span>
         </div>
-        <div>
-          <small>净资产</small>
-          <strong data-testid="world-capital" data-world-bind="capital">${money(
-            view.capital.netAssets,
-          )}</strong>
-        </div>
-        <div>
-          <small>现金</small>
-          <strong data-world-bind="cash">${money(view.capital.cash)}</strong>
+        <div class="world2d-vitals" aria-label="当前生活状态">
+          <span><small>现金</small><strong data-world-bind="cash">${money(
+            wealth.cash.totalCents / 100,
+          )}</strong></span>
+          <span><small>${life.kind === 'organization' ? '人员状态' : '精力'}</small><strong>${number(
+            life.energy,
+          )}</strong></span>
+          <span><small>身份</small><strong>${escapeHtml(world.player.roleLabel)}</strong></span>
         </div>
       </header>
 
-      ${renderWorldlinePanel(view.worldline, {
-        variant: 'today',
-      })}
+      <div class="world2d-layout">
+        <div class="world2d-canvas-shell">
+          <canvas class="world2d-canvas" tabindex="0"
+            data-testid="world2d-canvas"
+            data-authority-x="${spatial.playerPose.positionQ.x}"
+            data-authority-y="${spatial.playerPose.positionQ.y}"
+            aria-label="${escapeHtml(spatial.scene.nameZh)}可移动场景。使用方向键或 WASD 行走，点击场景内目标前往。"></canvas>
+          <div class="world2d-controls-hint" aria-hidden="true">
+            <span>方向键 / WASD 行走</span>
+            <span>点击目标前往</span>
+          </div>
+          <div class="world2d-place-strip">
+            ${
+              outdoor
+                ? `
+                  <span><strong>街区</strong> 道路、步道与建筑形成真实碰撞空间</span>
+                  <span><strong>地点</strong> ${number(
+                    spatial.scene.places?.length ?? 0,
+                  )} 个可达生活、娱乐与交通节点</span>
+                  <span><strong>世界</strong> 天气、人流与营业状态服从同一世界时间</span>
+                `
+                : `
+                  <span><strong>窗外</strong> 江湾里街区正在下小雨</span>
+                  <span><strong>室内</strong> 家具会影响可行走空间</span>
+                  <span><strong>世界</strong> 离开终端后时间仍继续</span>
+                `
+            }
+          </div>
+        </div>
 
-      <div data-testid="player-wealth-home-live">
-        ${wealthMarkup}
+        <aside class="world2d-side" aria-label="地点互动与状态">
+          ${
+            outdoor
+              ? renderOpenWorldCityPanel(openWorldCity, {
+                  actionsVisible: !legacyEntertainmentOwnsLocalActions,
+                })
+              : ''
+          }
+          ${renderWorldlinePanel(view.worldline, {
+            variant: 'today',
+          })}
+          <section class="world2d-nearby" data-testid="world2d-nearby-actions">
+            <header>
+              <span class="eyebrow">当前地点</span>
+              <strong>可以做什么</strong>
+            </header>
+            <div class="world2d-action-grid">${actionButtons}</div>
+          </section>
+          ${renderWorld2DEntertainment(entertainment)}
+          <details class="world2d-semantic-scene"
+            data-testid="world2d-semantic-scene">
+            <summary>这里有什么</summary>
+            <ul>${semanticObjects}</ul>
+          </details>
+          <section class="world2d-life-glance">
+            <header><strong>今天的生活</strong></header>
+            <div>
+              <span><small>住房</small><strong>${escapeHtml(life.homeLabel)}</strong></span>
+              <span><small>已拥有</small><strong>${number(life.possessions?.length ?? 0)} 件</strong></span>
+              <span><small>应办事项</small><strong>${number(life.pendingObligations?.length ?? 0)} 项</strong></span>
+            </div>
+          </section>
+          <div class="world2d-wealth" data-testid="player-wealth-home-live">
+            ${wealthMarkup}
+          </div>
+        </aside>
       </div>
 
-      <div class="world-map" aria-label="本人、持仓企业与资金关系">
-        <svg class="world-map-lines" viewBox="0 0 100 100"
-          aria-hidden="true" focusable="false">
-          <path d="M50 50 C40 38 29 29 19 24" />
-          <path d="M50 50 C61 39 72 31 81 28" />
-          <path d="M50 50 C52 61 53 72 54 82" />
-          <path class="world-supply-line" d="M19 24 C42 8 67 11 81 28 C75 55 66 72 54 82 C35 70 24 49 19 24" />
-        </svg>
-        <div class="world-node world-node-player"
-          style="--node-x:${playerNode.x}%;--node-y:${playerNode.y}%">
-          <span class="player-orbit" aria-hidden="true"></span>
-          <small>${escapeHtml(view.identity.profile)}</small>
-          <strong>${escapeHtml(view.identity.label)}</strong>
-          <span>现金 ${money(view.capital.cash)}</span>
-        </div>
-        ${nodesMarkup}
-        <div class="world-actor-layer" data-testid="world-actor-layer"
-          aria-label="正在发生公开活动的市场主体">
-          ${renderObservableActorNodes(actorNodes)}
-        </div>
+      <div class="world2d-authority-note" role="status" aria-live="polite">
+        <span data-testid="world2d-position">位置 ${spatial.playerPose.positionQ.x}, ${spatial.playerPose.positionQ.y}</span>
+        <span>移动、碰撞与互动结果由同一个世界保存</span>
       </div>
-
-      <section class="world-places" data-testid="world-places"
-        aria-label="常去地点">
-        <header><strong>常去地点</strong></header>
-        <div>
-          <button class="world-place" type="button" data-action="life-place"
-            data-life-section="home">
-            <small>${life.kind === 'organization' ? '日常运营' : '日常'}</small>
-            <strong>${escapeHtml(homePlace)}</strong>
-            <span>${life.kind === 'organization' ? '人员' : '精力'} ${number(
-              life.energy,
-            )}</span>
-          </button>
-          <button class="world-place" type="button" data-action="life-place"
-            data-life-section="shop">
-            <small>消费</small>
-            <strong>${escapeHtml(shopPlace)}</strong>
-            <span>现金 ${money(view.capital.cash)}</span>
-          </button>
-          <button class="world-place" type="button" data-action="route"
-            data-route="market">
-            <small>交易</small>
-            <strong>证券市场</strong>
-            <span>${companyNodes.length} 只证券</span>
-          </button>
-          <button class="world-place" type="button" data-action="route"
-            data-route="decision">
-            <small>工作</small>
-            <strong>${escapeHtml(workPlace)}</strong>
-            <span>${escapeHtml(world.player.roleLabel)}</span>
-          </button>
-        </div>
-      </section>
     </section>
   `;
 }
@@ -1189,12 +1839,29 @@ function renderClueCards(clues) {
 
 function roleStatusMetrics() {
   const state = world.player.roleState;
-  if (world.player.roleType === 'household') {
+  if (
+    world.player.roleType === 'household' ||
+    world.player.roleType === 'private_whale'
+  ) {
     return [
       ['储备边界', money(state.cashReserve)],
       ['可交易现金', money(availableTradingCashView())],
-      ['周期收入', money(state.monthlyIncome)],
-      ['周期支出', money(state.livingExpense)],
+      [
+        world.player.roleType === 'private_whale'
+          ? '受益所有人暴露'
+          : '周期收入',
+        world.player.roleType === 'private_whale'
+          ? percent(state.beneficialOwnerExposure)
+          : money(state.monthlyIncome),
+      ],
+      [
+        world.player.roleType === 'private_whale'
+          ? '披露关注'
+          : '周期支出',
+        world.player.roleType === 'private_whale'
+          ? number(state.disclosureAttention, 2)
+          : money(state.livingExpense),
+      ],
     ];
   }
   if (world.player.roleType === 'professional') {
@@ -1471,7 +2138,9 @@ function renderLifeShop(life, organization) {
     .filter(
       (item) =>
         item.category === category &&
-        item.eligibleRoles.includes(world.player.roleType),
+        item.eligibleRoles.includes(
+          lifeEligibilityRole(world.player.roleType),
+        ),
     )
     .map((item) => lifePresentation(item, organization));
   const hero = products[0];
@@ -1721,6 +2390,21 @@ function renderDecisionView() {
       title: '机构总部',
       shift: '完成一班机构值守',
     },
+    quant_institution: {
+      place: '工作地点',
+      title: '量化交易总部',
+      shift: '完成一班研究、交易与风控协同',
+    },
+    stabilization_fund: {
+      place: '工作地点',
+      title: '稳定机制联席台',
+      shift: '完成一班授权核验与市场值守',
+    },
+    private_whale: {
+      place: '家族办公室',
+      title: '私人资本总账',
+      shift: '完成一班家族资本治理',
+    },
   }[world.player.roleType];
   const workedToday = life.work.lastShiftTick === world.world.tick;
   const activeComputer = life.possessions.find(
@@ -1767,7 +2451,9 @@ function renderDecisionView() {
           <small>${escapeHtml(world.player.profileName)}</small>
           <strong>${escapeHtml(world.player.roleLabel)}</strong>
         </div>
-        <span>${escapeHtml(world.player.strengthTier === 'high' ? '高实力' : '基础实力')}</span>
+        <span>${money(
+          world.player.capitalProfile.controlledCapitalCents / 100,
+        )}</span>
       </header>
       <div class="identity-status-grid" data-testid="identity-status-grid">
         ${statusMetrics}
@@ -2085,10 +2771,213 @@ function renderPriceHistory(symbol) {
   `;
 }
 
+function renderQuantStrategyLab() {
+  const lab = world.player.roleState.strategyLab;
+  const definitions = [
+    ...QUANT_STRATEGY_CATALOG,
+    ...(lab.customStrategies ?? []),
+  ];
+  const strategyCards = definitions.map((definition) => {
+    const strategyId = definition.id;
+    const strategyState = lab.strategies[strategyId] ?? definition;
+    const unlocked = strategyState.unlocked === true;
+    const selected = lab.selectedStrategyIds.includes(strategyId);
+    const upgrade = unlocked
+      ? quantStrategyUpgradeCost(lab, strategyId)
+      : null;
+    const label = definition.label ?? definition.name ?? strategyId;
+    const custom = definition.source === 'player_declarative_file';
+    const researchRequired = definition.researchRequired ?? 0;
+    return `
+      <article class="quant-strategy-card"
+        data-strategy-state="${unlocked ? 'unlocked' : 'locked'}">
+        <div class="quant-strategy-card__heading">
+          <label>
+            <input type="checkbox" name="strategyId"
+              value="${escapeHtml(strategyId)}" data-quant-strategy-select
+              ${selected ? 'checked' : ''} ${unlocked ? '' : 'disabled'} />
+            <span>${escapeHtml(label)}</span>
+          </label>
+          <span class="tag">${custom ? '玩家策略' : `等级 ${number(strategyState.level ?? 1)}`}</span>
+        </div>
+        <p>${escapeHtml(definition.description ?? '基于公开、可审计的市场因子运行。')}</p>
+        <label class="quant-strategy-weight">
+          <span>组合权重（基点）</span>
+          <input class="input data-number" type="number"
+            name="strategyWeight_${escapeHtml(strategyId)}"
+            min="0" max="10000" step="100"
+            value="${lab.strategyWeightsBps[strategyId] ?? 0}"
+            ${unlocked ? '' : 'disabled'} />
+        </label>
+        <div class="quant-strategy-card__actions">
+          ${
+            !unlocked
+              ? `<button class="button" type="button"
+                  data-action="research-quant-strategy"
+                  data-strategy-id="${escapeHtml(strategyId)}">
+                  研究解锁 · ${number(researchRequired)} 研究点
+                </button>`
+              : upgrade
+                ? `<button class="button" type="button"
+                    data-action="upgrade-quant-strategy"
+                    data-strategy-id="${escapeHtml(strategyId)}">
+                    升级至 ${number(upgrade.nextLevel)} 级 · ${money(upgrade.cashCost)}
+                  </button>`
+                : '<span class="muted">当前已到最高等级</span>'
+          }
+          ${
+            custom
+              ? `<button class="button button-quiet" type="button"
+                  data-action="remove-quant-strategy"
+                  data-strategy-id="${escapeHtml(strategyId)}">移除文件策略</button>`
+              : ''
+          }
+        </div>
+      </article>
+    `;
+  }).join('');
+  return `
+    <section class="quant-strategy-lab" data-testid="quant-strategy-lab">
+      <div class="role-specialized-heading">
+        <div>
+          <span class="eyebrow">量化机构专属</span>
+          <h3>策略研究与自动交易实验室</h3>
+        </div>
+        <span class="tag">版本 ${number(lab.revision)}</span>
+      </div>
+      <div class="role-risk-band">
+        <span>研究资源 <b>${number(world.player.resources.research)}</b></span>
+        <span>技术预算 <b>${money(lab.technologyBudgetRemaining)}</b></span>
+        <span>已选策略 <b>${number(lab.selectedStrategyIds.length)}</b></span>
+        <span>自动交易 <b>${lab.automationEnabled ? '运行' : '暂停'}</b></span>
+      </div>
+      <form id="quant-automation-form" class="role-action-form">
+        <div class="quant-lab-controls">
+          <label class="role-toggle-control">
+            <input type="checkbox" name="automationEnabled"
+              ${lab.automationEnabled ? 'checked' : ''} />
+            <span>允许策略组合按真实盘口自动下单</span>
+          </label>
+          <label class="field">
+            <span>组合风险模式</span>
+            <select class="input" name="riskMode">
+              ${[
+                ['conservative', '保守'],
+                ['balanced', '均衡'],
+                ['aggressive', '进取'],
+              ].map(([value, label]) =>
+                `<option value="${value}" ${lab.riskMode === value ? 'selected' : ''}>${label}</option>`,
+              ).join('')}
+            </select>
+          </label>
+        </div>
+        <div class="quant-strategy-grid">${strategyCards}</div>
+        <button class="button button-impact" type="submit">
+          应用策略组合与权重
+        </button>
+      </form>
+      <section class="quant-file-bench" aria-label="玩家策略文件">
+        <div>
+          <h4>玩家策略文件</h4>
+          <p>仅接受不超过 64 KiB 的声明式 JSON；只能读取公开因子与受限执行参数，不运行脚本。</p>
+        </div>
+        <div class="quant-file-bench__actions">
+          <label class="button" for="quant-strategy-file">导入策略 JSON</label>
+          <input id="quant-strategy-file" type="file"
+            data-testid="quant-strategy-file"
+            accept="application/json,.json" />
+          <button class="button button-quiet" type="button"
+            data-action="download-quant-strategy-template">
+            下载策略模板
+          </button>
+        </div>
+      </section>
+      <p class="role-model-boundary">
+        升级提高研究精度、执行容量与控制边界，但不保证收益；所有信号最终都要通过资金、持仓、涨跌停和真实订单簿校验。
+      </p>
+    </section>
+  `;
+}
+
+function renderStabilizationControlDesk() {
+  const desk = world.player.roleState.stabilityDesk;
+  return `
+    <section class="stabilization-control-desk"
+      data-testid="stabilization-control-desk">
+      <div class="role-specialized-heading">
+        <div>
+          <span class="eyebrow">稳定力量专属</span>
+          <h3>市场稳定协议控制台</h3>
+        </div>
+        <span class="tag">版本 ${number(desk.revision)}</span>
+      </div>
+      <div class="role-risk-band">
+        <span>自动协议 <b>${desk.automationEnabled ? '运行' : '暂停'}</b></span>
+        <span>目标 <b>${escapeHtml({ balanced: '均衡', systemic: '系统性', liquidity: '流动性' }[desk.targetMode] ?? desk.targetMode)}</b></span>
+        <span>执行强度 <b>${number(desk.intensityBps / 100, 1)}%</b></span>
+        <span>手动权限 <b>${desk.manualAccess ? '开放' : '关闭'}</b></span>
+      </div>
+      <form id="stabilization-automation-form" class="role-action-form"
+        data-command="configure_stabilization_automation">
+        <label class="role-toggle-control">
+          <input type="checkbox" name="automationEnabled"
+            ${desk.automationEnabled ? 'checked' : ''} />
+          <span>按市场广度、整体跌幅与流动性压力自动稳定市场</span>
+        </label>
+        <div class="stabilization-parameter-grid">
+          <label class="field">
+            <span>稳定目标</span>
+            <select class="input" name="targetMode">
+              <option value="balanced" ${desk.targetMode === 'balanced' ? 'selected' : ''}>均衡</option>
+              <option value="systemic" ${desk.targetMode === 'systemic' ? 'selected' : ''}>系统性风险</option>
+              <option value="liquidity" ${desk.targetMode === 'liquidity' ? 'selected' : ''}>流动性修复</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>执行强度（%）</span>
+            <input class="input data-number" name="intensityPercent" type="number"
+              min="10" max="100" step="1" value="${desk.intensityBps / 100}" />
+          </label>
+          <label class="field">
+            <span>下跌家数触发（%）</span>
+            <input class="input data-number" name="breadthTriggerPercent" type="number"
+              min="-80" max="-5" step="1" value="${desk.breadthTriggerBps / 100}" />
+          </label>
+          <label class="field">
+            <span>整体跌幅触发（%）</span>
+            <input class="input data-number" name="weightedReturnTriggerPercent" type="number"
+              min="-80" max="-5" step="1" value="${desk.weightedReturnTriggerBps / 100}" />
+          </label>
+          <label class="field">
+            <span>流动性压力触发（%）</span>
+            <input class="input data-number" name="liquidityStressPercent" type="number"
+              min="10" max="100" step="1" value="${desk.liquidityStressTriggerBps / 100}" />
+          </label>
+        </div>
+        <button class="button button-impact" type="submit">应用自动稳定协议</button>
+      </form>
+      <div class="stabilization-manual-entry">
+        <div>
+          <h4>人工干预席</h4>
+          <p>自动协议之外仍可手动选择标的、限价、数量和时点；人工订单与自动订单共用同一账户、库存和真实盘口。</p>
+        </div>
+        <button class="button" type="button" data-action="open-market-mode"
+          data-market-mode="stocks" data-testid="stabilization-manual-entry">
+          手动进场
+        </button>
+      </div>
+    </section>
+  `;
+}
+
 function renderRoleActionForm() {
   const role = world.player.roleType;
   const state = world.player.roleState;
-  if (role === 'household') {
+  if (role === 'quant_institution') return renderQuantStrategyLab();
+  if (role === 'stabilization_fund') {
+    return renderStabilizationControlDesk();
+  }
+  if (role === 'household' || role === 'private_whale') {
     return `
       <form id="role-action-form" class="role-action-form" data-command="set_reserve"
         data-testid="role-action-form">
@@ -2104,7 +2993,7 @@ function renderRoleActionForm() {
           </span>
         </div>
         <button class="button" type="submit" data-testid="submit-role-action">
-          更新家庭储备边界
+          ${role === 'private_whale' ? '更新私人流动性储备' : '更新家庭储备边界'}
         </button>
       </form>
     `;
@@ -2193,7 +3082,7 @@ function renderMarketAppBar() {
     <nav class="market-app-bar" aria-label="市场外层导航">
       <div class="market-place-links">
         <button type="button" data-action="route" data-route="today"
-          data-testid="market-back-dashboard" aria-label="返回世界">‹ 世界</button>
+          data-testid="market-back-world" aria-label="返回世界">‹ 世界</button>
         <button type="button" data-action="life-place"
           data-life-section="home">${escapeHtml(homeLabel)}</button>
         <button type="button" data-action="life-place"
@@ -2472,6 +3361,214 @@ function destroyMarketIntelligence() {
   marketIntelligenceView = null;
 }
 
+function destroyWorld2DRuntime() {
+  world2dRuntime?.destroy();
+  world2dRuntime = null;
+}
+
+function updateLiveStatusDom() {
+  const live = document.querySelector('[data-testid="live-status"]');
+  if (live) live.textContent = notice;
+}
+
+function updateWorld2DSemanticDom(spatial) {
+  if (!spatial?.playerPose) return;
+  const canvas = document.querySelector(
+    '[data-testid="world2d-canvas"]',
+  );
+  if (canvas) {
+    canvas.dataset.authorityX = String(
+      spatial.playerPose.positionQ.x,
+    );
+    canvas.dataset.authorityY = String(
+      spatial.playerPose.positionQ.y,
+    );
+    canvas.dataset.authorityCommitSeq = String(
+      spatial.authorityCommitSeq ?? '',
+    );
+    canvas.dataset.intentKind = spatial.playerPose.intentKind;
+  }
+  const position = document.querySelector(
+    '[data-testid="world2d-position"]',
+  );
+  if (position) {
+    position.textContent = `位置 ${spatial.playerPose.positionQ.x}, ${spatial.playerPose.positionQ.y}`;
+  }
+  for (const entry of spatial.interactables ?? []) {
+    const button = document.querySelector(
+      `[data-testid="world2d-action-${entry.entityId}"]`,
+    );
+    if (!button) continue;
+    const nearby = entry.distanceQ <= entry.maxDistanceQ;
+    button.classList.toggle('is-nearby', nearby);
+    button.dataset.nearby = nearby ? 'true' : 'false';
+    const distanceNode = button.querySelector(
+      '[data-world2d-distance]',
+    );
+    if (distanceNode && entry.available) {
+      distanceNode.textContent = nearby
+        ? '就在身边 · 点击互动'
+        : `相距 ${number(
+            entry.distanceQ / spatial.scene.coordinateScale,
+            1,
+          )} 米 · 点击走过去`;
+    }
+  }
+}
+
+async function activateWorld2DInteraction(entry) {
+  if (!entry?.available) {
+    notice = entry?.unavailableReason ?? '当前还不能这样做。';
+    updateLiveStatusDom();
+    return;
+  }
+  if (entry.entityId === 'home_computer') {
+    activeRoute = 'market';
+    errorMessage = '';
+    notice = '已打开家用电脑里的同一市场终端。';
+    render();
+    return;
+  }
+  if (entry.entityId === 'home_bed') {
+    void performAction(
+      { type: 'life_action', command: 'rest' },
+      'today',
+    );
+    return;
+  }
+  if (entry.entityId === 'home_door') {
+    const receipt = await sendWorld2DControl({
+      kind: 'activate_interactable',
+      entityId: entry.entityId,
+    });
+    if (receipt?.status === 'accepted') {
+      notice = '你走出家门，来到仍在运行的江湾里街区。';
+      render();
+    }
+    return;
+  }
+  if (entry.entityId === 'home_window') {
+    notice = `窗外是${world2dWeatherLabel(
+      currentWorld2DProjection()?.scene?.environmentState,
+    )}，街区仍按世界时间运转。`;
+    updateLiveStatusDom();
+    return;
+  }
+  if (entry.interactionKind === 'scene_transition') {
+    const receipt = await sendWorld2DControl({
+      kind: 'activate_interactable',
+      entityId: entry.entityId,
+    });
+    if (receipt?.status === 'accepted') {
+      notice = receipt.toSceneId === 'jiangwan_home'
+        ? '你回到了江湾里的家。'
+        : `你进入了${entry.labelZh}。`;
+      render();
+    }
+    return;
+  }
+  if (entry.interactionKind === 'place_visit') {
+    const receipt = await sendWorld2DControl({
+      kind: 'activate_interactable',
+      entityId: entry.entityId,
+    });
+    if (receipt?.status !== 'accepted') return;
+    if (entry.entityId === 'street_daily_store') {
+      lifeSection = 'shop';
+      activeRoute = 'life';
+      notice = `你已到达${entry.labelZh}，这里的操作会在同一世界中结算。`;
+      render();
+      return;
+    }
+    notice = `你已到达${entry.labelZh}；当地活动与报价已经按当前世界开放。`;
+    render();
+  }
+}
+
+function maybeCompleteWorld2DInteraction(spatial) {
+  if (!pendingWorld2DInteraction) return;
+  const entry = spatial?.interactables?.find(
+    (candidate) =>
+      candidate.entityId === pendingWorld2DInteraction,
+  );
+  if (!entry || entry.distanceQ > entry.maxDistanceQ) return;
+  pendingWorld2DInteraction = null;
+  void activateWorld2DInteraction(entry);
+}
+
+function sendWorld2DControl(control) {
+  const run = async () => {
+    const spatial = currentWorld2DProjection();
+    if (!marketClient || !spatial?.scene || !spatial?.playerPose) {
+      throw new Error('当前地点尚未连接。');
+    }
+    const controlSeq = spatial.playerPose.controlSeq + 1;
+    const commandId = `${spatial.worldId}:player-control:${controlSeq}:${
+      ++world2dCommandOrdinal
+    }`;
+    const receipt = await marketClient.worldCommand({
+      type: 'player_control',
+      actorId: 'player',
+      commandId,
+      baseCommitSeq: spatial.authorityCommitSeq,
+      sceneId: spatial.scene.id,
+      geometryRevision: spatial.scene.geometryRevision,
+      controlSeq,
+      control,
+    });
+    applyAuthorityPublication(receipt);
+    const nextSpatial = currentWorld2DProjection();
+    world2dRuntime?.update(
+      nextSpatial,
+      currentOpenWorldCityProjection(),
+    );
+    updateWorld2DSemanticDom(nextSpatial);
+    if (receipt.status === 'rejected') {
+      pendingWorld2DInteraction = null;
+      notice = REJECTION_LABELS[receipt.reason] ?? '移动没有被当前世界接受。';
+      updateLiveStatusDom();
+    }
+    return receipt;
+  };
+  const pendingControl = world2dControlTail.then(run, run);
+  world2dControlTail = pendingControl.catch(() => null);
+  return pendingControl.catch((error) => {
+    pendingWorld2DInteraction = null;
+    console.error('WORLD2D_CONTROL_FAILED', error);
+    notice = '移动暂时没有完成，请重试。';
+    updateLiveStatusDom();
+    return null;
+  });
+}
+
+function mountCurrentWorld2DRuntime() {
+  if (
+    screen !== 'game' ||
+    activeRoute !== 'today' ||
+    !world
+  ) {
+    return;
+  }
+  const host = document.querySelector(
+    '[data-testid="world2d-stage"]',
+  );
+  const spatial = currentWorld2DProjection();
+  if (!host || !spatial?.scene) return;
+  if (world2dRuntime) {
+    world2dRuntime.rehost(host);
+    world2dRuntime.update(spatial, currentOpenWorldCityProjection());
+    world2dRuntime.resume();
+    updateWorld2DSemanticDom(spatial);
+    return;
+  }
+  world2dRuntime = mountWorld2DRuntime(host, {
+    projection: spatial,
+    cityLifeProjection: currentOpenWorldCityProjection(),
+    sendControl: sendWorld2DControl,
+  });
+  updateWorld2DSemanticDom(spatial);
+}
+
 function updateSaveStateDom() {
   const node = document.querySelector('[data-testid="save-status"]');
   if (!node) return;
@@ -2708,7 +3805,9 @@ function acceptDerivativesPublication(
 function applyAuthorityPublication(value) {
   if (!value || typeof value !== 'object') return;
   let worldEnvelope =
-    value.world?.state
+    value.worldProjection?.state
+      ? value.worldProjection
+      : value.world?.state
       ? value.world
       : value.worldSnapshot
         ? {
@@ -3069,9 +4168,13 @@ function observeMarketFrame(
       derivativeChanged ? 'true' : 'false';
   }
   if (shouldPublishVisibleFrame(snapshot)) {
-    marketStage?.update(
-      marketStagePayload(snapshot),
-    );
+    const stageStartedAt = performance.now();
+    marketStage?.update(marketStagePayload(snapshot));
+    if (stageHost) {
+      stageHost.dataset.marketFrameUpdateMs = String(
+        performance.now() - stageStartedAt,
+      );
+    }
     refreshWorldExperienceDom();
   }
   if (crossedUnsavedWorldDay(snapshot)) {
@@ -3079,7 +4182,7 @@ function observeMarketFrame(
   }
 }
 
-function observeMarketRealtime(_update, snapshot, generation) {
+function observeMarketRealtime(update, snapshot, generation) {
   if (generation !== authorityGeneration) return;
   marketSnapshot = snapshot;
   const stageHost = document.querySelector(
@@ -3091,9 +4194,37 @@ function observeMarketRealtime(_update, snapshot, generation) {
     stageHost.dataset.observedRealtimeCommitSeq =
       String(snapshot?.commitSeq ?? 0);
   }
-  marketStage?.updateRealtime(
-    marketStagePayload(snapshot),
-  );
+  const stageStartedAt = performance.now();
+  marketStage?.updateRealtime({
+    ...marketStagePayload(snapshot),
+    realtimeUpdate: update,
+  });
+  if (stageHost) {
+    stageHost.dataset.marketRealtimeUpdateMs = String(
+      performance.now() - stageStartedAt,
+    );
+  }
+}
+
+function observeWorld2D(nextWorld, _message, generation) {
+  if (
+    generation !== authorityGeneration ||
+    !nextWorld?.world?.id
+  ) {
+    return;
+  }
+  applyAuthorityPublication({
+    world: {
+      publication: 'lzy_world_public_v1',
+      commitSeq:
+        nextWorld.experience?.world2d?.authorityCommitSeq ?? null,
+      state: nextWorld,
+    },
+  });
+  const spatial = currentWorld2DProjection();
+  world2dRuntime?.update(spatial, currentOpenWorldCityProjection());
+  updateWorld2DSemanticDom(spatial);
+  maybeCompleteWorld2DInteraction(spatial);
 }
 
 function observeMarketReceipt(receipt, generation) {
@@ -3134,12 +4265,16 @@ async function stopAuthority() {
   scheduledBarrierReason = 'auto';
   destroyMarketStage();
   destroyMarketIntelligence();
+  destroyWorld2DRuntime();
   const client = marketClient;
   marketClient = null;
   marketSnapshot = null;
   marketCheckpoint = null;
   derivativesProjection = null;
   latestMarketReceipt = null;
+  world2dControlTail = Promise.resolve();
+  world2dCommandOrdinal = 0;
+  pendingWorld2DInteraction = null;
   confirmedBarrier = null;
   confirmedCommitSeq = -1;
   frameAutoSaveSuppression = 0;
@@ -3182,6 +4317,8 @@ async function initializeAuthority({
       ),
     onRealtime: (update, snapshot) =>
       observeMarketRealtime(update, snapshot, generation),
+    onWorld2D: (nextWorld, message) =>
+      observeWorld2D(nextWorld, message, generation),
     onReceipt: (receipt) => observeMarketReceipt(receipt, generation),
     onError: () => {
       if (generation !== authorityGeneration) return;
@@ -3306,6 +4443,13 @@ function mountCurrentMarketStage() {
       selectedDerivativeContractId =
         contractId ?? null;
     },
+    onRoleConsoleOpen: () => {
+      if (generation !== authorityGeneration) return;
+      activeRoute = 'decision';
+      workSection = 'desk';
+      errorMessage = '';
+      render();
+    },
   });
   if (marketSnapshot) {
     marketStage.update({
@@ -3330,6 +4474,10 @@ function mountCurrentMarketIntelligence() {
   marketIntelligenceView = mountMarketIntelligence(host, {
     world,
     marketSnapshot,
+    initialRoute: intelligenceInitialRoute,
+    onRouteChange(route) {
+      intelligenceInitialRoute = route;
+    },
   });
 }
 
@@ -3421,8 +4569,116 @@ function updateProfilePreview() {
   if (!form || !preview) return;
   const data = new FormData(form);
   const roleType = data.get('roleType') ?? 'household';
-  const strengthTier = data.get('strengthTier') ?? 'low';
-  preview.innerHTML = renderProfilePreview(roleType, strengthTier);
+  const startingCapitalYuan = Number(
+    data.get('startingCapitalYuan'),
+  );
+  const startingCapitalCents =
+    Number.isSafeInteger(startingCapitalYuan) &&
+    Number.isSafeInteger(startingCapitalYuan * 100)
+      ? startingCapitalYuan * 100
+      : ROLE_CATALOG[roleType]
+          .capitalContract.defaultCents;
+  preview.innerHTML = renderProfilePreview(
+    roleType,
+    startingCapitalCents,
+  );
+}
+
+function setCapitalValidation(message = '') {
+  const input = document.querySelector('#capital-input');
+  const validation = document.querySelector(
+    '#capital-validation',
+  );
+  if (input) {
+    input.setAttribute(
+      'aria-invalid',
+      message ? 'true' : 'false',
+    );
+  }
+  if (validation) validation.textContent = message;
+}
+
+function setCapitalControlsForRole(roleType) {
+  const role = ROLE_CATALOG[roleType] ??
+    ROLE_CATALOG.household;
+  const contract = role.capitalContract;
+  const slider = document.querySelector(
+    '#capital-slider',
+  );
+  const input = document.querySelector('#capital-input');
+  const minimum = document.querySelector(
+    '[data-testid="capital-minimum"]',
+  );
+  const maximum = document.querySelector(
+    '[data-testid="capital-maximum"]',
+  );
+  if (input) {
+    input.min = String(contract.minimumCents / 100);
+    input.max = String(contract.maximumCents / 100);
+    input.value = String(contract.defaultCents / 100);
+  }
+  if (slider) {
+    slider.value = String(
+      capitalSliderPositionFromCents(
+        roleType,
+        contract.defaultCents,
+      ),
+    );
+  }
+  if (minimum) {
+    minimum.textContent =
+      `最低 ${money(contract.minimumCents / 100)}`;
+  }
+  if (maximum) {
+    maximum.textContent =
+      `最高 ${money(contract.maximumCents / 100)}`;
+  }
+  setCapitalValidation('');
+  updateProfilePreview();
+}
+
+function updateCapitalFromSlider(position) {
+  const form = document.querySelector('#create-world-form');
+  const input = document.querySelector('#capital-input');
+  if (!form || !input) return;
+  const roleType =
+    new FormData(form).get('roleType') ?? 'household';
+  const cents = capitalCentsFromSliderPosition(
+    roleType,
+    position,
+  );
+  input.value = String(cents / 100);
+  setCapitalValidation('');
+  updateProfilePreview();
+}
+
+function updateCapitalFromExactInput(value) {
+  const form = document.querySelector('#create-world-form');
+  const slider = document.querySelector('#capital-slider');
+  if (!form || !slider) return;
+  const roleType =
+    new FormData(form).get('roleType') ?? 'household';
+  const contract = ROLE_CATALOG[roleType].capitalContract;
+  const yuan = Number(value);
+  const cents = yuan * 100;
+  if (
+    !Number.isSafeInteger(yuan) ||
+    !Number.isSafeInteger(cents) ||
+    cents < contract.minimumCents ||
+    cents > contract.maximumCents
+  ) {
+    setCapitalValidation(
+      `请输入 ${money(contract.minimumCents / 100)} 至 ${money(
+        contract.maximumCents / 100,
+      )} 的整数元金额。`,
+    );
+    return;
+  }
+  slider.value = String(
+    capitalSliderPositionFromCents(roleType, cents),
+  );
+  setCapitalValidation('');
+  updateProfilePreview();
 }
 
 function setAllocation(value) {
@@ -3532,9 +4788,16 @@ async function createConfiguredWorld(form) {
     const cashPercent = Number(
       document.querySelector('#cash-allocation')?.value ?? 65,
     );
+    const startingCapitalYuan = Number(
+      data.get('startingCapitalYuan'),
+    );
+    if (!Number.isSafeInteger(startingCapitalYuan)) {
+      setCapitalValidation('可控资本必须填写整数元金额。');
+      throw new RangeError('Invalid starting capital.');
+    }
     const configuredWorld = createWorld({
       roleType: data.get('roleType'),
-      strengthTier: data.get('strengthTier'),
+      startingCapitalCents: startingCapitalYuan * 100,
       seed: data.get('seed'),
       interfaceMode: 'novice',
       tradingAccessMode: 'testing_open',
@@ -3671,9 +4934,123 @@ root.addEventListener('click', async (event) => {
       historyLayer = layer;
       render();
     }
+  } else if (action === 'world2d-interaction') {
+    const spatial = currentWorld2DProjection();
+    const entry = spatial?.interactables?.find(
+      (candidate) =>
+        candidate.entityId === target.dataset.entityId,
+    );
+    if (!entry) return;
+    if (!entry.available) {
+      notice = entry.unavailableReason ?? '当前还不能这样做。';
+      updateLiveStatusDom();
+      return;
+    }
+    if (entry.distanceQ <= entry.maxDistanceQ) {
+      pendingWorld2DInteraction = null;
+      await activateWorld2DInteraction(entry);
+      return;
+    }
+    if (playbackState !== 'running') {
+      pendingWorld2DInteraction = null;
+      notice = `世界已暂停；继续运行后才能走向${entry.labelZh}。`;
+      updateLiveStatusDom();
+      return;
+    }
+    pendingWorld2DInteraction = entry.entityId;
+    notice = `正在走向${entry.labelZh}…`;
+    updateLiveStatusDom();
+    await sendWorld2DControl({
+      kind: 'move_to',
+      targetAnchorId: entry.standAnchorId,
+    });
+  } else if (action === 'open-world-city-intent') {
+    const city = currentOpenWorldCityProjection();
+    const request = compileOpenWorldCityRequestFromDataset(
+      target.dataset,
+    );
+    if (!city || !request) return;
+    if (request.kind === 'move_to') {
+      const spatial = currentWorld2DProjection();
+      const entry = spatial?.interactables?.find(
+        (candidate) =>
+          candidate.placeId === request.toPlaceId,
+      );
+      if (!entry) {
+        notice = '这处地点尚未进入当前可步行场景。';
+        updateLiveStatusDom();
+        return;
+      }
+      if (entry.distanceQ <= entry.maxDistanceQ) {
+        pendingWorld2DInteraction = null;
+        await activateWorld2DInteraction(entry);
+        return;
+      }
+      if (playbackState !== 'running') {
+        notice = `世界已暂停；继续运行后才能走向${entry.labelZh}。`;
+        updateLiveStatusDom();
+        return;
+      }
+      pendingWorld2DInteraction = entry.entityId;
+      notice = `正在走向${entry.labelZh}…`;
+      updateLiveStatusDom();
+      await sendWorld2DControl({
+        kind: 'move_to',
+        targetAnchorId: entry.standAnchorId,
+      });
+      return;
+    }
+    target.disabled = true;
+    target.dataset.pending = 'true';
+    await performAction(
+      {
+        type: 'open_world_city_action',
+        baseCommitSeq: city.authorityCommitSeq,
+        request,
+      },
+      'today',
+    );
+  } else if (action === 'entertainment-intent') {
+    const entertainment = currentEntertainmentProjection();
+    const kind = target.dataset.entertainmentKind;
+    const id = target.dataset.entertainmentId;
+    const version = Number(target.dataset.entertainmentVersion);
+    if (
+      !entertainment ||
+      !['accept_offer', 'join_activity'].includes(kind) ||
+      !id ||
+      !Number.isSafeInteger(version)
+    ) {
+      return;
+    }
+    const request = kind === 'accept_offer'
+      ? {
+          kind,
+          offerId: id,
+          offerVersion: version,
+          quantity: 1,
+        }
+      : {
+          kind,
+          activityId: id,
+          activityVersion: version,
+        };
+    target.disabled = true;
+    target.dataset.pending = 'true';
+    await performAction(
+      {
+        type: 'entertainment_action',
+        baseCommitSeq: entertainment.authorityCommitSeq,
+        request,
+      },
+      'today',
+    );
   } else if (action === 'route') {
     const route = target.dataset.route;
     if (ROUTES.has(route)) {
+      if (route === 'information') {
+        intelligenceInitialRoute = { page: 'overview' };
+      }
       activeRoute = route;
       errorMessage = '';
       render();
@@ -3701,6 +5078,33 @@ root.addEventListener('click', async (event) => {
       errorMessage = '';
       render();
     }
+  } else if (
+    action === 'research-quant-strategy' ||
+    action === 'upgrade-quant-strategy' ||
+    action === 'remove-quant-strategy'
+  ) {
+    const strategyId = target.dataset.strategyId;
+    if (!strategyId) return;
+    target.disabled = true;
+    const command = {
+      'research-quant-strategy': 'research_quant_strategy',
+      'upgrade-quant-strategy': 'upgrade_quant_strategy',
+      'remove-quant-strategy': 'remove_quant_strategy',
+    }[action];
+    await performAction(
+      { type: 'role_action', command, strategyId },
+      'decision',
+    );
+  } else if (action === 'download-quant-strategy-template') {
+    const blob = new Blob(
+      [JSON.stringify(playerStrategyTemplate(), null, 2)],
+      { type: 'application/json' },
+    );
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = 'lzy-quant-strategy-template.json';
+    link.click();
+    URL.revokeObjectURL(link.href);
   } else if (action === 'life-category') {
     const category = target.dataset.lifeCategory;
     if (LIFE_CATEGORY_LABELS[category]) {
@@ -3874,6 +5278,32 @@ root.addEventListener('click', async (event) => {
       { type: 'verify_clue', clueId: target.dataset.clueId },
       activeRoute,
     );
+  } else if (action === 'open-company-information') {
+    const companyId = target.dataset.companyId;
+    intelligenceInitialRoute = companyId
+      ? {
+          page: 'company',
+          companyId,
+          ...(target.dataset.section
+            ? { section: target.dataset.section }
+            : {}),
+        }
+      : { page: 'overview' };
+    activeRoute = 'information';
+    errorMessage = '';
+    render();
+  } else if (action === 'open-market-mode') {
+    const requestedMode = target.dataset.marketMode;
+    marketMode = ['stocks', 'futures', 'options'].includes(
+      requestedMode,
+    )
+      ? requestedMode
+      : 'stocks';
+    derivativesSection =
+      marketMode === 'options' ? 'options' : 'futures';
+    activeRoute = 'market';
+    errorMessage = '';
+    render();
   } else if (action === 'choose-security') {
     selectedSymbol = target.dataset.symbol;
     activeRoute = 'market';
@@ -3905,7 +5335,7 @@ root.addEventListener('click', async (event) => {
     render();
   } else if (action === 'download-save') {
     try {
-      const archive = exportSavedGameArchive();
+      const archive = await exportSavedGameArchive();
       const blob = new Blob([archive], { type: 'application/json' });
       const link = document.createElement('a');
       link.href = URL.createObjectURL(blob);
@@ -3955,6 +5385,58 @@ root.addEventListener('click', async (event) => {
   }
 });
 
+root.addEventListener('change', async (event) => {
+  const strategyInput = event.target.closest?.(
+    '[data-testid="quant-strategy-file"]',
+  );
+  if (strategyInput) {
+    const file = strategyInput.files?.[0];
+    strategyInput.value = '';
+    if (!file) return;
+    if (file.size > 64 * 1024) {
+      errorMessage = '策略文件超过 64 KiB 上限。';
+      notice = errorMessage;
+      render();
+      return;
+    }
+    try {
+      const manifest = JSON.parse(await file.text());
+      await performAction(
+        {
+          type: 'role_action',
+          command: 'import_quant_strategy',
+          manifest,
+        },
+        'decision',
+      );
+    } catch {
+      errorMessage = '策略文件不是有效且合规的声明式 JSON。';
+      notice = errorMessage;
+      render();
+    }
+    return;
+  }
+  const input = event.target.closest(
+    '[data-testid="import-save-input"]',
+  );
+  if (!input) return;
+  const file = input.files?.[0];
+  input.value = '';
+  if (!file) return;
+  try {
+    await importSavedGameArchive(await file.text());
+    errorMessage = '';
+    notice = '存档副本已导入，可以继续进入原世界。';
+    saveRecoveryAvailable = false;
+    screen = 'welcome';
+    render();
+  } catch {
+    errorMessage = '这个存档副本无法导入，当前存档仍保留。';
+    saveRecoveryAvailable = true;
+    render();
+  }
+});
+
 root.addEventListener('submit', async (event) => {
   event.preventDefault();
   const form = event.target;
@@ -3972,6 +5454,64 @@ root.addEventListener('submit', async (event) => {
   }
 
   const data = new FormData(form);
+
+  if (form.id === 'quant-automation-form') {
+    const selectedStrategyIds = data
+      .getAll('strategyId')
+      .map(String);
+    if (selectedStrategyIds.length === 0) {
+      errorMessage = '至少选择一个已经解锁的量化策略。';
+      notice = errorMessage;
+      render();
+      return;
+    }
+    const strategyWeightsBps = Object.fromEntries(
+      selectedStrategyIds.map((strategyId) => [
+        strategyId,
+        Math.max(
+          0,
+          Math.round(
+            Number(data.get(`strategyWeight_${strategyId}`)) || 0,
+          ),
+        ),
+      ]),
+    );
+    await performAction(
+      {
+        type: 'role_action',
+        command: 'configure_quant_automation',
+        automationEnabled: data.get('automationEnabled') === 'on',
+        riskMode: String(data.get('riskMode') ?? 'balanced'),
+        selectedStrategyIds,
+        strategyWeightsBps,
+      },
+      'decision',
+    );
+    return;
+  }
+
+  if (form.id === 'stabilization-automation-form') {
+    const numberBps = (name) =>
+      Math.round(Number(data.get(name)) * 100);
+    await performAction(
+      {
+        type: 'role_action',
+        command: 'configure_stabilization_automation',
+        automationEnabled: data.get('automationEnabled') === 'on',
+        targetMode: String(data.get('targetMode') ?? 'balanced'),
+        intensityBps: numberBps('intensityPercent'),
+        breadthTriggerBps: numberBps('breadthTriggerPercent'),
+        weightedReturnTriggerBps: numberBps(
+          'weightedReturnTriggerPercent',
+        ),
+        liquidityStressTriggerBps: numberBps(
+          'liquidityStressPercent',
+        ),
+      },
+      'decision',
+    );
+    return;
+  }
 
   if (form.id === 'order-form') {
     selectedSymbol = String(data.get('symbol'));
@@ -4137,8 +5677,8 @@ root.addEventListener('change', async (event) => {
     }
     return;
   }
-  if (event.target.matches('[name="roleType"], [name="strengthTier"]')) {
-    updateProfilePreview();
+  if (event.target.matches('[name="roleType"]')) {
+    setCapitalControlsForRole(event.target.value);
   }
   if (event.target.matches('#order-symbol')) {
     selectedSymbol = event.target.value;
@@ -4159,6 +5699,12 @@ root.addEventListener('change', async (event) => {
 });
 
 root.addEventListener('input', (event) => {
+  if (event.target.matches('#capital-slider')) {
+    updateCapitalFromSlider(event.target.value);
+  }
+  if (event.target.matches('#capital-input')) {
+    updateCapitalFromExactInput(event.target.value);
+  }
   if (event.target.matches('#cash-allocation')) {
     setAllocation(event.target.value);
   }

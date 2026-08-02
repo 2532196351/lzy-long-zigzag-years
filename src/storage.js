@@ -2,22 +2,31 @@ import {
   deserializeWorld,
   getCompanyCatalog,
   serializeWorld,
-} from './engine.js?v=20260801-01';
+} from './engine.js?v=20260803-02';
 import {
   LEGACY_MARKET_RULE_VERSION,
   MARKET_RULE_VERSION,
   createMarketSimulation,
   migrateLegacyMarketRuleCheckpoint,
-} from './market/simulator.js?v=20260801-01';
+} from './market/simulator.js?v=20260803-02';
 import {
   decodeCheckpoint,
   encodeCheckpoint,
-} from './storage-codec.js?v=20260801-01';
+} from './storage-codec.js?v=20260803-02';
+import {
+  collectAuditColdReferences,
+  createBrowserAuditColdStore,
+  exportAuditColdRecords,
+  importAuditColdRecords,
+} from './market/audit-cold-store.js?v=20260803-02';
 
 export const SAVE_KEY = 'lzy.world-save.v1';
 export const SAVE_META_KEY = 'lzy.world-save-meta.v1';
 export const GAME_STATE_SCHEMA = 'lzy.game-state-envelope';
 export const GAME_STATE_SCHEMA_VERSION = 4;
+export const PORTABLE_GAME_ARCHIVE_SCHEMA =
+  'lzy.portable-game-archive';
+export const PORTABLE_GAME_ARCHIVE_SCHEMA_VERSION = 1;
 const SUPPORTED_GAME_STATE_SCHEMA_VERSIONS = new Set([2, 3, 4]);
 const CHECKPOINT_COMPRESSION_REQUEST = 'LZY_COMPRESS_CHECKPOINT';
 const CHECKPOINT_COMPRESSION_RESPONSE = 'LZY_CHECKPOINT_COMPRESSED';
@@ -129,7 +138,7 @@ function requireCheckpointCompressionWorker() {
     throw new Error('Checkpoint compression Worker is unavailable.');
   }
   const worker = new globalThis.Worker(
-    new URL('./storage-compression-worker.js?v=20260801-01', import.meta.url),
+    new URL('./storage-compression-worker.js?v=20260803-02', import.meta.url),
     { type: 'module' },
   );
   worker.addEventListener(
@@ -306,6 +315,42 @@ function genesisCandidate(security) {
   return latestCandidate(genesisEntries);
 }
 
+function legacyMatchedCloseCandidate(security) {
+  return latestCandidate(
+    (security.priceHistory ?? [])
+      .filter(
+        (entry) =>
+          entry?.source === 'matched_npc_orders' &&
+          Number.isSafeInteger(entry.tick) &&
+          entry.tick > 0 &&
+          typeof entry.tradeId === 'string' &&
+          entry.tradeId.length > 0,
+      )
+      .map((entry, index) => {
+        const priceTicks = isPositiveInteger(
+          entry.priceTicks,
+        )
+          ? entry.priceTicks
+          : Number.isFinite(Number(entry.price)) &&
+              Number(entry.price) > 0
+            ? Math.round(Number(entry.price) * 100)
+            : null;
+        return isPositiveInteger(priceTicks)
+          ? {
+              source: 'matched_npc_orders',
+              atMs: entry.tick,
+              priceTicks,
+              commitSeq: entry.commitSeq,
+              sequenceId:
+                entry.tradeId ??
+                `legacy-match-${String(index).padStart(8, '0')}`,
+            }
+          : null;
+      })
+      .filter(Boolean),
+  );
+}
+
 function reconstructPreviousClose(checkpoint, symbol, security) {
   const settlementMs = Number.isSafeInteger(
     checkpoint.lastWorldDaySettlementMs,
@@ -370,14 +415,26 @@ function reconstructPreviousClose(checkpoint, symbol, security) {
           entry.tradeId ?? `realtime-${String(index).padStart(8, '0')}`,
       })),
   );
+  // A world can accrue settled finite NPC matches before the realtime market
+  // controller is first materialized.  That controller starts at virtual ms
+  // zero, but the exchange reference must remain the latest matched close,
+  // not fall back to the older genesis print.
+  const legacyMatched =
+    settlementMs === 0
+      ? legacyMatchedCloseCandidate(security)
+      : null;
   const genesis = genesisCandidate(security);
   if (genesis?.conflict) {
     throw new Error(`CONFLICTING_PREVIOUS_CLOSE:${symbol}`);
   }
 
-  const available = [synthetic, daily, realtime, genesis].filter(
-    Boolean,
-  );
+  const available = [
+    synthetic,
+    daily,
+    realtime,
+    legacyMatched,
+    genesis,
+  ].filter(Boolean);
   for (let leftIndex = 0; leftIndex < available.length; leftIndex += 1) {
     for (
       let rightIndex = leftIndex + 1;
@@ -395,7 +452,14 @@ function reconstructPreviousClose(checkpoint, symbol, security) {
     }
   }
 
-  return synthetic ?? daily ?? realtime ?? genesis ?? null;
+  return (
+    synthetic ??
+    daily ??
+    realtime ??
+    legacyMatched ??
+    genesis ??
+    null
+  );
 }
 
 function hasMatchingRuleActivation(
@@ -901,7 +965,10 @@ export function hasSavedWorld() {
     const raw = requireStorage().getItem(SAVE_KEY);
     if (!raw) return false;
     const loaded = parseStoredGameState(raw);
-    if (loaded.checkpoint) {
+    if (
+      loaded.checkpoint &&
+      collectAuditColdReferences(loaded.checkpoint).length === 0
+    ) {
       createMarketSimulation(loaded.world, loaded.checkpoint);
     }
     return true;
@@ -1081,10 +1148,80 @@ export function loadWorld() {
   return loadGameState()?.world ?? null;
 }
 
-export function exportSavedGameArchive() {
+export async function exportSavedGameArchive({
+  auditColdStore = createBrowserAuditColdStore(),
+} = {}) {
   const raw = requireStorage().getItem(SAVE_KEY);
   if (!raw) throw new Error('No local LZY save is available.');
-  return raw;
+  const loaded = parseStoredGameState(raw);
+  const auditColdRecords = loaded.checkpoint
+    ? await exportAuditColdRecords(
+        loaded.checkpoint,
+        auditColdStore,
+      )
+    : [];
+  return JSON.stringify({
+    schema: PORTABLE_GAME_ARCHIVE_SCHEMA,
+    schemaVersion: PORTABLE_GAME_ARCHIVE_SCHEMA_VERSION,
+    exportedAt: new Date().toISOString(),
+    worldId: loaded.world.world.id,
+    saveEnvelope: raw,
+    auditColdRecords,
+  });
+}
+
+export async function importSavedGameArchive(
+  archiveText,
+  {
+    auditColdStore = createBrowserAuditColdStore(),
+  } = {},
+) {
+  const archive = parseJson(
+    String(archiveText ?? ''),
+    'portable LZY save archive',
+  );
+  if (
+    !archive ||
+    typeof archive !== 'object' ||
+    archive.schema !== PORTABLE_GAME_ARCHIVE_SCHEMA ||
+    archive.schemaVersion !==
+      PORTABLE_GAME_ARCHIVE_SCHEMA_VERSION ||
+    typeof archive.exportedAt !== 'string' ||
+    archive.exportedAt.length === 0 ||
+    typeof archive.worldId !== 'string' ||
+    archive.worldId.length === 0 ||
+    typeof archive.saveEnvelope !== 'string' ||
+    !Array.isArray(archive.auditColdRecords)
+  ) {
+    throw new Error('Invalid or incompatible portable LZY save archive.');
+  }
+  const loaded = parseStoredGameState(archive.saveEnvelope);
+  if (loaded.world.world.id !== archive.worldId) {
+    throw new Error(
+      'Portable save archive world identity does not match.',
+    );
+  }
+  if (loaded.checkpoint) {
+    await importAuditColdRecords(
+      loaded.checkpoint,
+      archive.auditColdRecords,
+      auditColdStore,
+    );
+  } else if (archive.auditColdRecords.length > 0) {
+    throw new Error(
+      'Legacy portable save cannot contain realtime-audit cold records.',
+    );
+  }
+  const storage = requireStorage();
+  storage.setItem(SAVE_KEY, archive.saveEnvelope);
+  storage.removeItem(SAVE_META_KEY);
+  return {
+    world: loaded.world,
+    checkpoint: loaded.checkpoint ?? null,
+    ...(loaded.migration
+      ? { migration: loaded.migration }
+      : {}),
+  };
 }
 
 export function hasStoredSaveArchive() {

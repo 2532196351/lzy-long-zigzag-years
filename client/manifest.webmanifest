@@ -1,0 +1,30 @@
+{
+  "id": "./",
+  "name": "LZY / 历·择·衍",
+  "short_name": "历·择·衍",
+  "description": "本地单机、持续演化的虚构 A 股式经济与市场游戏。",
+  "lang": "zh-CN",
+  "dir": "ltr",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone"],
+  "orientation": "any",
+  "background_color": "#111512",
+  "theme_color": "#111512",
+  "categories": ["games", "finance", "simulation"],
+  "icons": [
+    {
+      "src": "./assets/lzy-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "./assets/lzy-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
