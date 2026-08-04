@@ -298,12 +298,14 @@ export function evaluateProfitSeekingOrder({
   existingPositionUnits = 0,
   capitalCents,
   riskAversionBps = 5_000,
+  patienceBps = 0,
   drawdownBps = 0,
   tif = 'IOC',
   feeRateBps = 5,
   minimumFeeCents = 5,
   additionalImpactBps = 0,
   strategicBenefitCents = 0,
+  executionProbabilityBps = 10_000,
 }) {
   const positiveIntegers = [
     quantity,
@@ -326,6 +328,9 @@ export function evaluateProfitSeekingOrder({
     !Number.isSafeInteger(riskAversionBps) ||
     riskAversionBps < 0 ||
     riskAversionBps > 10_000 ||
+    !Number.isSafeInteger(patienceBps) ||
+    patienceBps < 0 ||
+    patienceBps > 10_000 ||
     !Number.isSafeInteger(drawdownBps) ||
     drawdownBps < 0 ||
     drawdownBps > 10_000 ||
@@ -339,17 +344,38 @@ export function evaluateProfitSeekingOrder({
     additionalImpactBps < 0 ||
     additionalImpactBps > 10_000 ||
     !Number.isSafeInteger(strategicBenefitCents) ||
-    strategicBenefitCents < 0
+    strategicBenefitCents < 0 ||
+    !Number.isSafeInteger(executionProbabilityBps) ||
+    executionProbabilityBps < 0 ||
+    executionProbabilityBps > 10_000
   ) {
     throw new TypeError(
       'profit-seeking order inputs are outside the bounded integer contract',
     );
   }
   const direction = side === 'buy' ? 1 : -1;
-  const expectedGrossPnlCents =
+  const effectiveExecutionProbabilityBps =
+    tif === 'IOC' ? 10_000 : executionProbabilityBps;
+  const probabilityWeightedBenefit = (value) =>
+    Math.floor(
+      value * effectiveExecutionProbabilityBps / 10_000,
+    );
+  const probabilityWeightedCost = (value) =>
+    Math.ceil(
+      value * effectiveExecutionProbabilityBps / 10_000,
+    );
+  const conditionalGrossPnlCents =
     direction *
     (expectedExitTicks - priceTicks) *
     quantity;
+  const expectedGrossPnlCents =
+    conditionalGrossPnlCents >= 0
+      ? probabilityWeightedBenefit(
+          conditionalGrossPnlCents,
+        )
+      : -probabilityWeightedCost(
+          Math.abs(conditionalGrossPnlCents),
+        );
   const entryFeeCents = estimatedOrderFeeCents(
     priceTicks,
     quantity,
@@ -362,8 +388,11 @@ export function evaluateProfitSeekingOrder({
     feeRateBps,
     minimumFeeCents,
   );
-  const estimatedFeesCents =
+  const conditionalFeesCents =
     entryFeeCents + exitFeeCents;
+  const estimatedFeesCents = probabilityWeightedCost(
+    conditionalFeesCents,
+  );
   const spreadTicks = Math.max(
     0,
     bestAskTicks - bestBidTicks,
@@ -395,10 +424,14 @@ export function evaluateProfitSeekingOrder({
       additionalImpactBps /
       10_000,
   );
-  const expectedImpactCents =
+  const conditionalImpactCents =
     bookImpactCents + modeledImpactCents;
+  const expectedImpactCents = probabilityWeightedCost(
+    conditionalImpactCents,
+  );
   const expectedSlippageCents =
-    touchSlippageCents + expectedImpactCents;
+    probabilityWeightedCost(touchSlippageCents) +
+    expectedImpactCents;
   const postTradePositionUnits =
     existingPositionUnits + direction * quantity;
   const inventoryRiskDeltaCents =
@@ -409,14 +442,22 @@ export function evaluateProfitSeekingOrder({
     volatilityTicks *
     riskAversionBps /
     10_000;
-  const inventoryRiskCents = Math.max(
+  const conditionalInventoryRiskCents = Math.max(
     0,
     Math.ceil(inventoryRiskDeltaCents),
   );
-  const inventoryRiskReliefCents = Math.max(
+  const conditionalInventoryRiskReliefCents = Math.max(
     0,
     Math.floor(-inventoryRiskDeltaCents),
   );
+  const inventoryRiskCents = probabilityWeightedCost(
+    conditionalInventoryRiskCents,
+  );
+  const inventoryRiskReliefCents = probabilityWeightedBenefit(
+    conditionalInventoryRiskReliefCents,
+  );
+  const expectedStrategicBenefitCents =
+    probabilityWeightedBenefit(strategicBenefitCents);
   const queueDelayBps =
     tif === 'GTC'
       ? Math.min(
@@ -431,31 +472,37 @@ export function evaluateProfitSeekingOrder({
           ),
         )
       : 0;
+  const patienceAdjustedQueueDelayBps = Math.round(
+    queueDelayBps * (10_000 - patienceBps) / 10_000,
+  );
   const opportunityCostCents =
     tif === 'GTC'
       ? Math.ceil(
           Math.max(
             0,
             expectedGrossPnlCents +
-              strategicBenefitCents +
+              expectedStrategicBenefitCents +
               inventoryRiskReliefCents,
           ) *
             (
               1_500 +
               Math.min(1_500, volatilityTicks * 150) +
-              queueDelayBps
+              patienceAdjustedQueueDelayBps
             ) /
             10_000,
         )
       : 0;
-  const drawdownRiskCents = Math.ceil(
+  const conditionalDrawdownRiskCents = Math.ceil(
     (
-      Math.max(0, expectedGrossPnlCents) +
+      Math.max(0, conditionalGrossPnlCents) +
       Math.abs(postTradePositionUnits) *
         Math.max(1, volatilityTicks)
     ) *
       drawdownBps /
       10_000,
+  );
+  const drawdownRiskCents = probabilityWeightedCost(
+    conditionalDrawdownRiskCents,
   );
   const expectedNetPnlCents =
     expectedGrossPnlCents -
@@ -465,8 +512,11 @@ export function evaluateProfitSeekingOrder({
     opportunityCostCents -
     drawdownRiskCents +
     inventoryRiskReliefCents +
-    strategicBenefitCents;
+    expectedStrategicBenefitCents;
   return {
+    executionProbabilityBps:
+      effectiveExecutionProbabilityBps,
+    conditionalGrossPnlCents,
     expectedGrossPnlCents,
     estimatedFeesCents,
     expectedSlippageCents,
@@ -476,6 +526,7 @@ export function evaluateProfitSeekingOrder({
     opportunityCostCents,
     drawdownRiskCents,
     strategicBenefitCents,
+    expectedStrategicBenefitCents,
     expectedNetPnlCents,
     expectedReturnBps: Math.round(
       expectedNetPnlCents * 10_000 /
@@ -1101,6 +1152,35 @@ function matchingIntentAction(
     .find((entry) => entry.intentId === intentId);
 }
 
+function matchingIntentActionWithFillCapacity(
+  behavior,
+  intentId,
+  fillQuantity,
+) {
+  return [...behavior.actionTrace]
+    .reverse()
+    .find(
+      (entry) =>
+        entry.intentId === intentId &&
+        entry.quantity - entry.filledQuantity >= fillQuantity,
+    ) ?? null;
+}
+
+function matchingUnresolvedIntentAction(
+  behavior,
+  intentId,
+) {
+  return [...behavior.actionTrace]
+    .reverse()
+    .find(
+      (entry) =>
+        entry.intentId === intentId &&
+        entry.acceptedOrderCount +
+            entry.rejectedOrderCount ===
+          0,
+    ) ?? null;
+}
+
 function matchingIntentAggregate(
   behavior,
   intentId,
@@ -1533,6 +1613,7 @@ export function observeBehaviorState(
     symbols,
     markPrices = symbols,
     publicTrades = [],
+    publicTradesAreEligibleSortedUnique = false,
     capacityPressureBps = 0,
     fundingStressBps = 0,
   },
@@ -1585,21 +1666,23 @@ export function observeBehaviorState(
     10_000,
   );
 
-  const observed = [
-    ...new Map(
-      publicTrades
-        .filter(
-          (trade) =>
-            trade.commitSeq >
-            behavior.memory.publicCursorCommitSeq,
-        )
-        .map((trade) => [trade.id, trade]),
-    ).values(),
-  ].sort(
-    (left, right) =>
-      left.commitSeq - right.commitSeq ||
-      left.id.localeCompare(right.id),
-  );
+  const observed = publicTradesAreEligibleSortedUnique
+    ? publicTrades
+    : [
+        ...new Map(
+          publicTrades
+            .filter(
+              (trade) =>
+                trade.commitSeq >
+                behavior.memory.publicCursorCommitSeq,
+            )
+            .map((trade) => [trade.id, trade]),
+        ).values(),
+      ].sort(
+        (left, right) =>
+          left.commitSeq - right.commitSeq ||
+          left.id.localeCompare(right.id),
+      );
   if (observed.length > 0) {
     const bySymbol = new Map();
     for (const [index, trade] of observed.entries()) {
@@ -2396,7 +2479,11 @@ export function recordBehaviorSettlement(
       episode.symbol === trade.symbol &&
       episode.side === side,
   );
-  const action = matchingIntentAction(behavior, intentId);
+  const action = matchingIntentActionWithFillCapacity(
+    behavior,
+    intentId,
+    trade.quantity,
+  );
   const intentAggregate = matchingIntentAggregate(
     behavior,
     intentId,
@@ -2489,7 +2576,14 @@ export function recordBehaviorSettlement(
   );
   if (action) action.filledQuantity += trade.quantity;
   if (behavior.lastIntent?.intentId === intentId) {
-    behavior.lastIntent.filledQuantity += trade.quantity;
+    behavior.lastIntent.filledQuantity += Math.min(
+      trade.quantity,
+      Math.max(
+        0,
+        behavior.lastIntent.quantity -
+          behavior.lastIntent.filledQuantity,
+      ),
+    );
     behavior.lastIntent.settlementAggregate =
       cloneJson(settlementAggregate);
   }
@@ -2500,20 +2594,10 @@ export function recordBehaviorReceipt(
   behavior,
   receipt,
 ) {
-  let action = null;
-  for (
-    let index = behavior.actionTrace.length - 1;
-    index >= 0;
-    index -= 1
-  ) {
-    if (
-      behavior.actionTrace[index].intentId ===
-      receipt.parentOrderId
-    ) {
-      action = behavior.actionTrace[index];
-      break;
-    }
-  }
+  const action = matchingUnresolvedIntentAction(
+    behavior,
+    receipt.parentOrderId,
+  );
   const receiptAlreadyRecorded =
     behavior.memory.receiptIds.includes(receipt.id) ||
     behavior.memory.episodes.some(

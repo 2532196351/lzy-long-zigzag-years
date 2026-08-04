@@ -4,26 +4,26 @@ import {
   activePriceTicksExcludingOrders,
   aggregateBookMetrics,
   bookLevelMetrics,
-} from './order-book.js?v=20260803-02';
+} from './order-book.js?v=20260804-01';
 import {
   buildLimitFollowerQueue,
   diffLimitFollowerQueue,
   diffMakerLadder,
-} from './liquidity.js?v=20260803-02';
+} from './liquidity.js?v=20260804-01';
 import {
   createActorValuationObservation,
   createValuationSnapshot,
-} from './valuation.js?v=20260803-02';
+} from './valuation.js?v=20260804-01';
 import {
   computeMakerQuotePlan,
   REGIME_PRESETS,
-} from './maker-ecology.js?v=20260803-02';
-import { deriveInstitutionValuationView } from './institutional-ecology.js?v=20260803-02';
+} from './maker-ecology.js?v=20260804-01';
+import { deriveInstitutionValuationView } from './institutional-ecology.js?v=20260804-01';
 import {
   createInstitutionValuationObservation,
   createMakerValuationObservation,
   institutionalPolicyForLiveAgent,
-} from './ecology-contract.js?v=20260803-02';
+} from './ecology-contract.js?v=20260804-01';
 import {
   BEHAVIOR_LIMITS,
   BEHAVIOR_RULE_VERSION,
@@ -41,10 +41,10 @@ import {
   recordBehaviorAction,
   recordBehaviorReceipt,
   recordBehaviorSettlement,
-} from './behavior-kernel.js?v=20260803-02';
+} from './behavior-kernel.js?v=20260804-01';
 
 export const AGENT_RULE_VERSION =
-  'lzy-agent-ecology-0.11.0';
+  'lzy-agent-ecology-0.12.0';
 export const SYMBOL_ORDER_CONTEXT_VERSION =
   'lzy-symbol-order-context-1';
 const LIMIT_QUEUE_EPISODE_VERSION =
@@ -53,6 +53,8 @@ const PRE_STABILIZATION_AGENT_RULE_VERSION =
   'lzy-agent-ecology-0.9.0';
 const PRE_QUANT_AGENT_RULE_VERSION =
   'lzy-agent-ecology-0.10.0';
+const PRE_SYMBOL_FAIR_AGENT_RULE_VERSION =
+  'lzy-agent-ecology-0.11.0';
 const PREVIOUS_AGENT_RULE_VERSION =
   'lzy-agent-ecology-0.8.0';
 const PRE_CAPACITY_AGENT_RULE_VERSION =
@@ -64,6 +66,9 @@ const CAPACITY_LEDGER_RULE_VERSION =
 const LEGACY_CAPACITY_LEDGER_RULE_VERSION =
   'lzy-agent-capacity-ledger-1';
 const MAX_RECENT_ACTIVITY = 240;
+// The cap is per active symbol. A global 48-record tail let one hot listing
+// erase every other listing's settled information; active-symbol count is
+// fixed by the listed universe, so this remains fixed-active-complexity.
 const MAX_PUBLIC_FLOW = 48;
 const MAX_OBSERVED_TRADES_PER_RESPONSE = 24;
 const MAX_PUBLIC_ACTIONS_PER_ACTIVITY = 4;
@@ -95,8 +100,12 @@ const LIMIT_QUEUE_EPISODE_STATES = new Set([
   'failed_recovery',
 ]);
 const MAX_RETAIL_WORKING_ORDERS = 4;
-const MIN_RETAIL_RESTING_LIFETIME_MS = 3_000;
-const MAX_RETAIL_RESTING_LIFETIME_MS = 9_000;
+const MAX_RETAIL_WORKING_INTENTS = 3;
+const MIN_RETAIL_RESTING_LIFETIME_MS = 120_000;
+const MAX_RETAIL_RESTING_LIFETIME_MS = 360_000;
+const MAX_INSTITUTION_PASSIVE_ORDERS = 4;
+const MIN_INSTITUTION_RESTING_LIFETIME_MS = 180_000;
+const MAX_INSTITUTION_RESTING_LIFETIME_MS = 540_000;
 const FUNDAMENTAL_FACT_TYPES = Object.freeze([
   'company_inventory',
   'company_receivables',
@@ -846,40 +855,148 @@ const publicTradeIndexCache = new WeakMap();
 const publicShockCache = new WeakMap();
 const publicTapeCache = new WeakMap();
 const fundamentalFactIndexes = new WeakMap();
+const eligibleFundamentalFactCache = new WeakMap();
 const activeOrdersByOwnerCache = new WeakMap();
 const quantCrossSectionCache = new WeakMap();
+const openingPeerMeanDecisionCache = new WeakMap();
 
 function publicRealtimeTape(state) {
-  const trades = state.world.market.trades;
+  const trades = state.agentEcology?.publicFlow ?? [];
   const firstTrade = trades[0];
   const lastTrade = trades.at(-1);
   const cached = publicTapeCache.get(state);
   if (
     cached?.tradesLength === trades.length &&
-    cached.firstTradeId === firstTrade?.id &&
-    cached.lastTradeId === lastTrade?.id
+    cached.firstTradeId === firstTrade?.tradeId &&
+    cached.lastTradeId === lastTrade?.tradeId
   ) {
     return cached;
   }
   const bySymbol = new Map();
-  for (const trade of trades) {
-    if (trade.source !== 'realtime_order_book') continue;
-    const symbolTrades = bySymbol.get(trade.symbol);
+  const observedTrades = [];
+  for (const record of trades) {
+    const symbolTrades = bySymbol.get(record.symbol);
     if (symbolTrades) {
-      symbolTrades.push(trade);
+      symbolTrades.push(record);
     } else {
-      bySymbol.set(trade.symbol, [trade]);
+      bySymbol.set(record.symbol, [record]);
+    }
+    const trade = resolveSettledPublicTradeChain(
+      state,
+      record.tradeId,
+    )?.trade;
+    if (trade) {
+      observedTrades.push(trade);
+    } else if (typeof record.factId === 'string') {
+      observedTrades.push(publicFlowObservedTrade(record));
     }
   }
   const tape = {
     tradesLength: trades.length,
-    firstTradeId: firstTrade?.id,
-    lastTradeId: lastTrade?.id,
+    firstTradeId: firstTrade?.tradeId,
+    lastTradeId: lastTrade?.tradeId,
     bySymbol,
+    observedTrades,
     metricsBySymbol: new Map(),
   };
   publicTapeCache.set(state, tape);
   return tape;
+}
+
+function publicFlowPlayerSide(trade) {
+  if (
+    trade.selfTrade === true &&
+    trade.buyerId === 'player' &&
+    trade.sellerId === 'player'
+  ) {
+    return trade.side;
+  }
+  if (trade.buyerId === 'player') return 'buy';
+  if (trade.sellerId === 'player') return 'sell';
+  return null;
+}
+
+function compactPublicFlowRecord(trade) {
+  const playerSide = publicFlowPlayerSide(trade);
+  return {
+    tradeId: trade.id,
+    factId: trade.factId,
+    virtualMs: trade.virtualMs,
+    symbol: trade.symbol,
+    side: trade.side,
+    priceTicks: trade.priceTicks,
+    quantity: trade.quantity,
+    selfTrade: trade.selfTrade === true,
+    ...(playerSide ? { playerSide } : {}),
+    commitSeq: trade.commitSeq,
+  };
+}
+
+function publicFlowObservedTrade(record) {
+  return {
+    id: record.tradeId,
+    factId: record.factId,
+    virtualMs: record.virtualMs,
+    symbol: record.symbol,
+    side: record.side,
+    priceTicks: record.priceTicks,
+    quantity: record.quantity,
+    commitSeq: record.commitSeq,
+  };
+}
+
+function comparePublicFlowRecords(left, right) {
+  return (
+    left.commitSeq - right.commitSeq ||
+    realtimeTradeSequence(left.tradeId) -
+      realtimeTradeSequence(right.tradeId) ||
+    left.tradeId.localeCompare(right.tradeId)
+  );
+}
+
+function retainPublicFlowRecords(
+  records,
+  maximumPerSymbol = MAX_PUBLIC_FLOW,
+) {
+  const bySymbol = new Map();
+  for (const record of records) {
+    const retained = bySymbol.get(record.symbol) ?? [];
+    retained.push(record);
+    if (retained.length > maximumPerSymbol) retained.shift();
+    bySymbol.set(record.symbol, retained);
+  }
+  return [...bySymbol.values()]
+    .flat()
+    .sort(comparePublicFlowRecords);
+}
+
+function retainPublicFlowRecord(ecology, record) {
+  ecology.publicFlow.push(record);
+  let sameSymbolCount = 0;
+  for (
+    let index = ecology.publicFlow.length - 1;
+    index >= 0;
+    index -= 1
+  ) {
+    if (ecology.publicFlow[index].symbol !== record.symbol) {
+      continue;
+    }
+    sameSymbolCount += 1;
+    if (sameSymbolCount <= MAX_PUBLIC_FLOW) continue;
+    ecology.publicFlow.splice(index, 1);
+    break;
+  }
+}
+
+export function publicTradeTailsBySymbol(state) {
+  const tails = Object.fromEntries(
+    Object.keys(state.books ?? {}).map((symbol) => [symbol, []]),
+  );
+  for (const record of state.agentEcology?.publicFlow ?? []) {
+    if (!tails[record.symbol]) continue;
+    tails[record.symbol].push({ ...record });
+  }
+  return tails;
 }
 
 function activeOrdersOwnedBy(state, ownerId) {
@@ -1125,18 +1242,50 @@ function financialReportPublicationMs(fact) {
 function eligibleFundamentalFacts(world, symbol) {
   const issuerId = world.market.securities[symbol]?.issuerId;
   const worldTick = world.world.tick;
-  return (
-    fundamentalFactIndex(world).byIssuer.get(issuerId) ?? []
-  )
-    .filter((fact) => fact.tick <= worldTick)
-    .sort(
-      (left, right) =>
-        left.tick - right.tick ||
-        fundamentalPublicationMs(left) -
-          fundamentalPublicationMs(right) ||
-        left.id.localeCompare(right.id),
-    )
-    .slice(-MAX_FUNDAMENTAL_SOURCES_PER_SYMBOL);
+  const facts = world.facts;
+  const firstFactId = facts[0]?.id ?? null;
+  const lastFactId = facts.at(-1)?.id ?? null;
+  let cache = eligibleFundamentalFactCache.get(world);
+  if (
+    !cache ||
+    cache.facts !== facts ||
+    cache.factsLength !== facts.length ||
+    cache.firstFactId !== firstFactId ||
+    cache.lastFactId !== lastFactId ||
+    cache.worldTick !== worldTick
+  ) {
+    cache = {
+      facts,
+      factsLength: facts.length,
+      firstFactId,
+      lastFactId,
+      worldTick,
+      bySymbol: new Map(),
+    };
+    eligibleFundamentalFactCache.set(world, cache);
+  }
+  const cached = cache.bySymbol.get(symbol);
+  if (cached) return cached;
+  const eligible = [];
+  for (const fact of
+    fundamentalFactIndex(world).byIssuer.get(issuerId) ?? []) {
+    if (fact.tick <= worldTick) eligible.push(fact);
+  }
+  eligible.sort(
+    (left, right) =>
+      left.tick - right.tick ||
+      fundamentalPublicationMs(left) -
+        fundamentalPublicationMs(right) ||
+      left.id.localeCompare(right.id),
+  );
+  if (eligible.length > MAX_FUNDAMENTAL_SOURCES_PER_SYMBOL) {
+    eligible.splice(
+      0,
+      eligible.length - MAX_FUNDAMENTAL_SOURCES_PER_SYMBOL,
+    );
+  }
+  cache.bySymbol.set(symbol, eligible);
+  return eligible;
 }
 
 function fundamentalFactSignalTicks(fact, security = null) {
@@ -1365,28 +1514,25 @@ export function publicCatalystSignalTicks(
   ) {
     return 0;
   }
-  const informationDelayMs = Math.max(
-    0,
-    Number.isSafeInteger(agent.informationDelayMs)
-      ? agent.informationDelayMs
-      : 0,
-  );
-  const visibleFacts = eligibleFundamentalFacts(
-    state.world,
+  return catalystSignalFromVisibleFacts(
+    state,
+    agent,
     symbol,
-  )
-    .filter((fact) => {
-      const publishedAtMs = Number.isSafeInteger(
-        fact.publishedAtMs,
-      )
-        ? fact.publishedAtMs
-        : fact.tick * 86_400_000;
-      return (
-        fact.tick > 0 &&
-        publishedAtMs + informationDelayMs <= observedMs
-      );
-    })
-    .slice(-4);
+    visibleCompanyFacts(
+      state,
+      agent,
+      symbol,
+      observedMs,
+    ),
+  );
+}
+
+function catalystSignalFromVisibleFacts(
+  state,
+  agent,
+  symbol,
+  visibleFacts,
+) {
   if (visibleFacts.length === 0) return 0;
   const security = state.world.market.securities[symbol];
   const rawSignalTicks = clamp(
@@ -1496,17 +1642,21 @@ function visibleFundamentalTick(world, nowMs, informationDelayMs) {
     -Number.MAX_SAFE_INTEGER,
     Math.floor(nowMs - informationDelayMs),
   );
-  const ticks = fundamentalFactIndex(world)
-    .financialReports
-    .filter(
-      (fact) =>
-        Number.isSafeInteger(fact.tick) &&
-        fact.tick <= world.world.tick &&
-        financialReportPublicationMs(fact) <= visibleAtMs,
-    )
-    .map((fact) => fact.tick);
-  if (ticks.length === 0) return 0;
-  return Math.max(...ticks);
+  let latestVisibleTick = 0;
+  for (const fact of
+    fundamentalFactIndex(world).financialReports) {
+    if (
+      Number.isSafeInteger(fact.tick) &&
+      fact.tick <= world.world.tick &&
+      financialReportPublicationMs(fact) <= visibleAtMs
+    ) {
+      latestVisibleTick = Math.max(
+        latestVisibleTick,
+        fact.tick,
+      );
+    }
+  }
+  return latestVisibleTick;
 }
 
 function createFundamentalSnapshot(
@@ -1898,20 +2048,59 @@ function migratePublicObservationEvidence(state) {
       state,
       record?.tradeId,
     );
-    if (!chain) {
+    if (
+      !chain &&
+      !observedTradeFactIsValid(
+        state,
+        publicFlowObservedTrade(record ?? {}),
+      )
+    ) {
       changed = true;
       continue;
     }
     const next = record;
-    if (next.factId !== chain.trade.factId) {
+    if (chain && next.factId !== chain.trade.factId) {
       next.factId = chain.trade.factId;
       changed = true;
     }
+    if (chain) {
+      const authority = compactPublicFlowRecord(
+        chain.trade,
+      );
+      if (next.selfTrade !== authority.selfTrade) {
+        next.selfTrade = authority.selfTrade;
+        changed = true;
+      }
+      if (authority.playerSide) {
+        if (next.playerSide !== authority.playerSide) {
+          next.playerSide = authority.playerSide;
+          changed = true;
+        }
+      } else if (Object.hasOwn(next, 'playerSide')) {
+        delete next.playerSide;
+        changed = true;
+      }
+    } else if (typeof next.selfTrade !== 'boolean') {
+      // A pre-symbol-tail record without an observable settled chain cannot
+      // ground player/self-trade flags. Drop it rather than fabricate them.
+      changed = true;
+      continue;
+    }
     migratedPublicFlow.push(next);
   }
-  ecology.publicFlow = migratedPublicFlow.slice(
-    -MAX_PUBLIC_FLOW,
+  const retainedPublicFlow = retainPublicFlowRecords(
+    migratedPublicFlow,
   );
+  if (
+    retainedPublicFlow.length !== ecology.publicFlow.length ||
+    retainedPublicFlow.some(
+      (record, index) => record !== ecology.publicFlow[index],
+    )
+  ) {
+    changed = true;
+  }
+  ecology.maxPublicFlow = MAX_PUBLIC_FLOW;
+  ecology.publicFlow = retainedPublicFlow;
 
   for (const [agentId, pending] of Object.entries(
     ecology.pendingResponses ?? {},
@@ -2447,7 +2636,11 @@ export function migrateAgentEcologyState(
     throw new Error('Agent ecology state is required.');
   }
   const stockUniverseMigrated =
-    ecology.ruleVersion === AGENT_RULE_VERSION
+    (
+      ecology.ruleVersion === AGENT_RULE_VERSION ||
+      ecology.ruleVersion ===
+        PRE_SYMBOL_FAIR_AGENT_RULE_VERSION
+    )
       ? migrateExpandedStockUniverseEcology(state)
       : false;
   const custodyTrackingMigrated =
@@ -2455,6 +2648,24 @@ export function migrateAgentEcologyState(
       state,
       custodyMigration,
     );
+  let symbolFairVersionMigrated = false;
+  if (
+    ecology.ruleVersion ===
+    PRE_SYMBOL_FAIR_AGENT_RULE_VERSION
+  ) {
+    if (
+      !sameStringSet(
+        Object.keys(ecology.agents ?? {}),
+        AGENT_IDS,
+      )
+    ) {
+      throw new Error(
+        `Unsupported agent ecology schema: ${ecology.ruleVersion}`,
+      );
+    }
+    ecology.ruleVersion = AGENT_RULE_VERSION;
+    symbolFairVersionMigrated = true;
+  }
   if (
     ecology.ruleVersion ===
     PRE_QUANT_AGENT_RULE_VERSION
@@ -2492,7 +2703,8 @@ export function migrateAgentEcologyState(
   if (ecology.ruleVersion === AGENT_RULE_VERSION) {
     let migrated =
       stockUniverseMigrated ||
-      custodyTrackingMigrated;
+      custodyTrackingMigrated ||
+      symbolFairVersionMigrated;
     if (
       ecology.capacityLedger?.ruleVersion ===
       LEGACY_CAPACITY_LEDGER_RULE_VERSION
@@ -2547,7 +2759,10 @@ export function migrateAgentEcologyState(
         migrated = true;
       }
     }
-    if (!strictCurrentSchema) {
+    if (
+      symbolFairVersionMigrated ||
+      !strictCurrentSchema
+    ) {
       migrated =
         migratePublicObservationEvidence(state) ||
         migrated;
@@ -2807,8 +3022,8 @@ export function migrateAgentEcologyState(
           ...activity,
           publicActions: activity.publicActions ?? [],
         })),
-    publicFlow: cloneJson(ecology.publicFlow ?? []).slice(
-      -MAX_PUBLIC_FLOW,
+    publicFlow: retainPublicFlowRecords(
+      cloneJson(ecology.publicFlow ?? []),
     ),
     pendingResponses: cloneJson(
       ecology.pendingResponses ?? {},
@@ -3015,23 +3230,25 @@ function concentrateFiniteStandingClip(
   orders,
   targetNearUnits,
   nearLevelCount = 2,
+  maximumTouchUnits = null,
 ) {
   if (!Array.isArray(orders) || orders.length === 0) return [];
-  const totalUnits = orders.reduce(
-    (sum, order) => sum + Math.max(0, order.quantity ?? 0),
-    0,
-  );
+  let totalUnits = 0;
+  for (const order of orders) {
+    totalUnits += Math.max(0, order.quantity ?? 0);
+  }
   const nearCount = Math.min(
     orders.length,
     Math.max(1, nearLevelCount),
   );
   const tailCount = orders.length - nearCount;
-  const existingNearUnits = orders
-    .slice(0, nearCount)
-    .reduce(
-      (sum, order) => sum + Math.max(0, order.quantity ?? 0),
+  let existingNearUnits = 0;
+  for (let index = 0; index < nearCount; index += 1) {
+    existingNearUnits += Math.max(
       0,
+      orders[index].quantity ?? 0,
     );
+  }
   const nearUnits = Math.min(
     Math.max(nearCount, totalUnits - tailCount),
     Math.max(existingNearUnits, Math.round(targetNearUnits)),
@@ -3039,23 +3256,33 @@ function concentrateFiniteStandingClip(
   if (nearUnits <= existingNearUnits) {
     return orders;
   }
-  const distribute = (slice, targetUnits) => {
-    if (slice.length === 0) return [];
-    const minimumUnits = slice.length;
+  const distribute = (start, end, targetUnits) => {
+    const length = end - start;
+    if (length === 0) return [];
+    const minimumUnits = length;
     const extraUnits = Math.max(0, targetUnits - minimumUnits);
-    const weights = slice.map((order) =>
-      Math.max(1, order.quantity ?? 0),
-    );
-    const weightTotal = weights.reduce(
-      (sum, weight) => sum + weight,
-      0,
-    );
-    const allocated = weights.map((weight) =>
-      Math.floor(extraUnits * weight / weightTotal),
-    );
-    let remainder =
-      extraUnits -
-      allocated.reduce((sum, quantity) => sum + quantity, 0);
+    let weightTotal = 0;
+    for (let index = start; index < end; index += 1) {
+      weightTotal += Math.max(
+        1,
+        orders[index].quantity ?? 0,
+      );
+    }
+    const allocated = new Array(length);
+    let allocatedTotal = 0;
+    for (let index = 0; index < length; index += 1) {
+      const quantity = Math.floor(
+        extraUnits *
+          Math.max(
+            1,
+            orders[start + index].quantity ?? 0,
+          ) /
+          weightTotal,
+      );
+      allocated[index] = quantity;
+      allocatedTotal += quantity;
+    }
+    let remainder = extraUnits - allocatedTotal;
     for (
       let index = 0;
       remainder > 0 && index < allocated.length;
@@ -3064,15 +3291,41 @@ function concentrateFiniteStandingClip(
       allocated[index] += 1;
       remainder -= 1;
     }
-    return slice.map((order, index) => ({
-      ...order,
-      quantity: 1 + allocated[index],
-    }));
+    const distributed = new Array(length);
+    for (let index = 0; index < length; index += 1) {
+      distributed[index] = {
+        ...orders[start + index],
+        quantity: 1 + allocated[index],
+      };
+    }
+    return distributed;
   };
+  const nearOrders = distribute(
+    0,
+    nearCount,
+    nearUnits,
+  );
+  if (
+    isPositiveInteger(maximumTouchUnits) &&
+    nearOrders.length > 1 &&
+    nearOrders[0].quantity > maximumTouchUnits
+  ) {
+    const displacedUnits =
+      nearOrders[0].quantity - maximumTouchUnits;
+    nearOrders[0] = {
+      ...nearOrders[0],
+      quantity: maximumTouchUnits,
+    };
+    nearOrders[1] = {
+      ...nearOrders[1],
+      quantity: nearOrders[1].quantity + displacedUnits,
+    };
+  }
   return [
-    ...distribute(orders.slice(0, nearCount), nearUnits),
+    ...nearOrders,
     ...distribute(
-      orders.slice(nearCount),
+      nearCount,
+      orders.length,
       totalUnits - nearUnits,
     ),
   ];
@@ -3123,7 +3376,9 @@ function makerDesiredOrders({
     return { zone: 'TAIL', purpose: 'valuation_tail' };
   };
   const append = (orders, side) => {
-    const sizedOrders = orders.map((order, level) => {
+    const desiredQuantities = new Array(orders.length);
+    for (let level = 0; level < orders.length; level += 1) {
+      const order = orders[level];
       const layerSizeBps =
         9_700 +
         (
@@ -3132,30 +3387,26 @@ function makerDesiredOrders({
           ) %
           601
         );
-      return {
-        order,
-        level,
-        desiredQuantity: Math.max(
-          1,
-          Math.floor(
-            order.quantity *
-              (side === 'buy'
-                ? buySizeMultiplier
-                : sellSizeMultiplier) *
-              layerSizeBps /
-              10_000,
-          ),
+      desiredQuantities[level] = Math.max(
+        1,
+        Math.floor(
+          order.quantity *
+            (side === 'buy'
+              ? buySizeMultiplier
+              : sellSizeMultiplier) *
+            layerSizeBps /
+            10_000,
         ),
-      };
-    });
-    const futureMinimum = new Array(sizedOrders.length + 1).fill(0);
-    for (let index = sizedOrders.length - 1; index >= 0; index -= 1) {
+      );
+    }
+    const futureMinimum = new Array(orders.length + 1).fill(0);
+    for (let index = orders.length - 1; index >= 0; index -= 1) {
       futureMinimum[index] =
         futureMinimum[index + 1] +
         (
           side === 'buy'
             ? makerBuyOrderCostCents(
-                sizedOrders[index].order.priceTicks,
+                orders[index].priceTicks,
                 1,
               )
             : 1
@@ -3167,11 +3418,9 @@ function makerDesiredOrders({
           ? remainingBuyCents
           : remainingSellUnits
       ) >= futureMinimum[0];
-    for (const {
-      order,
-      level,
-      desiredQuantity,
-    } of sizedOrders) {
+    for (let level = 0; level < orders.length; level += 1) {
+      const order = orders[level];
+      const desiredQuantity = desiredQuantities[level];
       let quantity = desiredQuantity;
       if (side === 'buy') {
         const reservedForLater = canFundEveryLevel
@@ -3259,6 +3508,8 @@ function makerDesiredOrders({
     concentrateFiniteStandingClip(
       quotePlan.bids,
       routineClipInputUnits(buySizeMultiplier),
+      2,
+      quotePlan.diagnostics.maximumTouchUnits,
     ),
     'buy',
   );
@@ -3266,6 +3517,8 @@ function makerDesiredOrders({
     concentrateFiniteStandingClip(
       quotePlan.asks,
       routineClipInputUnits(sellSizeMultiplier),
+      2,
+      quotePlan.diagnostics.maximumTouchUnits,
     ),
     'sell',
   );
@@ -3331,7 +3584,7 @@ function fitMakerCoverageToFiniteResources(
   });
 }
 
-function reallocateMakerLawfulLaneCoverage({
+export function reallocateMakerLawfulLaneCoverage({
   orders,
   agent,
   dailyBand,
@@ -3350,20 +3603,42 @@ function reallocateMakerLawfulLaneCoverage({
         laneModulus +
       laneModulus
     ) % laneModulus;
+  const firstLanePriceAtOrAbove = (priceTicks) =>
+    priceTicks +
+    (
+      laneRemainder -
+        (priceTicks % laneModulus) +
+        laneModulus
+    ) % laneModulus;
+  const lastLanePriceAtOrBelow = (priceTicks) =>
+    priceTicks -
+    (
+      (priceTicks % laneModulus) -
+        laneRemainder +
+        laneModulus
+    ) % laneModulus;
   const targetLevelsPerLane = Math.ceil(100 / laneModulus);
   const reallocatedByLayer = new Map();
-  const desiredBidTicks = orders
-    .filter((order) => order.side === 'buy')
-    .reduce(
-      (best, order) => Math.max(best, order.priceTicks),
-      0,
-    );
-  const desiredAskTicks = orders
-    .filter((order) => order.side === 'sell')
-    .reduce(
-      (best, order) => Math.min(best, order.priceTicks),
-      Number.MAX_SAFE_INTEGER,
-    );
+  const sideOrdersBySide = {
+    buy: [],
+    sell: [],
+  };
+  let desiredBidTicks = 0;
+  let desiredAskTicks = Number.MAX_SAFE_INTEGER;
+  for (const order of orders) {
+    sideOrdersBySide[order.side]?.push(order);
+    if (order.side === 'buy') {
+      desiredBidTicks = Math.max(
+        desiredBidTicks,
+        order.priceTicks,
+      );
+    } else if (order.side === 'sell') {
+      desiredAskTicks = Math.min(
+        desiredAskTicks,
+        order.priceTicks,
+      );
+    }
+  }
   let ownBidCeilingTicks = desiredBidTicks;
   let ownAskFloorTicks = desiredAskTicks;
   if (
@@ -3380,20 +3655,36 @@ function reallocateMakerLawfulLaneCoverage({
       ownBidCeilingTicks = splitTicks;
       ownAskFloorTicks = splitTicks + 1;
     } else {
-      ownBidCeilingTicks = clamp(
+      const clampedBidCeilingTicks = clamp(
         desiredBidTicks,
         dailyBand.limitDownTicks,
         dailyBand.limitUpTicks - 1,
       );
-      ownAskFloorTicks = clamp(
+      const firstBandBidLaneTicks =
+        firstLanePriceAtOrAbove(
+          dailyBand.limitDownTicks,
+        );
+      ownBidCeilingTicks =
+        desiredBidTicks < dailyBand.limitDownTicks &&
+        firstBandBidLaneTicks < dailyBand.limitUpTicks
+          ? firstBandBidLaneTicks
+          : clampedBidCeilingTicks;
+      const clampedAskFloorTicks = clamp(
         desiredAskTicks,
         ownBidCeilingTicks + 1,
         dailyBand.limitUpTicks,
       );
+      const lastBandAskLaneTicks =
+        lastLanePriceAtOrBelow(dailyBand.limitUpTicks);
+      ownAskFloorTicks =
+        desiredAskTicks > dailyBand.limitUpTicks &&
+        lastBandAskLaneTicks > ownBidCeilingTicks
+          ? lastBandAskLaneTicks
+          : clampedAskFloorTicks;
     }
   }
   const retainSide = (side) => {
-    const sideOrders = orders.filter((order) => order.side === side);
+    const sideOrders = sideOrdersBySide[side];
     const minimumPriceTicks = side === 'buy'
       ? dailyBand.limitDownTicks
       : Math.max(
@@ -3418,20 +3709,14 @@ function reallocateMakerLawfulLaneCoverage({
       : dailyBand.limitUpTicks;
     if (minimumPriceTicks > maximumPriceTicks) return;
     const firstLanePriceTicks =
-      minimumPriceTicks +
-      (
-        laneRemainder -
-          (minimumPriceTicks % laneModulus) +
-          laneModulus
-      ) % laneModulus;
-    const lawfulLanePrices = [];
-    for (
-      let priceTicks = firstLanePriceTicks;
-      priceTicks <= maximumPriceTicks;
-      priceTicks += laneModulus
-    ) {
-      lawfulLanePrices.push(priceTicks);
-    }
+      firstLanePriceAtOrAbove(minimumPriceTicks);
+    const lawfulLanePriceCount =
+      firstLanePriceTicks > maximumPriceTicks
+        ? 0
+        : Math.floor(
+            (maximumPriceTicks - firstLanePriceTicks) /
+              laneModulus,
+          ) + 1;
     const lawfulOrders = sideOrders.filter(
       (order) =>
         order.priceTicks >= minimumPriceTicks &&
@@ -3442,49 +3727,141 @@ function reallocateMakerLawfulLaneCoverage({
     }
     const targetLevels = Math.min(
       targetLevelsPerLane,
-      lawfulLanePrices.length,
+      lawfulLanePriceCount,
       sideOrders.length,
     );
     const occupiedPrices = new Set(
       lawfulOrders.map((order) => order.priceTicks),
     );
-    const unusedOrders = sideOrders.filter(
-      (order) => !reallocatedByLayer.has(order.layerKey),
-    );
+    const unusedOrders = sideOrders
+      .filter(
+        (order) => !reallocatedByLayer.has(order.layerKey),
+      )
+      .sort(
+        (left, right) =>
+          left.priceTicks - right.priceTicks ||
+          left.layerKey.localeCompare(right.layerKey),
+      );
+    const firstUnusedAtOrAbove = (priceTicks) => {
+      let low = 0;
+      let high = unusedOrders.length;
+      while (low < high) {
+        const middle = Math.floor((low + high) / 2);
+        if (unusedOrders[middle].priceTicks < priceTicks) {
+          low = middle + 1;
+        } else {
+          high = middle;
+        }
+      }
+      return low;
+    };
+    const coverageFrontier = new Set();
+    const addCoverageNeighbors = (anchorTicks) => {
+      let belowTicks = lastLanePriceAtOrBelow(anchorTicks);
+      if (belowTicks === anchorTicks) {
+        belowTicks -= laneModulus;
+      }
+      if (
+        belowTicks >= firstLanePriceTicks &&
+        belowTicks <= maximumPriceTicks &&
+        !occupiedPrices.has(belowTicks)
+      ) {
+        coverageFrontier.add(belowTicks);
+      }
+      let aboveTicks = firstLanePriceAtOrAbove(anchorTicks);
+      if (aboveTicks === anchorTicks) {
+        aboveTicks += laneModulus;
+      }
+      if (
+        aboveTicks >= firstLanePriceTicks &&
+        aboveTicks <= maximumPriceTicks &&
+        !occupiedPrices.has(aboveTicks)
+      ) {
+        coverageFrontier.add(aboveTicks);
+      }
+    };
+    for (const occupiedPriceTicks of occupiedPrices) {
+      addCoverageNeighbors(occupiedPriceTicks);
+    }
     while (
       occupiedPrices.size < targetLevels &&
       unusedOrders.length > 0
     ) {
-      const missingPrices = lawfulLanePrices.filter(
-        (priceTicks) => !occupiedPrices.has(priceTicks),
-      );
-      if (missingPrices.length === 0) break;
-      const distanceToCoverage = (priceTicks) => {
-        let minimumDistance = Number.MAX_SAFE_INTEGER;
-        for (const occupiedPriceTicks of occupiedPrices) {
-          minimumDistance = Math.min(
-            minimumDistance,
-            Math.abs(priceTicks - occupiedPriceTicks),
-          );
+      let selectedPriceTicks = null;
+      if (occupiedPrices.size === 0) {
+        selectedPriceTicks =
+          side === 'buy'
+            ? firstLanePriceTicks +
+              (lawfulLanePriceCount - 1) * laneModulus
+            : firstLanePriceTicks;
+      } else {
+        // Every frontier entry is inserted as the immediately adjacent lane
+        // of an occupied price and is deleted when selected.  Its minimum
+        // coverage distance is therefore always exactly one lane; the frozen
+        // tie-break is simply highest bid / lowest ask.
+        for (const priceTicks of coverageFrontier) {
+          if (
+            selectedPriceTicks === null ||
+            (
+              side === 'buy'
+                ? priceTicks > selectedPriceTicks
+                : priceTicks < selectedPriceTicks
+            )
+          ) {
+            selectedPriceTicks = priceTicks;
+          }
         }
-        return minimumDistance;
-      };
-      missingPrices.sort(
-        (left, right) =>
-          distanceToCoverage(left) - distanceToCoverage(right) ||
-          (side === 'buy' ? right - left : left - right),
+      }
+      if (selectedPriceTicks === null) break;
+      coverageFrontier.delete(selectedPriceTicks);
+      const firstAtOrAbove = firstUnusedAtOrAbove(
+        selectedPriceTicks,
       );
-      const priceTicks = missingPrices[0];
-      unusedOrders.sort(
-        (left, right) =>
-          Math.abs(left.priceTicks - priceTicks) -
-            Math.abs(right.priceTicks - priceTicks) ||
-          left.layerKey.localeCompare(right.layerKey),
+      const sourceIndexes = [];
+      if (firstAtOrAbove < unusedOrders.length) {
+        sourceIndexes.push(firstAtOrAbove);
+      }
+      if (firstAtOrAbove > 0) {
+        const belowPriceTicks =
+          unusedOrders[firstAtOrAbove - 1].priceTicks;
+        sourceIndexes.push(
+          firstUnusedAtOrAbove(belowPriceTicks),
+        );
+      }
+      let selectedSourceIndex = sourceIndexes[0] ?? -1;
+      let selectedSourceDistance = Number.MAX_SAFE_INTEGER;
+      for (const index of sourceIndexes) {
+        const candidate = unusedOrders[index];
+        const distance = Math.abs(
+          candidate.priceTicks - selectedPriceTicks,
+        );
+        const selectedSource =
+          selectedSourceIndex < 0
+            ? null
+            : unusedOrders[selectedSourceIndex];
+        if (
+          distance < selectedSourceDistance ||
+          (
+            distance === selectedSourceDistance &&
+            (
+              selectedSource === null ||
+              candidate.layerKey.localeCompare(
+                selectedSource.layerKey,
+              ) < 0
+            )
+          )
+        ) {
+          selectedSourceIndex = index;
+          selectedSourceDistance = distance;
+        }
+      }
+      const [source] = unusedOrders.splice(
+        selectedSourceIndex,
+        1,
       );
-      const source = unusedOrders.shift();
       const reallocated = {
         ...source,
-        priceTicks,
+        priceTicks: selectedPriceTicks,
         liquidityLayer: {
           ...source.liquidityLayer,
           lawfulCoverageRepair: 'lawful_lane_reallocation',
@@ -3492,7 +3869,8 @@ function reallocateMakerLawfulLaneCoverage({
         },
       };
       reallocatedByLayer.set(source.layerKey, reallocated);
-      occupiedPrices.add(priceTicks);
+      occupiedPrices.add(selectedPriceTicks);
+      addCoverageNeighbors(selectedPriceTicks);
     }
   };
   retainSide('buy');
@@ -4012,6 +4390,38 @@ function purposefulMakerCandidates(
   return candidates;
 }
 
+function purposefulMakerTieKey(candidateCount) {
+  const masks = Array.from(
+    { length: candidateCount },
+    (_unused, index) => {
+      const shift = BigInt(
+        (candidateCount - index - 1) * 2,
+      );
+      return [
+        0n,
+        1n << shift,
+        2n << shift,
+        3n << shift,
+      ];
+    },
+  );
+  return {
+    emptyEventKey: 0n,
+    eventKeyWithDigit(key, index, digit) {
+      return digit === 0
+        ? key
+        : key | masks[index][digit];
+    },
+    eventKeyEarlier(left, right) {
+      return (
+        right === null ||
+        right === undefined ||
+        left < right
+      );
+    },
+  };
+}
+
 export function stabilizePurposefulMakerOrders(
   currentOrders,
   desiredOrders,
@@ -4026,28 +4436,40 @@ export function stabilizePurposefulMakerOrders(
         );
 
   const selectedByLayer = new Map();
+  const candidatesBySide = {
+    buy: [],
+    sell: [],
+  };
+  for (const candidate of candidates) {
+    candidatesBySide[candidate.desired.side]?.push(candidate);
+  }
   for (const side of ['buy', 'sell']) {
-    const sideCandidates = candidates.filter(
-      (candidate) => candidate.desired.side === side,
-    );
+    const sideCandidates = candidatesBySide[side];
     if (sideCandidates.length === 0) continue;
-    const preferredOrders = sideCandidates.map(
-      (candidate) =>
-        candidate.retained ?? candidate.desired,
-    );
-    const preferredIsMonotonic = preferredOrders.every(
-      (order, index) =>
-        index === 0 ||
+    let preferredIsMonotonic = true;
+    let previousPreferred = null;
+    for (const candidate of sideCandidates) {
+      const preferred =
+        candidate.retained ?? candidate.desired;
+      if (
+        previousPreferred &&
         (
           side === 'buy'
-            ? preferredOrders[index - 1].priceTicks >
-              order.priceTicks
-            : preferredOrders[index - 1].priceTicks <
-              order.priceTicks
-        ),
-    );
+            ? previousPreferred.priceTicks <=
+              preferred.priceTicks
+            : previousPreferred.priceTicks >=
+              preferred.priceTicks
+        )
+      ) {
+        preferredIsMonotonic = false;
+        break;
+      }
+      previousPreferred = preferred;
+    }
     if (preferredIsMonotonic) {
-      for (const order of preferredOrders) {
+      for (const candidate of sideCandidates) {
+        const order =
+          candidate.retained ?? candidate.desired;
         selectedByLayer.set(order.layerKey, order);
       }
       continue;
@@ -4073,34 +4495,11 @@ export function stabilizePurposefulMakerOrders(
     const treeBest = Array(prices.length + 1).fill(null);
     const treeEarliest = Array(prices.length + 1).fill(null);
     const entriesByPrice = new Map();
-    const keyWordCount = Math.max(
-      1,
-      Math.ceil(sideCandidates.length / 16),
-    );
-    const emptyEventKey = Array(keyWordCount).fill(0);
-    const eventKeyWithDigit = (key, index, digit) => {
-      if (digit === 0) return key;
-      const next = key.slice();
-      const wordIndex = Math.floor(index / 16);
-      const shift = (15 - (index % 16)) * 2;
-      next[wordIndex] =
-        (
-          next[wordIndex] |
-          (digit << shift)
-        ) >>> 0;
-      return next;
-    };
-    const eventKeyEarlier = (left, right) => {
-      if (!right) return true;
-      for (let index = 0; index < left.length; index += 1) {
-        const leftWord = left[index] >>> 0;
-        const rightWord = right[index] >>> 0;
-        if (leftWord !== rightWord) {
-          return leftWord < rightWord;
-        }
-      }
-      return false;
-    };
+    const {
+      emptyEventKey,
+      eventKeyWithDigit,
+      eventKeyEarlier,
+    } = purposefulMakerTieKey(sideCandidates.length);
     const earlierSlot = (left, right) =>
       !right ||
       eventKeyEarlier(left.slotKey, right.slotKey);
@@ -4409,10 +4808,15 @@ export function coveragePurposefulMakerOrders(
           desiredOrders,
         );
   const selectedByLayer = new Map();
+  const candidatesBySide = {
+    buy: [],
+    sell: [],
+  };
+  for (const candidate of candidates) {
+    candidatesBySide[candidate.desired.side]?.push(candidate);
+  }
   for (const side of ['buy', 'sell']) {
-    const sideCandidates = candidates.filter(
-      (candidate) => candidate.desired.side === side,
-    );
+    const sideCandidates = candidatesBySide[side];
     const minimumLevels = clamp(
       minimumLevelsBySide[side] ?? 0,
       0,
@@ -4424,23 +4828,30 @@ export function coveragePurposefulMakerOrders(
     if (minimumLevels === 0 || sideCandidates.length === 0) {
       continue;
     }
-    const preferredOrders = sideCandidates.map(
-      (candidate) =>
-        candidate.retained ?? candidate.desired,
-    );
-    const preferredIsMonotonic = preferredOrders.every(
-      (order, index) =>
-        index === 0 ||
+    let preferredIsMonotonic = true;
+    let previousPreferred = null;
+    for (const candidate of sideCandidates) {
+      const preferred =
+        candidate.retained ?? candidate.desired;
+      if (
+        previousPreferred &&
         (
           side === 'buy'
-            ? preferredOrders[index - 1].priceTicks >
-              order.priceTicks
-            : preferredOrders[index - 1].priceTicks <
-              order.priceTicks
-        ),
-    );
+            ? previousPreferred.priceTicks <=
+              preferred.priceTicks
+            : previousPreferred.priceTicks >=
+              preferred.priceTicks
+        )
+      ) {
+        preferredIsMonotonic = false;
+        break;
+      }
+      previousPreferred = preferred;
+    }
     if (preferredIsMonotonic) {
-      for (const order of preferredOrders) {
+      for (const candidate of sideCandidates) {
+        const order =
+          candidate.retained ?? candidate.desired;
         selectedByLayer.set(order.layerKey, order);
       }
       continue;
@@ -4463,34 +4874,11 @@ export function coveragePurposefulMakerOrders(
         ? rank
         : prices.length - rank + 1;
     };
-    const keyWordCount = Math.max(
-      1,
-      Math.ceil(sideCandidates.length / 16),
-    );
-    const emptyEventKey = Array(keyWordCount).fill(0);
-    const eventKeyWithDigit = (key, index, digit) => {
-      if (digit === 0) return key;
-      const next = key.slice();
-      const wordIndex = Math.floor(index / 16);
-      const shift = (15 - (index % 16)) * 2;
-      next[wordIndex] =
-        (
-          next[wordIndex] |
-          (digit << shift)
-        ) >>> 0;
-      return next;
-    };
-    const eventKeyEarlier = (left, right) => {
-      if (!right) return true;
-      for (let index = 0; index < left.length; index += 1) {
-        const leftWord = left[index] >>> 0;
-        const rightWord = right[index] >>> 0;
-        if (leftWord !== rightWord) {
-          return leftWord < rightWord;
-        }
-      }
-      return false;
-    };
+    const {
+      emptyEventKey,
+      eventKeyWithDigit,
+      eventKeyEarlier,
+    } = purposefulMakerTieKey(sideCandidates.length);
     const betterPredecessor = (left, right) =>
       !right ||
       left.totalScore > right.totalScore ||
@@ -5424,6 +5812,9 @@ function makerCommands(
               Math.round(orderContext.depthBudgetUnits / 2),
               Math.max(
                 agent.maxLevels,
+                Math.ceil(
+                  NORMAL_STANDING_BOOK_CLIP_UNITS / 2,
+                ),
                 persistentBookBudgetUnits,
                 orderContext.arrivalBudgetUnits *
                   (
@@ -5500,6 +5891,19 @@ function makerCommands(
         Math.round(
           effectiveBaseOrderUnits *
             symbolLiquidityMultiplier,
+          ),
+      ),
+      // The complete persistent ladder carries a much larger finite risk
+      // budget than one executable queue should expose.  Keep the touch clip
+      // tied to this maker's native per-order scale; the quote policy
+      // redistributes any displaced units into deeper real prices without
+      // changing aggregate inventory or price-time matching.
+      maximumTouchUnits: Math.max(
+        1,
+        Math.round(
+          agent.baseOrderUnits *
+            symbolLiquidityMultiplier *
+            clamp(capacityMultiplier, 0.5, 1.25),
         ),
       ),
       maxLevels: agent.maxLevels,
@@ -6066,27 +6470,32 @@ function publishedMeanPrice(state, symbol) {
 }
 
 function eligibleBehaviorPublicTrades(state, agent) {
-  const byTradeId = new Map();
-  for (const record of state.agentEcology.publicFlow ?? []) {
-    const trade = resolveSettledPublicTradeChain(
-      state,
-      record.tradeId,
-    )?.trade;
-    if (trade) {
-      byTradeId.set(trade.id, trade);
+  const publicCursorCommitSeq =
+    agent.behaviorState?.memory?.publicCursorCommitSeq ?? 0;
+  const retainedTrades = publicRealtimeTape(state).observedTrades;
+  let low = 0;
+  let high = retainedTrades.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (
+      retainedTrades[middle].commitSeq <=
+      publicCursorCommitSeq
+    ) {
+      low = middle + 1;
     } else {
-      if (typeof record.factId === 'string') {
-        byTradeId.set(record.tradeId, {
-          id: record.tradeId,
-          factId: record.factId,
-          virtualMs: record.virtualMs,
-          symbol: record.symbol,
-          side: record.side,
-          priceTicks: record.priceTicks,
-          quantity: record.quantity,
-          commitSeq: record.commitSeq,
-        });
-      }
+      high = middle;
+    }
+  }
+  const eligible = [];
+  const observedTradeIds = new Set();
+  for (let index = low; index < retainedTrades.length; index += 1) {
+    const trade = retainedTrades[index];
+    observedTradeIds.add(trade.id);
+    if (
+      trade.virtualMs + agent.informationDelayMs <=
+      state.nowMs
+    ) {
+      eligible.push(trade);
     }
   }
   for (const trade of [
@@ -6094,28 +6503,21 @@ function eligibleBehaviorPublicTrades(state, agent) {
     ...(agent.publicFlowMemory?.observedTrades ?? []),
   ]) {
     if (
-      !byTradeId.has(trade.id) &&
+      trade.commitSeq > publicCursorCommitSeq &&
+      trade.virtualMs + agent.informationDelayMs <=
+        state.nowMs &&
+      !observedTradeIds.has(trade.id) &&
       observedTradeFactIsValid(state, trade)
     ) {
-      byTradeId.set(trade.id, trade);
+      observedTradeIds.add(trade.id);
+      eligible.push(trade);
     }
   }
-  return [...byTradeId.values()]
-    .filter(
-      (trade) =>
-        trade.virtualMs + agent.informationDelayMs <=
-          state.nowMs &&
-        trade.commitSeq >
-          (
-            agent.behaviorState?.memory
-              ?.publicCursorCommitSeq ?? 0
-          ),
-    )
-    .sort(
+  return eligible.sort(
       (left, right) =>
         left.commitSeq - right.commitSeq ||
         left.id.localeCompare(right.id),
-    );
+  );
 }
 
 function behaviorValueTicks(
@@ -6151,26 +6553,49 @@ function behaviorValueTicks(
   const previousCloseTicks =
     state.world.market.securities[symbol]
       ?.previousCloseTicks;
-  const peerValues = Object.values(
-    state.agentEcology.agents,
-  )
-    .filter((candidate) => candidate.kind === agent.kind)
-    .map(
-      (candidate) =>
+  const preparedPeerMeans =
+    openingPeerMeanDecisionCache.get(state);
+  const preparedPeerMean =
+    preparedPeerMeans?.agent === agent &&
+    preparedPeerMeans.commitSeq === state.commitSeq &&
+    preparedPeerMeans.nowMs === state.nowMs &&
+    preparedPeerMeans.decisionSequence ===
+      agent.decisionSequence
+      ? preparedPeerMeans.bySymbol[symbol]
+      : null;
+  let peerValueTotalTicks =
+    preparedPeerMean?.totalTicks ?? 0;
+  let peerValueCount = preparedPeerMean?.count ?? 0;
+  if (!preparedPeerMean) {
+    for (const candidateId in state.agentEcology.agents) {
+      if (
+        !Object.hasOwn(
+          state.agentEcology.agents,
+          candidateId,
+        )
+      ) {
+        continue;
+      }
+      const candidate =
+        state.agentEcology.agents[candidateId];
+      if (candidate.kind !== agent.kind) continue;
+      const peerValueTicks =
         candidate.valuationBands?.[symbol]
           ?.actionableValueTicks ??
-        candidate.delayedFundamentals?.[symbol],
-    )
-    .filter(isPositiveInteger);
+        candidate.delayedFundamentals?.[symbol];
+      if (!isPositiveInteger(peerValueTicks)) continue;
+      peerValueTotalTicks += peerValueTicks;
+      peerValueCount += 1;
+    }
+  }
   if (
     !isPositiveInteger(previousCloseTicks) ||
-    peerValues.length < 2
+    peerValueCount < 2
   ) {
     return Math.max(1, rawValueTicks + catalystTicks);
   }
   const peerMeanTicks =
-    peerValues.reduce((sum, value) => sum + value, 0) /
-    peerValues.length;
+    peerValueTotalTicks / peerValueCount;
   const relativeDisagreementTicks = Math.round(
     (rawValueTicks - peerMeanTicks) * 0.3,
   );
@@ -6189,6 +6614,54 @@ function behaviorValueTicks(
   );
 }
 
+function prepareOpeningPeerMeansForDecision(
+  state,
+  agent,
+) {
+  if (agent.lastFundamentalTick !== 0) {
+    openingPeerMeanDecisionCache.delete(state);
+    return;
+  }
+  const symbols = Object.keys(state.books);
+  const bySymbol = {};
+  for (const symbol of symbols) {
+    bySymbol[symbol] = {
+      totalTicks: 0,
+      count: 0,
+    };
+  }
+  const peerKind = agent.kind;
+  for (const candidateId in state.agentEcology.agents) {
+    if (
+      !Object.hasOwn(
+        state.agentEcology.agents,
+        candidateId,
+      )
+    ) {
+      continue;
+    }
+    const candidate =
+      state.agentEcology.agents[candidateId];
+    if (candidate.kind !== peerKind) continue;
+    for (const symbol of symbols) {
+      const peerValueTicks =
+        candidate.valuationBands?.[symbol]
+          ?.actionableValueTicks ??
+        candidate.delayedFundamentals?.[symbol];
+      if (!isPositiveInteger(peerValueTicks)) continue;
+      bySymbol[symbol].totalTicks += peerValueTicks;
+      bySymbol[symbol].count += 1;
+    }
+  }
+  openingPeerMeanDecisionCache.set(state, {
+    agent,
+    commitSeq: state.commitSeq,
+    nowMs: state.nowMs,
+    decisionSequence: agent.decisionSequence,
+    bySymbol,
+  });
+}
+
 function observeAgentBehavior(
   state,
   agent,
@@ -6205,103 +6678,99 @@ function observeAgentBehavior(
     state,
     agent,
   );
-  const symbols = Object.fromEntries(
-    selectedSymbols.map((symbol) => {
-      const orderContext = symbolOrderContextFor(
-        state,
-        agent,
-        symbol,
-      );
-      const symbolTrades = publicTrades.filter(
-        (trade) => trade.symbol === symbol,
-      );
-      const rawNetSignedQuantity = symbolTrades.reduce(
-        (sum, trade) =>
-          sum +
-          (
-            trade.side === 'buy'
-              ? trade.quantity
-              : -trade.quantity
-          ),
-        0,
-      );
-      const flowContext = recentPublicShock(
-        state,
-        agent,
-        symbol,
-      );
-      const flowEvidenceBps = clamp(
-        Math.round(
-          (flowContext.intensityBps - 1_200) *
-            10_000 /
-            3_800,
-        ),
-        1_000,
-        10_000,
-      );
-      const traits =
-        agent.behaviorState.persona.traits;
-      const flowInterpretationBps =
-        agent.kind === 'retail'
-          ? clamp(
-              (
-                traits.socialLearningBps -
-                traits.contrarianBps
-              ) * 2,
-              -10_000,
-              10_000,
-            )
-          : 10_000;
-      return [
-        symbol,
-        {
-          priceTicks: publicLastPriceTicks(state, symbol),
-          valueTicks: behaviorValueTicks(
-            state,
-            agent,
-            symbol,
-          ) +
+  const netSignedQuantityBySymbol = new Map();
+  for (const trade of publicTrades) {
+    netSignedQuantityBySymbol.set(
+      trade.symbol,
+      (netSignedQuantityBySymbol.get(trade.symbol) ?? 0) +
+        (trade.side === 'buy'
+          ? trade.quantity
+          : -trade.quantity),
+    );
+  }
+  const symbols = {};
+  for (const symbol of selectedSymbols) {
+    const orderContext = symbolOrderContextFor(
+      state,
+      agent,
+      symbol,
+    );
+    const rawNetSignedQuantity =
+      netSignedQuantityBySymbol.get(symbol) ?? 0;
+    const flowContext = recentPublicShock(
+      state,
+      agent,
+      symbol,
+    );
+    const flowEvidenceBps = clamp(
+      Math.round(
+        (flowContext.intensityBps - 1_200) *
+          10_000 /
+          3_800,
+      ),
+      1_000,
+      10_000,
+    );
+    const traits = agent.behaviorState.persona.traits;
+    const flowInterpretationBps =
+      agent.kind === 'retail'
+        ? clamp(
             (
-              orderContext.profileConfigured
-                ? Math.round(
-                    publicLastPriceTicks(state, symbol) *
-                      orderContext.privateInterpretationBps /
-                      10_000,
-                  )
-                : 0
-            ),
-          momentumTicks: publishedMomentum(state, symbol),
-          netSignedQuantity: Math.round(
-            rawNetSignedQuantity *
-              flowEvidenceBps /
-              10_000 *
-              flowInterpretationBps /
-              10_000,
-          ),
-        },
-      ];
-    }),
-  );
+              traits.socialLearningBps -
+              traits.contrarianBps
+            ) * 2,
+            -10_000,
+            10_000,
+          )
+        : 10_000;
+    const priceTicks = publicLastPriceTicks(
+      state,
+      symbol,
+    );
+    symbols[symbol] = {
+      priceTicks,
+      valueTicks:
+        behaviorValueTicks(state, agent, symbol) +
+        (orderContext.profileConfigured
+          ? Math.round(
+              priceTicks *
+                orderContext.privateInterpretationBps /
+                10_000,
+            )
+          : 0),
+      momentumTicks: publishedMomentum(state, symbol),
+      netSignedQuantity: Math.round(
+        rawNetSignedQuantity *
+          flowEvidenceBps /
+          10_000 *
+          flowInterpretationBps /
+          10_000,
+      ),
+    };
+  }
   const capacity = evaluateCapacity(
     state,
     agent.accountId,
     agent.id,
   );
+  let markPrices = symbols;
+  if (selectedSymbols !== allSymbols) {
+    markPrices = {};
+    for (const symbol of allSymbols) {
+      markPrices[symbol] = symbols[symbol] ?? {
+        priceTicks: publicLastPriceTicks(
+          state,
+          symbol,
+        ),
+      };
+    }
+  }
   observeBehaviorState(agent.behaviorState, {
     nowMs: state.nowMs,
     symbols,
-    markPrices: Object.fromEntries(
-      allSymbols.map((symbol) => [
-        symbol,
-        {
-          priceTicks: publicLastPriceTicks(
-            state,
-            symbol,
-          ),
-        },
-      ]),
-    ),
+    markPrices,
     publicTrades,
+    publicTradesAreEligibleSortedUnique: true,
     capacityPressureBps: Math.max(
       0,
       Math.round(
@@ -6449,13 +6918,19 @@ function recentPublicShock(state, agent, symbol) {
   let minimumPriceTicks = null;
   let maximumPriceTicks = null;
   let tradeCount = 0;
-  for (const trade of trades) {
-    if (
-      trade.virtualMs < cutoffMs ||
-      trade.virtualMs > visibleMs
-    ) {
-      continue;
+  let low = 0;
+  let high = trades.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (trades[middle].virtualMs < cutoffMs) {
+      low = middle + 1;
+    } else {
+      high = middle;
     }
+  }
+  for (let index = low; index < trades.length; index += 1) {
+    const trade = trades[index];
+    if (trade.virtualMs > visibleMs) break;
     if (trade.side === 'buy') {
       buyUnits += trade.quantity;
     } else {
@@ -6617,19 +7092,27 @@ function visibleCompanyFacts(
       ? agent.informationDelayMs
       : 0,
   );
-  return eligibleFundamentalFacts(state.world, symbol)
-    .filter((fact) => {
-      const publishedAtMs = Number.isSafeInteger(
-        fact.publishedAtMs,
-      )
-        ? fact.publishedAtMs
-        : fact.tick * 86_400_000;
-      return (
-        fact.tick > 0 &&
-        publishedAtMs + informationDelayMs <= observedMs
-      );
-    })
-    .slice(-4);
+  const visibleFacts = [];
+  for (const fact of eligibleFundamentalFacts(
+    state.world,
+    symbol,
+  )) {
+    const publishedAtMs = Number.isSafeInteger(
+      fact.publishedAtMs,
+    )
+      ? fact.publishedAtMs
+      : fact.tick * 86_400_000;
+    if (
+      fact.tick > 0 &&
+      publishedAtMs + informationDelayMs <= observedMs
+    ) {
+      visibleFacts.push(fact);
+    }
+  }
+  if (visibleFacts.length > 4) {
+    visibleFacts.splice(0, visibleFacts.length - 4);
+  }
+  return visibleFacts;
 }
 
 function visibleCompanyFactIds(state, agent, symbol) {
@@ -6694,10 +7177,11 @@ export function deriveSymbolOrderContext(
           state.nowMs -
             latestVisibleFactPublishedAtMs,
         );
-  const rawCatalystTicks = publicCatalystSignalTicks(
+  const rawCatalystTicks = catalystSignalFromVisibleFacts(
     state,
     agent,
     symbol,
+    visibleFacts,
   );
   const catalystSensitivityBps = boundedProfileInteger(
     catalystProfile,
@@ -7331,6 +7815,16 @@ export function selectOrdinaryParticipationSymbol(
   const behavior = agent.behaviorState;
   const attention = behavior.cognition.attentionSymbols;
   const attentionSlots = Math.max(1, attention.length);
+  const coverageSymbol = symbols.length > 0
+    ? symbols[
+        (
+          Math.floor(state.nowMs / 9_000) +
+          hash32(
+            `${state.world.world.seed}:${agent.id}:ordinary-coverage-phase`,
+          )
+        ) % symbols.length
+      ]
+    : null;
   const recentActions = behavior.actionTrace.slice(-6);
   const recentFills = behavior.memory.episodes
     .filter(
@@ -7389,13 +7883,20 @@ export function selectOrdinaryParticipationSymbol(
         isNonNegativeInteger(lastPricePoint.virtualMs)
           ? lastPricePoint.virtualMs
           : 0;
+      // A quiet-symbol exploration bonus prevents permanent neglect, but it
+      // must not outweigh the actor's actual attention and public-flow
+      // evidence.  The previous 18k ceiling made every passive participant
+      // quote the stalest stock while all informed/aggressive flow traded
+      // elsewhere, mechanically reserving the maker as the only possible
+      // counterparty.  Two bounded working intents already preserve a
+      // separate exploration lane without that market-wide decoupling.
       const tapeStalenessScore = Math.min(
-        18_000,
+        4_200,
         Math.floor(
           Math.max(
             0,
             state.nowMs - lastPublicTradeMs - 12_000,
-          ) / 2,
+          ) / 6,
         ),
       );
       const actionFatigue = recentActions
@@ -7440,7 +7941,11 @@ export function selectOrdinaryParticipationSymbol(
             behavior.memory.revision,
             behavior.memory.publicCursorCommitSeq,
           ].join(':'),
-        ) % 1_000;
+        ) % 4_200;
+      const coverageOpportunityScore =
+        symbol === coverageSymbol
+          ? tapeStalenessScore
+          : 0;
       return {
         symbol,
         score:
@@ -7448,6 +7953,7 @@ export function selectOrdinaryParticipationSymbol(
           beliefScore +
           publicScore +
           tapeStalenessScore +
+          coverageOpportunityScore +
           privateExploration -
           actionFatigue -
           fillFatigue,
@@ -7472,6 +7978,7 @@ function profitCertificateForOrder(
     quantity,
     tif,
     strategicBenefitCents = 0,
+    executionProbabilityBps = 10_000,
   },
 ) {
   const depth = aggregateBookMetrics(
@@ -7482,8 +7989,12 @@ function profitCertificateForOrder(
   const availableAtBestUnits =
     tif === 'GTC'
       ? side === 'buy'
-        ? depth.bids.bestQuantity
-        : depth.asks.bestQuantity
+        ? priceTicks > depth.bids.bestPriceTicks
+          ? 0
+          : depth.bids.bestQuantity
+        : priceTicks < depth.asks.bestPriceTicks
+          ? 0
+          : depth.asks.bestQuantity
       : side === 'buy'
         ? depth.asks.bestQuantity
         : depth.bids.bestQuantity;
@@ -7552,6 +8063,11 @@ function profitCertificateForOrder(
       0,
       10_000,
     ),
+    patienceBps: clamp(
+      Math.round(traits.patienceBps ?? 0),
+      0,
+      10_000,
+    ),
     drawdownBps:
       behavior.performance.drawdownBps,
     tif,
@@ -7561,6 +8077,7 @@ function profitCertificateForOrder(
         0,
         Math.round(strategicBenefitCents),
       ),
+    executionProbabilityBps,
   });
   return {
     expectedUtility,
@@ -8556,6 +9073,10 @@ function ordinaryParticipantCommands(
   symbols,
   mandate,
   observedCapacity = null,
+  {
+    maximumWorkingIntents = 1,
+    passiveOnly = false,
+  } = {},
 ) {
   // A live book cannot consist only of infrequent high-conviction alpha
   // decisions. Ordinary participants quote finite passive interest when their
@@ -8586,6 +9107,13 @@ function ordinaryParticipantCommands(
       order.ecologyIntentKind ===
         'ordinary_participation',
   );
+  const activeOrdinaryGroups = new Map();
+  for (const order of activeOrdinaryOrders) {
+    const key = order.parentOrderId ?? order.id;
+    const group = activeOrdinaryGroups.get(key) ?? [];
+    group.push(order);
+    activeOrdinaryGroups.set(key, group);
+  }
   if (
     activeOrdinaryOrders.length === 0 &&
     !contextArrivalAllowed(
@@ -8747,7 +9275,31 @@ function ordinaryParticipantCommands(
       dailyBand.limitDownTicks,
       dailyBand.limitUpTicks,
     );
-  const passivePrice = withinDailyBand(rawPassivePrice);
+  // Ordinary participation compares a patient queue with an immediately
+  // executable finite order.  Neither route is privileged: the actor's same
+  // expected-utility certificate prices fees, spread, impact, waiting and
+  // inventory risk, and only the better positive route may leave the actor.
+  // This gives a quiet but genuinely profitable market a lawful crossing
+  // path without imposing a fill cadence or manufacturing a counterparty.
+  const reservationPassivePrice =
+    side === 'buy'
+      ? Math.min(
+          rawAggressivePrice - 1,
+          Math.max(
+            rawPassivePrice,
+            referenceTicks - noTradeThresholdTicks,
+          ),
+        )
+      : Math.max(
+          rawAggressivePrice + 1,
+          Math.min(
+            rawPassivePrice,
+            referenceTicks + noTradeThresholdTicks,
+          ),
+        );
+  const passivePrice = withinDailyBand(
+    reservationPassivePrice,
+  );
   const aggressivePrice = withinDailyBand(rawAggressivePrice);
   const unit = deterministicUnit(
     state,
@@ -8781,14 +9333,131 @@ function ordinaryParticipantCommands(
       referenceTicks + adaptiveSignal,
     ),
   );
+  // A resting order's quoted edge is conditional on actually reaching the
+  // front of the queue before this actor's private execution horizon.  Use a
+  // bounded public hazard estimate rather than comparing that conditional
+  // payoff with an immediately executable IOC as if both were certain.  The
+  // prior comes from the issuer's declared arrival budget, recent opposing
+  // settled flow updates it, queue-ahead consumes it, and stale tape lowers
+  // confidence.  This can make an impatient actor pay the spread when doing
+  // so remains profitable; it never creates a trade or grants price-writing
+  // authority.
+  const traits = agent.behaviorState.persona.traits;
+  const patienceBps = clamp(
+    Math.round(traits.patienceBps ?? 0),
+    0,
+    10_000,
+  );
+  const minimumExecutionHorizonMs =
+    agent.kind === 'retail'
+      ? MIN_RETAIL_RESTING_LIFETIME_MS
+      : MIN_INSTITUTION_RESTING_LIFETIME_MS;
+  const maximumExecutionHorizonMs =
+    agent.kind === 'retail'
+      ? MAX_RETAIL_RESTING_LIFETIME_MS
+      : MAX_INSTITUTION_RESTING_LIFETIME_MS;
+  const privateExecutionHorizonMs = Math.round(
+    minimumExecutionHorizonMs +
+      (
+        maximumExecutionHorizonMs -
+        minimumExecutionHorizonMs
+      ) *
+        patienceBps /
+        10_000,
+  );
+  const recentFlow = recentPublicShock(
+    state,
+    agent,
+    symbol,
+  );
+  const observedOpposingUnits =
+    side === 'buy'
+      ? recentFlow.sellUnits
+      : recentFlow.buyUnits;
+  const priorOpposingUnitsPerWindow = Math.max(
+    1,
+    Math.round(
+      Math.sqrt(
+        Math.max(1, orderContext.arrivalBudgetUnits),
+      ),
+    ),
+  );
+  const expectedOpposingUnits = Math.max(
+    1,
+    Math.round(
+      (
+        priorOpposingUnitsPerWindow +
+        observedOpposingUnits
+      ) *
+        privateExecutionHorizonMs /
+        3_000,
+    ),
+  );
+  const queueAheadUnits =
+    side === 'buy'
+      ? passivePrice === depth.bids.bestPriceTicks
+        ? depth.bids.bestQuantity
+        : 0
+      : passivePrice === depth.asks.bestPriceTicks
+        ? depth.asks.bestQuantity
+        : 0;
+  const queueReachBps = clamp(
+    Math.round(
+      expectedOpposingUnits * 10_000 /
+        Math.max(
+          1,
+          queueAheadUnits + quantity +
+            expectedOpposingUnits,
+        ),
+    ),
+    0,
+    10_000,
+  );
+  const lastVisibleTradeAgeMs = lastVisiblePublicTrade
+    ? Math.max(
+        0,
+        visibleFlowMs - lastVisiblePublicTrade.virtualMs,
+      )
+    : Math.max(0, visibleFlowMs);
+  const freshnessGraceMs = Math.max(
+    3_000,
+    Math.round(privateExecutionHorizonMs / 3),
+  );
+  const publicFlowFreshnessBps = clamp(
+    Math.round(
+      10_000 -
+        Math.max(
+          0,
+          lastVisibleTradeAgeMs - freshnessGraceMs,
+        ) *
+          9_000 /
+          Math.max(
+            1,
+            privateExecutionHorizonMs - freshnessGraceMs,
+          ),
+    ),
+    1_000,
+    10_000,
+  );
+  const passiveExecutionProbabilityBps = clamp(
+    Math.round(
+      queueReachBps * publicFlowFreshnessBps /
+        10_000,
+    ),
+    500,
+    9_500,
+  );
   const candidates = [
-    {
-      priceTicks: aggressivePrice,
-      tif: 'IOC',
-    },
     {
       priceTicks: passivePrice,
       tif: 'GTC',
+      executionProbabilityBps:
+        passiveExecutionProbabilityBps,
+    },
+    {
+      priceTicks: aggressivePrice,
+      tif: 'IOC',
+      executionProbabilityBps: 10_000,
     },
   ].map((candidate) => ({
     ...candidate,
@@ -8803,21 +9472,22 @@ function ordinaryParticipantCommands(
         expectedExitTicks,
         quantity,
         tif: candidate.tif,
+        executionProbabilityBps:
+          candidate.executionProbabilityBps,
       },
     ),
   }));
   const selected = candidates
     .filter(
       (candidate) =>
-        candidate.expectedUtility.shouldTrade,
+        candidate.expectedUtility.shouldTrade &&
+        (!passiveOnly || candidate.tif === 'GTC'),
     )
     .sort(
       (left, right) =>
         right.expectedUtility.expectedNetPnlCents -
           left.expectedUtility.expectedNetPnlCents ||
-        (
-          left.tif === 'IOC' ? -1 : 1
-        ),
+        left.priceTicks - right.priceTicks,
     )[0];
   if (!selected) {
     return activeOrdinaryOrders.map((order) => ({
@@ -8834,21 +9504,14 @@ function ordinaryParticipantCommands(
       selected.tif === 'GTC' &&
       order.priceTicks === selected.priceTicks,
   );
-  if (
-    matchingOrder &&
-    activeOrdinaryOrders.length === 1
-  ) {
+  if (matchingOrder) {
     return [];
   }
-  if (activeOrdinaryOrders.length > 0) {
-    return activeOrdinaryOrders
-      .filter((order) => order.id !== matchingOrder?.id)
-      .map((order) => ({
-        type: 'cancel_order',
-        actorId: agent.accountId,
-        brokerId: agent.brokerId,
-        orderId: order.id,
-      }));
+  if (
+    activeOrdinaryGroups.size >=
+    Math.max(1, maximumWorkingIntents)
+  ) {
+    return [];
   }
   return [
     tagCommandOrderContext({
@@ -8999,10 +9662,20 @@ function expandRetailClusterCommands(
       Math.round(socialBelongingBps / 10) +
       Math.round(confidenceBps / 20) -
       Math.round(stressBps / 25);
+    // A retail actor represents a finite heterogeneous cluster, not one
+    // individual ticket.  Patient GTC interest therefore carries more of the
+    // cluster's bounded envelope than an urgent IOC child; otherwise one
+    // modest institutional clip erases every non-maker queue before the next
+    // actor cadence and the maker becomes the permanent sole counterparty.
+    const passiveCluster = command.tif === 'GTC';
     const quantityMultiplier = clamp(
-      1 + Math.floor(Math.max(0, participationScore) / 360),
+      1 +
+        Math.floor(
+          Math.max(0, participationScore) /
+            (passiveCluster ? 180 : 360),
+        ),
       1,
-      4,
+      passiveCluster ? 10 : 4,
     );
     const maximumResourceUnits =
       command.side === 'buy'
@@ -9017,7 +9690,8 @@ function expandRetailClusterCommands(
     const totalQuantity = Math.min(
       maximumResourceUnits,
       command.quantity * quantityMultiplier,
-      traits.baseOrderUnits * 4,
+      traits.baseOrderUnits *
+        (passiveCluster ? 10 : 4),
     );
     if (totalQuantity === command.quantity) {
       expanded.push(command);
@@ -9134,7 +9808,12 @@ function retailWorkingOrderLifecycle(
       order.ecologyIntentKind !== 'limit_follower',
   );
   if (workingOrders.length === 0) {
-    return { blocked: false, commands: [] };
+    return {
+      blocked: false,
+      commands: [],
+      occupiedSymbols: new Set(),
+      workingIntentCount: 0,
+    };
   }
   const patienceBps = clamp(
     Number(
@@ -9153,23 +9832,57 @@ function retailWorkingOrderLifecycle(
         patienceBps /
         10_000,
   );
-  const oldestSubmittedMs = Math.min(
-    ...workingOrders.map((order) => order.submittedMs),
-  );
-  const mustCancel =
-    workingOrders.length > MAX_RETAIL_WORKING_ORDERS ||
-    state.nowMs - oldestSubmittedMs >= restingLifetimeMs;
-  if (!mustCancel) {
-    return { blocked: true, commands: [] };
+  const orderGroups = new Map();
+  for (const order of workingOrders) {
+    const key = order.parentOrderId ?? order.id;
+    const group = orderGroups.get(key) ?? [];
+    group.push(order);
+    orderGroups.set(key, group);
   }
+  const expiredOrders = [...orderGroups.values()]
+    .filter((orders) =>
+      orders.some(
+        (order) =>
+          state.nowMs - order.submittedMs >=
+          restingLifetimeMs,
+      ),
+    )
+    .flat();
+  if (expiredOrders.length > 0) {
+    return {
+      blocked: true,
+      occupiedSymbols: new Set(
+        workingOrders.map((order) => order.symbol),
+      ),
+      workingIntentCount: orderGroups.size,
+      commands: expiredOrders.map((order) => ({
+        type: 'cancel_order',
+        actorId: agent.accountId,
+        brokerId: order.brokerId,
+        orderId: order.id,
+      })),
+    };
+  }
+  const overOrderBound =
+    workingOrders.length >
+    MAX_RETAIL_WORKING_ORDERS *
+      MAX_RETAIL_WORKING_INTENTS;
+  const atIntentBound =
+    orderGroups.size >= MAX_RETAIL_WORKING_INTENTS;
   return {
-    blocked: true,
-    commands: workingOrders.map((order) => ({
-      type: 'cancel_order',
-      actorId: agent.accountId,
-      brokerId: order.brokerId,
-      orderId: order.id,
-    })),
+    blocked: overOrderBound || atIntentBound,
+    commands: overOrderBound
+      ? workingOrders.map((order) => ({
+          type: 'cancel_order',
+          actorId: agent.accountId,
+          brokerId: order.brokerId,
+          orderId: order.id,
+        }))
+      : [],
+    occupiedSymbols: new Set(
+      workingOrders.map((order) => order.symbol),
+    ),
+    workingIntentCount: orderGroups.size,
   };
 }
 
@@ -9230,6 +9943,8 @@ function retailCommands(
 ) {
   const account = state.accounts[agent.accountId];
   if (!account) return [];
+  const passiveOrdinaryRetail =
+    agent.behaviorState.persona.traits.patienceBps >= 6_000;
   const allSymbols = Object.keys(state.books);
   const market = Object.fromEntries(
     allSymbols.map((symbol) => {
@@ -9306,9 +10021,6 @@ function retailCommands(
     state,
     agent.accountId,
   );
-  const participationSymbols = allSymbols.filter(
-    (symbol) => !blockedSymbols.has(symbol),
-  );
   const workingLifecycle = retailWorkingOrderLifecycle(
     state,
     agent,
@@ -9321,6 +10033,11 @@ function retailCommands(
     });
     return workingLifecycle.commands;
   }
+  const participationSymbols = allSymbols.filter(
+    (symbol) =>
+      !blockedSymbols.has(symbol) &&
+      !workingLifecycle.occupiedSymbols.has(symbol),
+  );
   if (participationSymbols.length === 0) return [];
   if (
     agent.lastOrderMs !== null &&
@@ -9368,6 +10085,11 @@ function retailCommands(
         participationSymbols,
         mandate,
         observedCapacity,
+        {
+          maximumWorkingIntents:
+            MAX_RETAIL_WORKING_INTENTS,
+          passiveOnly: passiveOrdinaryRetail,
+        },
       ),
     );
     const behaviorIntent = retailClusterBehaviorIntent(
@@ -9444,6 +10166,96 @@ function retailCommands(
       },
     ],
   );
+  const primaryWorkingIntentCount =
+    intentCommands.some(
+      (command) =>
+        command.type === 'submit_order' &&
+        command.tif === 'GTC',
+    )
+      ? 1
+      : 0;
+  const reservedByPrimaryCents = intentCommands.reduce(
+    (sum, command) =>
+      command.type === 'submit_order' &&
+      command.side === 'buy'
+        ? sum +
+          command.priceTicks * command.quantity +
+          Math.max(
+            5,
+            Math.ceil(
+              command.priceTicks *
+                command.quantity *
+                5 /
+                10_000,
+            ),
+          )
+        : sum,
+    0,
+  );
+  const reservedByPrimaryUnits = Object.fromEntries(
+    participationSymbols.map((symbol) => [
+      symbol,
+      intentCommands.reduce(
+        (sum, command) =>
+          command.type === 'submit_order' &&
+          command.side === 'sell' &&
+          command.symbol === symbol
+            ? sum + command.quantity
+            : sum,
+        0,
+      ),
+    ]),
+  );
+  const passiveMandate = {
+    ...mandate,
+    freeCashCents: Math.max(
+      0,
+      mandate.freeCashCents - reservedByPrimaryCents,
+    ),
+    freeUnitsBySymbol: Object.fromEntries(
+      Object.entries(mandate.freeUnitsBySymbol).map(
+        ([symbol, units]) => [
+          symbol,
+          Math.max(
+            0,
+            units -
+              (reservedByPrimaryUnits[symbol] ?? 0),
+          ),
+        ],
+      ),
+    ),
+  };
+  const passiveSymbols = participationSymbols.filter(
+    (symbol) => symbol !== intent.command.symbol,
+  );
+  const passiveCommands =
+    passiveSymbols.length > 0 &&
+    workingLifecycle.workingIntentCount +
+      primaryWorkingIntentCount <
+      MAX_RETAIL_WORKING_INTENTS
+      ? expandRetailClusterCommands(
+          state,
+          agent,
+          passiveMandate,
+          ordinaryParticipantCommands(
+            state,
+            agent,
+            account,
+            passiveSymbols,
+            passiveMandate,
+            observedCapacity,
+            {
+              maximumWorkingIntents:
+                MAX_RETAIL_WORKING_INTENTS,
+              passiveOnly: passiveOrdinaryRetail,
+            },
+          ),
+        )
+      : [];
+  const combinedCommands = [
+    ...intentCommands,
+    ...passiveCommands,
+  ];
   const behaviorIntent = retailClusterBehaviorIntent(
     intent,
     intentCommands,
@@ -9451,11 +10263,11 @@ function retailCommands(
   recordBehaviorAction(agent.behaviorState, {
     nowMs: state.nowMs,
     intent: behaviorIntent,
-    productionOrderCount: intentCommands.filter(
+    productionOrderCount: combinedCommands.filter(
       (command) => command.type === 'submit_order',
     ).length,
   });
-  return intentCommands;
+  return combinedCommands;
 }
 
 /**
@@ -9846,6 +10658,57 @@ function systemicStabilizationCommands(
   ];
 }
 
+function institutionPassiveOrderLifecycle(
+  state,
+  agent,
+) {
+  const activeOrders = activeOrdersOwnedBy(
+    state,
+    agent.accountId,
+  ).filter(
+    (order) =>
+      activeOrder(order) &&
+      order.ownerId === agent.accountId &&
+      order.ecologyAgentId === agent.id &&
+      order.tif === 'GTC' &&
+      order.ecologyIntentKind !== 'limit_follower',
+  );
+  const patienceBps = clamp(
+    Number(
+      agent.behaviorState?.persona?.traits
+        ?.patienceBps,
+    ) || 0,
+    0,
+    10_000,
+  );
+  const restingLifetimeMs = Math.round(
+    MIN_INSTITUTION_RESTING_LIFETIME_MS +
+      (
+        MAX_INSTITUTION_RESTING_LIFETIME_MS -
+        MIN_INSTITUTION_RESTING_LIFETIME_MS
+      ) *
+        patienceBps /
+        10_000,
+  );
+  const expiredOrders = activeOrders.filter(
+    (order) =>
+      state.nowMs - order.submittedMs >=
+      restingLifetimeMs,
+  );
+  return {
+    activeOrders,
+    expiredCommands: expiredOrders.map((order) => ({
+      type: 'cancel_order',
+      actorId: agent.accountId,
+      brokerId: order.brokerId,
+      orderId: order.id,
+    })),
+    coveredSymbols: new Set(
+      activeOrders.map((order) => order.symbol),
+    ),
+  };
+}
+
 function institutionCommands(
   state,
   agent,
@@ -9918,6 +10781,11 @@ function institutionCommands(
   );
   if (limitCommands.length > 0) {
     return limitCommands;
+  }
+  const passiveLifecycle =
+    institutionPassiveOrderLifecycle(state, agent);
+  if (passiveLifecycle.expiredCommands.length > 0) {
+    return passiveLifecycle.expiredCommands;
   }
   const blockedSymbols = stableLimitFollowerSymbols(
     state,
@@ -10001,17 +10869,86 @@ function institutionCommands(
         Math.abs(right.signal) - Math.abs(left.signal) ||
         left.symbol.localeCompare(right.symbol),
     );
-  const selected = ranked[0];
+  let selected = ranked[0];
   if (!selected) return [];
   if (Math.abs(selected.signal) < 1.1) {
+    if (
+      passiveLifecycle.activeOrders.length >=
+      MAX_INSTITUTION_PASSIVE_ORDERS
+    ) {
+      return [];
+    }
+    const uncoveredSymbols = symbols.filter(
+      (symbol) =>
+        !passiveLifecycle.coveredSymbols.has(symbol),
+    );
+    if (uncoveredSymbols.length === 0) return [];
     return ordinaryParticipantCommands(
       state,
       agent,
       account,
-      symbols,
+      uncoveredSymbols,
       mandate,
       observedCapacity,
+      {
+        maximumWorkingIntents:
+          MAX_INSTITUTION_PASSIVE_ORDERS,
+      },
     );
+  }
+
+  const crossingThreshold =
+    agent.strategy ===
+    'cross_sectional_microstructure_ensemble'
+      ? 3
+      : agent.strategy === 'published_frame_trend'
+        ? 3.5
+        : agent.strategy === 'industry_mean_reversion'
+          ? 4
+          : 5;
+  const shouldCross = (candidate) => {
+    const catalystThreshold = Math.max(
+      1,
+      Number(
+        candidate.orderContext.eventThresholdBps ??
+          candidate.orderContext.stressThresholdBps,
+      ) || 1,
+    );
+    const eventUrgency =
+      (
+        candidate.orderContext.regime === 'event' ||
+        candidate.orderContext.regime === 'stress'
+      ) &&
+      Math.abs(
+        candidate.orderContext.catalystSignalBps ?? 0,
+      ) >= catalystThreshold;
+    return (
+      candidate.riskReductionPriority > 0 ||
+      eventUrgency ||
+      Math.abs(candidate.signal) >= crossingThreshold
+    );
+  };
+  let marketable = shouldCross(selected);
+  if (
+    !marketable &&
+    (
+      passiveLifecycle.coveredSymbols.has(
+        selected.symbol,
+      ) ||
+      passiveLifecycle.activeOrders.length >=
+        MAX_INSTITUTION_PASSIVE_ORDERS
+    )
+  ) {
+    const uncovered = ranked.find(
+      (candidate) =>
+        Math.abs(candidate.signal) >= 1.1 &&
+        !passiveLifecycle.coveredSymbols.has(
+          candidate.symbol,
+        ),
+    );
+    if (!uncovered) return [];
+    selected = uncovered;
+    marketable = shouldCross(selected);
   }
 
   const depth = aggregateBookMetrics(
@@ -10051,6 +10988,25 @@ function institutionCommands(
   if (!isPositiveInteger(executablePrice)) {
     return [];
   }
+  const passivePrice =
+    side === 'buy'
+      ? Math.min(
+          executablePrice - 1,
+          Math.max(
+            depth.bids.bestPriceTicks,
+            publicLastPriceTicks(state, selected.symbol),
+          ),
+        )
+      : Math.max(
+          executablePrice + 1,
+          Math.min(
+            depth.asks.bestPriceTicks,
+            publicLastPriceTicks(state, selected.symbol),
+          ),
+        );
+  const orderPriceTicks = marketable
+    ? executablePrice
+    : passivePrice;
   const intensity = clamp(Math.abs(selected.signal) / 10, 0.35, 2.4);
   const selectedShock = recentPublicShock(
     state,
@@ -10066,7 +11022,7 @@ function institutionCommands(
           ? mandate.freeCashCents
           : agent.riskBudgetCents,
       ) /
-        executablePrice,
+        orderPriceTicks,
     ),
   );
   const shockParticipationScale =
@@ -10173,7 +11129,7 @@ function institutionCommands(
           Math.max(
             0,
             Math.floor(
-              (mandate.freeCashCents - 5) / executablePrice,
+              (mandate.freeCashCents - 5) / orderPriceTicks,
             ),
           ),
           riskQuantity,
@@ -10191,6 +11147,10 @@ function institutionCommands(
       symbols,
       mandate,
       observedCapacity,
+      {
+        maximumWorkingIntents:
+          MAX_INSTITUTION_PASSIVE_ORDERS,
+      },
     );
   }
   const currentPriceTicks = publicLastPriceTicks(
@@ -10215,10 +11175,10 @@ function institutionCommands(
     {
       symbol: selected.symbol,
       side,
-      priceTicks: executablePrice,
+      priceTicks: orderPriceTicks,
       expectedExitTicks,
       quantity,
-      tif: 'IOC',
+      tif: marketable ? 'IOC' : 'GTC',
     },
   );
   if (!certificate.expectedUtility.shouldTrade) {
@@ -10229,21 +11189,22 @@ function institutionCommands(
       symbols,
       mandate,
       observedCapacity,
+      {
+        maximumWorkingIntents:
+          MAX_INSTITUTION_PASSIVE_ORDERS,
+      },
     );
   }
-  const lowConvictionFlow =
-    selected.openingPriority === 1 ||
-    Math.abs(selected.signal) < 4;
-  return [
-    tagCommandOrderContext({
+  const lowConvictionFlow = !marketable;
+  const primaryCommand = tagCommandOrderContext({
       type: 'submit_order',
       actorId: agent.accountId,
       brokerId: agent.brokerId,
       symbol: selected.symbol,
       side,
-      priceTicks: executablePrice,
+      priceTicks: orderPriceTicks,
       quantity,
-      tif: 'IOC',
+      tif: marketable ? 'IOC' : 'GTC',
       parentOrderId: lowConvictionFlow
         ? `low_conviction_flow:${agent.id}:${selected.symbol}:${state.nowMs}`
         : `${agent.strategy}:${agent.id}:${state.nowMs}`,
@@ -10257,7 +11218,72 @@ function institutionCommands(
         certificate.expectedUtility,
       profitObjective:
         certificate.profitObjective,
-    }, selected.orderContext),
+    }, selected.orderContext);
+  if (!marketable) return [primaryCommand];
+
+  // An urgent alpha/risk order and the institution's standing liquidity
+  // sleeve have separate bounded mandates.  A shock in one stock may consume
+  // the first desk's attention, but must not silently cancel every unrelated
+  // passive mandate run by the same finite institution.  Reserve the primary
+  // IOC's worst-case cash or inventory before asking the ordinary sleeve for
+  // at most one independently profitable order.
+  const secondarySymbols = symbols.filter(
+    (symbol) =>
+      symbol !== selected.symbol &&
+      !passiveLifecycle.coveredSymbols.has(symbol),
+  );
+  if (
+    secondarySymbols.length === 0 ||
+    passiveLifecycle.activeOrders.length >=
+      MAX_INSTITUTION_PASSIVE_ORDERS
+  ) {
+    return [primaryCommand];
+  }
+  const primaryGrossCents =
+    primaryCommand.priceTicks * primaryCommand.quantity;
+  const primaryFeeCents = Math.max(
+    5,
+    Math.ceil(primaryGrossCents * 5 / 10_000),
+  );
+  const secondaryMandate = {
+    ...mandate,
+    freeCashCents:
+      primaryCommand.side === 'buy'
+        ? Math.max(
+            0,
+            mandate.freeCashCents -
+              primaryGrossCents -
+              primaryFeeCents,
+          )
+        : mandate.freeCashCents,
+    freeUnitsBySymbol: {
+      ...mandate.freeUnitsBySymbol,
+      ...(primaryCommand.side === 'sell'
+        ? {
+            [primaryCommand.symbol]: Math.max(
+              0,
+              mandate.freeUnitsBySymbol[
+                primaryCommand.symbol
+              ] - primaryCommand.quantity,
+            ),
+          }
+        : {}),
+    },
+  };
+  return [
+    primaryCommand,
+    ...ordinaryParticipantCommands(
+      state,
+      agent,
+      account,
+      secondarySymbols,
+      secondaryMandate,
+      observedCapacity,
+      {
+        maximumWorkingIntents:
+          MAX_INSTITUTION_PASSIVE_ORDERS,
+      },
+    ),
   ];
 }
 
@@ -10295,6 +11321,7 @@ export function decideAgentOrders(
   ) {
     agent.publicFlowMemory = null;
   }
+  prepareOpeningPeerMeansForDecision(state, agent);
   const observedCapacity = observeAgentBehavior(
     state,
     agent,
@@ -10373,6 +11400,7 @@ export function decideAgentOrders(
   }
   agent.decisionSequence += 1;
   agent.lastDecisionMs = state.nowMs;
+  openingPeerMeanDecisionCache.delete(state);
   return commands;
 }
 
@@ -11164,6 +12192,28 @@ export function schedulePublicFlowResponses(
   }
   recordCapacityTrade(state, trade);
   recordSettledBehaviorTrade(state, trade);
+  const incomingSequence = realtimeTradeSequence(trade.id);
+  const retainedSequence = realtimeTradeSequence(
+    state.agentEcology.publicFlow.at(-1)?.tradeId,
+  );
+  const isMonotonicAppend =
+    incomingSequence !== null &&
+    (
+      retainedSequence === null ||
+      incomingSequence > retainedSequence
+    );
+  const existingPublicRecord =
+    isMonotonicAppend
+      ? null
+      : state.agentEcology.publicFlow.find(
+          (record) => record.tradeId === trade.id,
+        );
+  if (!existingPublicRecord) {
+    retainPublicFlowRecord(
+      state.agentEcology,
+      compactPublicFlowRecord(trade),
+    );
+  }
   if (!state.agentEcology?.enabled) return [];
   prioritizeMakerSymbolAtNextCadence(
     state,
@@ -11171,29 +12221,8 @@ export function schedulePublicFlowResponses(
   );
   const makerLimitResponses =
     scheduleMakerLimitStateResponses(state, trade);
-  if (
-    state.agentEcology.publicFlow.some(
-      (record) => record.tradeId === trade.id,
-    )
-  ) {
+  if (existingPublicRecord) {
     return makerLimitResponses;
-  }
-  const publicRecord = {
-    tradeId: trade.id,
-    factId: trade.factId,
-    virtualMs: trade.virtualMs,
-    symbol: trade.symbol,
-    side: trade.side,
-    priceTicks: trade.priceTicks,
-    quantity: trade.quantity,
-    commitSeq: trade.commitSeq,
-  };
-  state.agentEcology.publicFlow.push(publicRecord);
-  if (state.agentEcology.publicFlow.length > MAX_PUBLIC_FLOW) {
-    state.agentEcology.publicFlow.splice(
-      0,
-      state.agentEcology.publicFlow.length - MAX_PUBLIC_FLOW,
-    );
   }
 
   const scheduled = [...makerLimitResponses];
@@ -11954,6 +12983,7 @@ function limitQueueEpisodeErrors(
 export function agentEcologyInvariantErrors(state) {
   const errors = [];
   const ecology = state.agentEcology;
+  const symbols = Object.keys(state.books ?? {});
   const legacySchema =
     ecology?.ruleVersion === LEGACY_AGENT_RULE_VERSION;
   const expectedAgentIds = legacySchema
@@ -11983,13 +13013,13 @@ export function agentEcologyInvariantErrors(state) {
     !Array.isArray(ecology.recentActivity) ||
     ecology.recentActivity.length > MAX_RECENT_ACTIVITY ||
     !Array.isArray(ecology.publicFlow) ||
-    ecology.publicFlow.length > MAX_PUBLIC_FLOW ||
+    ecology.publicFlow.length >
+      MAX_PUBLIC_FLOW * Math.max(1, symbols.length) ||
     !ecology.pendingResponses ||
     Array.isArray(ecology.pendingResponses)
   ) {
     return ['INVALID_AGENT_ECOLOGY_SCHEMA'];
   }
-  const symbols = Object.keys(state.books);
   if (!legacySchema) {
     errors.push(...capacityLedgerInvariantErrors(state));
   }
@@ -12338,11 +13368,30 @@ export function agentEcologyInvariantErrors(state) {
     activityIds.add(activity?.id);
   }
   const publicTradeIds = new Set();
+  const publicFlowCountsBySymbol = new Map();
+  let previousPublicRecord = null;
   for (const record of ecology.publicFlow) {
     const resolved = resolveSettledPublicTradeChain(
       state,
       record?.tradeId,
     )?.trade;
+    const compactEvidence = publicFlowObservedTrade(
+      record ?? {},
+    );
+    const playerSide = resolved
+      ? publicFlowPlayerSide(resolved)
+      : null;
+    const coldArchiveAnchored =
+      !resolved &&
+      observedTradeFactIsValid(state, compactEvidence);
+    const symbolCount =
+      (publicFlowCountsBySymbol.get(record?.symbol) ?? 0) + 1;
+    const orderedAfterPrevious =
+      !previousPublicRecord ||
+      comparePublicFlowRecords(
+        previousPublicRecord,
+        record,
+      ) < 0;
     if (
       !record ||
       typeof record.tradeId !== 'string' ||
@@ -12356,18 +13405,42 @@ export function agentEcologyInvariantErrors(state) {
       !isPositiveInteger(record.quantity) ||
       !isPositiveInteger(record.commitSeq) ||
       record.commitSeq > state.commitSeq ||
-      !resolved ||
-      resolved.factId !== record.factId ||
-      resolved.virtualMs !== record.virtualMs ||
-      resolved.symbol !== record.symbol ||
-      resolved.side !== record.side ||
-      resolved.priceTicks !== record.priceTicks ||
-      resolved.quantity !== record.quantity ||
-      resolved.commitSeq !== record.commitSeq
+      (!legacySchema && typeof record.selfTrade !== 'boolean') ||
+      (
+        record.playerSide !== undefined &&
+        record.playerSide !== 'buy' &&
+        record.playerSide !== 'sell'
+      ) ||
+      symbolCount > MAX_PUBLIC_FLOW ||
+      !orderedAfterPrevious ||
+      (
+        resolved
+          ? (
+              resolved.factId !== record.factId ||
+              resolved.virtualMs !== record.virtualMs ||
+              resolved.symbol !== record.symbol ||
+              resolved.side !== record.side ||
+              resolved.priceTicks !== record.priceTicks ||
+              resolved.quantity !== record.quantity ||
+              resolved.commitSeq !== record.commitSeq ||
+              (
+                !legacySchema &&
+                (
+                  record.selfTrade !==
+                    (resolved.selfTrade === true) ||
+                  record.playerSide !==
+                    (playerSide ?? undefined)
+                )
+              )
+            )
+          : !coldArchiveAnchored
+      )
     ) {
       errors.push(`INVALID_PUBLIC_FLOW:${record?.tradeId ?? 'unknown'}`);
     }
     publicTradeIds.add(record?.tradeId);
+    publicFlowCountsBySymbol.set(record?.symbol, symbolCount);
+    previousPublicRecord = record;
   }
   for (const [agentId, pending] of Object.entries(
     ecology.pendingResponses,

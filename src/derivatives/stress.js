@@ -2,9 +2,9 @@ import {
   auditDerivativesState,
   createDerivativesState,
   reduceDerivatives,
-} from './engine.js?v=20260803-02';
-import { ACCESS_THRESHOLD_CENTS } from './eligibility.js?v=20260803-02';
-import { markAccountEquity } from './risk.js?v=20260803-02';
+} from './engine.js?v=20260804-01';
+import { ACCESS_THRESHOLD_CENTS } from './eligibility.js?v=20260804-01';
+import { markAccountEquity } from './risk.js?v=20260804-01';
 
 export const STRESS_RULE_VERSION =
   'lzy-derivatives-stress-v1';

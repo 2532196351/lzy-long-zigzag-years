@@ -2,9 +2,9 @@ import {
   OPEN_WORLD_CITY_LIMITS,
   compileOpenWorldCityIntent,
   projectOpenWorldCityLife,
-} from './open-world-city-life.js?v=20260803-02';
-import { JIANGWAN_OUTDOOR_CITY_PACK } from '../world2d/city-pack.js?v=20260803-02';
-import { JIANGWAN_OPEN_WORLD_CONTENT } from '../world2d/open-world-city-content.js?v=20260803-02';
+} from './open-world-city-life.js?v=20260804-01';
+import { JIANGWAN_OUTDOOR_CITY_PACK } from '../world2d/city-pack.js?v=20260804-01';
+import { JIANGWAN_OPEN_WORLD_CONTENT } from '../world2d/open-world-city-content.js?v=20260804-01';
 
 export const OPEN_WORLD_CITY_AUTHORITY_SCHEMA =
   'lzy-open-world-city-authority-v1';

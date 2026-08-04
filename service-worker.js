@@ -1,5 +1,5 @@
 const CACHE_PREFIX = 'lzy-offline-shell';
-const CACHE_VERSION = '20260803-02';
+const CACHE_VERSION = '20260804-01';
 const CACHE_NAME = `${CACHE_PREFIX}-${CACHE_VERSION}`;
 const CORE_URLS = [
   './',

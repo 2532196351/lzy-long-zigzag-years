@@ -1,6 +1,6 @@
 import {
   deriveFundamentalCausalCandidates,
-} from './fundamental-linkage.js?v=20260803-02';
+} from './fundamental-linkage.js?v=20260804-01';
 
 const MAX_COMPANIES = 32;
 const MAX_SHAREHOLDER_PROFILES = 64;

@@ -6,7 +6,7 @@
  * authoritative; memories and narratives may only reference facts.
  */
 
-import { createValuationSnapshot } from './market/valuation.js?v=20260803-02';
+import { createValuationSnapshot } from './market/valuation.js?v=20260804-01';
 import {
   LIFE_PRODUCT_BY_ID as LIFE_ITEM_BY_ID,
   auditLifeState,
@@ -16,7 +16,7 @@ import {
   lifeProductHasDirectUse,
   lifeProductRequiresPlacement,
   normalizeLifeState,
-} from './experience/life-economy.js?v=20260803-02';
+} from './experience/life-economy.js?v=20260804-01';
 import {
   CITY_LIFE_CONTRACT_VERSION,
   accrueCityObligation,
@@ -33,7 +33,7 @@ import {
   recordCityRetailSale,
   settleCityObligations,
   synchronizeLifeLocations,
-} from './experience/city-life-ecology.js?v=20260803-02';
+} from './experience/city-life-ecology.js?v=20260804-01';
 import {
   advanceSocialCareerEcology,
   applySocialCareerAction,
@@ -43,7 +43,7 @@ import {
   projectSocialCareerEcology,
   socialCareerCashTotal,
   socialCareerSchemaVersion,
-} from './experience/social-career-ecology.js?v=20260803-02';
+} from './experience/social-career-ecology.js?v=20260804-01';
 import {
   applyEntertainmentSettlement,
   auditEntertainmentWorld,
@@ -51,14 +51,14 @@ import {
   deriveEntertainmentSettlement,
   normalizeEntertainmentWorldState,
   projectEntertainmentWorld,
-} from './experience/entertainment-world.js?v=20260803-02';
+} from './experience/entertainment-world.js?v=20260804-01';
 import {
   auditOpenWorldCityAuthorityState,
   beginOpenWorldCityAction,
   completeOpenWorldCityCommitment,
   createOpenWorldCityAuthorityState,
   normalizeOpenWorldCityAuthorityState,
-} from './experience/open-world-city-authority.js?v=20260803-02';
+} from './experience/open-world-city-authority.js?v=20260804-01';
 import {
   DERIVATIVE_EQUITY_BASKETS,
   DERIVATIVE_EQUITY_BASKET_VERSIONS,
@@ -74,14 +74,14 @@ import {
   sameEquityBasketIdentity,
   securitiesLendingRiskState,
   snapshotDerivatives,
-} from './derivatives/index.js?v=20260803-02';
+} from './derivatives/index.js?v=20260804-01';
 import {
   advanceWorldlineState,
   archiveWorldlineSourceEvidence,
   auditWorldlineState,
   createWorldlineState,
   normalizeWorldlineState,
-} from './worldline.js?v=20260803-02';
+} from './worldline.js?v=20260804-01';
 import {
   auditRoleStrategyState,
   createQuantStrategyLab,
@@ -94,12 +94,12 @@ import {
   researchCostForStrategy,
   validateQuantConfiguration,
   validateStabilityConfiguration,
-} from './role-strategies.js?v=20260803-02';
+} from './role-strategies.js?v=20260804-01';
 import {
   auditWorldSpatialState,
   createWorldSpatialState,
   normalizeWorldSpatialState,
-} from './world2d/index.js?v=20260803-02';
+} from './world2d/index.js?v=20260804-01';
 
 export const ROLE_TYPES = Object.freeze([
   'household',

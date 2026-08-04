@@ -2,23 +2,23 @@ import {
   deserializeWorld,
   getCompanyCatalog,
   serializeWorld,
-} from './engine.js?v=20260803-02';
+} from './engine.js?v=20260804-01';
 import {
   LEGACY_MARKET_RULE_VERSION,
   MARKET_RULE_VERSION,
   createMarketSimulation,
   migrateLegacyMarketRuleCheckpoint,
-} from './market/simulator.js?v=20260803-02';
+} from './market/simulator.js?v=20260804-01';
 import {
   decodeCheckpoint,
   encodeCheckpoint,
-} from './storage-codec.js?v=20260803-02';
+} from './storage-codec.js?v=20260804-01';
 import {
   collectAuditColdReferences,
   createBrowserAuditColdStore,
   exportAuditColdRecords,
   importAuditColdRecords,
-} from './market/audit-cold-store.js?v=20260803-02';
+} from './market/audit-cold-store.js?v=20260804-01';
 
 export const SAVE_KEY = 'lzy.world-save.v1';
 export const SAVE_META_KEY = 'lzy.world-save-meta.v1';
@@ -138,7 +138,7 @@ function requireCheckpointCompressionWorker() {
     throw new Error('Checkpoint compression Worker is unavailable.');
   }
   const worker = new globalThis.Worker(
-    new URL('./storage-compression-worker.js?v=20260803-02', import.meta.url),
+    new URL('./storage-compression-worker.js?v=20260804-01', import.meta.url),
     { type: 'module' },
   );
   worker.addEventListener(

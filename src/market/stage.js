@@ -1,22 +1,22 @@
-import { deriveMarketChartSeries } from './bars.js?v=20260803-02';
+import { deriveMarketChartSeries } from './bars.js?v=20260804-01';
 import {
   deriveAdaptiveIntradayPriceDomain,
   MARKET_CLOCK_ORIGIN_OFFSET_MS,
-} from './chart-domain.js?v=20260803-02';
+} from './chart-domain.js?v=20260804-01';
 import {
   projectMarketIntelligence,
   projectMarketQuote,
-} from '../experience/market-intelligence.js?v=20260803-02';
+} from '../experience/market-intelligence.js?v=20260804-01';
 import {
   isPublishedDerivativesProjection,
   patchStockFinancingPanel,
   renderDerivativeTerminalTask,
   renderStockFinancingPanel,
-} from '../experience/derivatives-view.js?v=20260803-02';
+} from '../experience/derivatives-view.js?v=20260804-01';
 import {
   deriveThreeAssetColumnGeometry,
   projectThreeAssetMarketColumns,
-} from '../experience/market-three-asset-contract.js?v=20260803-02';
+} from '../experience/market-three-asset-contract.js?v=20260804-01';
 
 const ACTIVE_ORDER_STATUSES = new Set([
   'accepted',
@@ -541,8 +541,29 @@ function activePlayerOrders(snapshot) {
   );
 }
 
+function allCurrentTrades(snapshot) {
+  const bySymbol = snapshot?.tradesBySymbol;
+  if (
+    bySymbol &&
+    typeof bySymbol === 'object' &&
+    !Array.isArray(bySymbol)
+  ) {
+    return Object.values(bySymbol).flatMap((trades) =>
+      array(trades));
+  }
+  return array(snapshot?.trades);
+}
+
 function currentTrades(snapshot, symbol) {
-  return array(snapshot.trades)
+  const bySymbol = snapshot?.tradesBySymbol;
+  const source =
+    bySymbol &&
+    typeof bySymbol === 'object' &&
+    !Array.isArray(bySymbol) &&
+    Object.hasOwn(bySymbol, symbol)
+      ? array(bySymbol[symbol])
+      : array(snapshot?.trades);
+  return source
     .filter(
       (trade) =>
         trade.symbol === symbol &&
@@ -1792,6 +1813,7 @@ export function mountMarketStage(
     },
     speed: 1,
     playing: false,
+    authorityFailed: false,
     chartMode: 'intraday',
     movingAveragePeriod: 5,
     chartCache: new Map(),
@@ -2474,6 +2496,19 @@ export function mountMarketStage(
     nodes.desktopSpeedSelect.value = String(state.speed);
   }
 
+  function authorityFailure(
+    message = '市场推进已停止，请稍后重试。',
+  ) {
+    if (state.destroyed) return false;
+    state.playbackRequestSeq += 1;
+    state.playing = false;
+    state.authorityFailed = true;
+    updatePlayback();
+    updateHeader();
+    publish(message);
+    return true;
+  }
+
   async function play() {
     if (!capabilities.play) {
       publish('行情连接中，请稍后再试。');
@@ -2952,10 +2987,16 @@ export function mountMarketStage(
     setText(nodes.commit, `序号 ${state.snapshot.commitSeq ?? '—'}`);
     setText(nodes.identity, player.roleLabel ?? player.identity ?? '只读观察者');
     setText(nodes.profile, player.profileName ?? '市场参与者');
-    const connected = Object.values(capabilities).some(Boolean);
+    const connected =
+      !state.authorityFailed &&
+      Object.values(capabilities).some(Boolean);
     setText(
       nodes.connection,
-      connected ? '行情在线' : '行情连接中',
+      state.authorityFailed
+        ? '行情已停止'
+        : connected
+          ? '行情在线'
+          : '行情连接中',
     );
     nodes.connection.dataset.connected = connected ? 'true' : 'false';
   }
@@ -3874,7 +3915,7 @@ export function mountMarketStage(
 
     const agents = object(ecology.agents);
     const tradeSymbols = new Map(
-      array(state.snapshot.trades)
+      allCurrentTrades(state.snapshot)
         .filter((trade) => trade?.id)
         .map((trade) => [trade.id, trade.symbol]),
     );
@@ -4391,7 +4432,10 @@ export function mountMarketStage(
 
   function updateFlowStrip() {
     const nowMs = Math.max(0, finite(state.snapshot.nowMs));
-    const recentTrades = array(state.snapshot.trades).filter(
+    const recentTrades = currentTrades(
+      state.snapshot,
+      state.symbol,
+    ).filter(
       (trade) =>
         trade?.symbol === state.symbol &&
         (!trade.source || trade.source === 'realtime_order_book') &&
@@ -5322,7 +5366,7 @@ export function mountMarketStage(
 
   function detectNewTrades() {
     const currentIds = new Set(
-      array(state.snapshot.trades)
+      allCurrentTrades(state.snapshot)
         .filter(
           (trade) =>
             !trade.source || trade.source === 'realtime_order_book',
@@ -6716,6 +6760,7 @@ export function mountMarketStage(
   }
 
   return {
+    authorityFailure,
     update,
     updateCommand,
     updateRealtime,

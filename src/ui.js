@@ -8,7 +8,7 @@ import {
   getRoleCatalog,
   getSocialCareerProjection,
   getDerivativesProjection,
-} from './engine.js?v=20260803-02';
+} from './engine.js?v=20260804-01';
 import {
   clearSavedWorld,
   exportSavedGameArchive,
@@ -19,49 +19,49 @@ import {
   loadGameState,
   saveGameState,
   saveGameStateAsync,
-} from './storage.js?v=20260803-02';
+} from './storage.js?v=20260804-01';
 import {
   createMarketClient,
   createVisibleFramePublicationGate,
-} from './market/client.js?v=20260803-02';
-import { mountMarketStage } from './market/stage.js?v=20260803-02';
-import { MARKET_CLOCK_ORIGIN_OFFSET_MS } from './market/chart-domain.js?v=20260803-02';
+} from './market/client.js?v=20260804-01';
+import { mountMarketStage } from './market/stage.js?v=20260804-01';
+import { MARKET_CLOCK_ORIGIN_OFFSET_MS } from './market/chart-domain.js?v=20260804-01';
 import {
   QUANT_STRATEGY_CATALOG,
   playerStrategyTemplate,
   quantStrategyDefinition,
   quantStrategyUpgradeCost,
-} from './role-strategies.js?v=20260803-02';
+} from './role-strategies.js?v=20260804-01';
 import {
   mergeWorldAuthorityPublication,
-} from './market/world-publication.js?v=20260803-02';
-import { projectWorldExperience } from './experience/world-experience.js?v=20260803-02';
+} from './market/world-publication.js?v=20260804-01';
+import { projectWorldExperience } from './experience/world-experience.js?v=20260804-01';
 import {
   renderWorldlinePanel,
-} from './experience/worldline-view.js?v=20260803-02';
-import { projectPlayerWealth } from './experience/player-wealth.js?v=20260803-02';
-import { renderPlayerWealth } from './experience/player-wealth-view.js?v=20260803-02';
+} from './experience/worldline-view.js?v=20260804-01';
+import { projectPlayerWealth } from './experience/player-wealth.js?v=20260804-01';
+import { renderPlayerWealth } from './experience/player-wealth-view.js?v=20260804-01';
 import {
   mountMarketIntelligence,
-} from './experience/market-intelligence-view.js?v=20260803-02';
+} from './experience/market-intelligence-view.js?v=20260804-01';
 import {
   renderCityAssetActions,
   renderCityPlaceGrid,
   renderCityResponsibilityPanel,
   renderCityServicePanel,
-} from './experience/city-life-view.js?v=20260803-02';
+} from './experience/city-life-view.js?v=20260804-01';
 import {
   renderOpenWorldCityPanel,
-} from './experience/open-world-city-view.js?v=20260803-02';
+} from './experience/open-world-city-view.js?v=20260804-01';
 import {
   renderSocialCareerView,
   socialCareerActionFromDataset,
-} from './experience/social-career-view.js?v=20260803-02';
+} from './experience/social-career-view.js?v=20260804-01';
 import {
   isPublishedDerivativesProjection,
   mergePublishedDerivativesProjection,
-} from './experience/derivatives-view.js?v=20260803-02';
-import { mountWorld2DRuntime } from './game2d/runtime.js?v=20260803-02';
+} from './experience/derivatives-view.js?v=20260804-01';
+import { mountWorld2DRuntime } from './game2d/runtime.js?v=20260804-01';
 
 const root = document.querySelector('#app');
 const ROLE_CATALOG = getRoleCatalog();
@@ -128,9 +128,6 @@ const ROUTES = new Set([
   'information',
   'history',
 ]);
-const INITIAL_LIQUIDITY_FRAME_MS = 3_000;
-const INITIAL_LIQUIDITY_CHUNK_MS = 15_000;
-const INITIAL_LIQUIDITY_MAX_MS = 300_000;
 const VISIBLE_FRAME_INTERVAL_MS = 9_000;
 const visibleFramePublicationGate =
   createVisibleFramePublicationGate({
@@ -277,6 +274,8 @@ let frameAutoSaveSuppression = 0;
 let lastFrameAutoSaveTick = -1;
 let playbackState = 'running';
 let playbackSpeed = 1;
+const MARKET_PLAYBACK_STOPPED_MESSAGE =
+  '市场推进已停止，当前订单和时间不会继续处理，请保留现场后重新载入。';
 let lifeSection = 'home';
 let lifeShopCategory = 'food';
 let workSection = 'desk';
@@ -4002,63 +4001,42 @@ function crossedUnsavedWorldDay(snapshot) {
   return true;
 }
 
-function initialLiquidityReady(snapshot) {
+function initialMarketReady(snapshot) {
   const symbols = Object.entries(snapshot?.symbols ?? {});
   if (symbols.length === 0) return false;
-  const printedSymbols = new Set(
-    (snapshot.trades ?? [])
-      .filter(
-        (trade) =>
-          trade.source === 'realtime_order_book' &&
-          Number.isSafeInteger(trade.virtualMs) &&
-          Number.isSafeInteger(trade.quantity) &&
-          trade.quantity > 0,
-      )
-      .map((trade) => trade.symbol),
-  );
   return symbols.every(
-    ([symbol, security]) =>
-      printedSymbols.has(symbol) &&
-      [security.intradayBars, security.minuteBars].some(
-        (bars) =>
-          Array.isArray(bars) &&
-          bars.some((bar) => bar.volume > 0),
-      ),
+    ([, security]) => {
+      const bestBid = security.bids?.[0];
+      const bestAsk = security.asks?.[0];
+      return Boolean(
+        Number.isSafeInteger(security.lastPriceTicks) &&
+          Number.isSafeInteger(security.limitDownTicks) &&
+          Number.isSafeInteger(security.limitUpTicks) &&
+          Number.isSafeInteger(bestBid?.priceTicks) &&
+          Number.isSafeInteger(bestBid?.quantity) &&
+          Number.isSafeInteger(bestBid?.orderCount) &&
+          bestBid.quantity > 0 &&
+          bestBid.orderCount > 0 &&
+          Number.isSafeInteger(bestAsk?.priceTicks) &&
+          Number.isSafeInteger(bestAsk?.quantity) &&
+          Number.isSafeInteger(bestAsk?.orderCount) &&
+          bestAsk.quantity > 0 &&
+          bestAsk.orderCount > 0 &&
+          bestBid.priceTicks < bestAsk.priceTicks &&
+          bestBid.priceTicks >= security.limitDownTicks &&
+          bestAsk.priceTicks <= security.limitUpTicks
+      );
+    },
   );
 }
 
-async function warmInitialLiquidity(client, snapshot) {
-  const startsEmpty =
-    Number(snapshot?.nowMs) === 0 &&
-    (snapshot?.quoteFrames?.length ?? 0) === 0;
-  if (!startsEmpty || initialLiquidityReady(snapshot)) return snapshot;
-
-  const startMs = Number(snapshot.nowMs) || 0;
-  let elapsedMs = 0;
-  let current = snapshot;
-  while (
-    !initialLiquidityReady(current) &&
-    elapsedMs < INITIAL_LIQUIDITY_MAX_MS
-  ) {
-    const durationMs = Math.min(
-      INITIAL_LIQUIDITY_CHUNK_MS,
-      INITIAL_LIQUIDITY_MAX_MS - elapsedMs,
-    );
-    const result = await client.advanceVirtualTime(durationMs);
-    applyAuthorityPublication(result);
-    current = result.market ?? marketSnapshot;
-    elapsedMs = Math.max(0, Number(current?.nowMs) - startMs);
-  }
-
-  if (!initialLiquidityReady(current)) {
+function requireInitialMarket(snapshot) {
+  if (!initialMarketReady(snapshot)) {
     throw new Error(
-      '初始市场尚未形成完整成交行情，请重新进入当前世界。',
+      '初始市场盘口尚未就绪，请重新进入当前世界。',
     );
   }
-  if (Number(current.nowMs) % INITIAL_LIQUIDITY_FRAME_MS !== 0) {
-    throw new Error('行情尚未完成三秒刷新，请稍后再试。');
-  }
-  return current;
+  return snapshot;
 }
 
 function marketStagePayload(
@@ -4320,10 +4298,30 @@ async function initializeAuthority({
     onWorld2D: (nextWorld, message) =>
       observeWorld2D(nextWorld, message, generation),
     onReceipt: (receipt) => observeMarketReceipt(receipt, generation),
-    onError: () => {
-      if (generation !== authorityGeneration) return;
-      errorMessage = '市场暂时没有连接，请稍后重试。';
+    onPlaybackState: (nextPlayback) => {
+      if (
+        generation !== authorityGeneration ||
+        nextPlayback?.playing !== false
+      ) {
+        return;
+      }
+      playbackState = 'paused';
+      renderPlaybackDom();
+      marketStage?.authorityFailure(
+        MARKET_PLAYBACK_STOPPED_MESSAGE,
+      );
+      errorMessage = MARKET_PLAYBACK_STOPPED_MESSAGE;
       notice = errorMessage;
+      updateLiveStatusDom();
+    },
+    onError: (error) => {
+      if (generation !== authorityGeneration) return;
+      errorMessage =
+        error?.response?.requestType === 'PLAY'
+          ? MARKET_PLAYBACK_STOPPED_MESSAGE
+          : '市场暂时没有连接，请稍后重试。';
+      notice = errorMessage;
+      updateLiveStatusDom();
     },
   });
   marketClient = client;
@@ -4333,7 +4331,7 @@ async function initializeAuthority({
     throw new Error('实时世界初始化已被新的会话替代。');
   }
   applyAuthorityPublication(ready);
-  await warmInitialLiquidity(client, marketSnapshot);
+  requireInitialMarket(marketSnapshot);
   await requestSaveBarrier(reason);
   if (playbackSpeed !== 1) await client.setSpeed(playbackSpeed);
   visibleFramePublicationGate.setBaseline(marketSnapshot);

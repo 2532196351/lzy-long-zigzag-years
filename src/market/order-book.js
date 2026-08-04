@@ -116,6 +116,8 @@ function bookIndex(book) {
       ),
       queuedIds,
       ownerOrderIds,
+      sortedOwnerOrderIds: new Map(),
+      activeOwnerOrders: new Map(),
       revision: 0,
     };
     derivedIndexes.set(book, index);
@@ -189,6 +191,12 @@ function cloneBookIndex(book) {
     // The map itself is cheap (number of owners), while copying every order
     // id on each player command would recreate the flood-sized hot path.
     ownerOrderIds: new Map(source.ownerOrderIds),
+    sortedOwnerOrderIds: new Map(
+      source.sortedOwnerOrderIds,
+    ),
+    activeOwnerOrders: new Map(
+      source.activeOwnerOrders,
+    ),
     revision: source.revision,
   };
 }
@@ -215,13 +223,47 @@ function mutableOwnerOrderIds(book, ownerId) {
   return orderIds;
 }
 
+function mutableActiveOwnerOrders(book, ownerId) {
+  const index = bookIndex(book);
+  const cached = index.activeOwnerOrders.get(ownerId);
+  if (!cached) return null;
+  const transaction = transactionalBooks.get(book);
+  if (
+    transaction &&
+    !transaction.clonedActiveOwnerOrders.has(ownerId)
+  ) {
+    const cloned = [...cached];
+    index.activeOwnerOrders.set(ownerId, cloned);
+    transaction.clonedActiveOwnerOrders.add(ownerId);
+    return cloned;
+  }
+  return cached;
+}
+
 function indexActiveOwnerOrder(book, order) {
   mutableOwnerOrderIds(book, order.ownerId).add(order.id);
+  bookIndex(book).sortedOwnerOrderIds.delete(
+    order.ownerId,
+  );
+  mutableActiveOwnerOrders(book, order.ownerId)?.push(order);
 }
 
 function unindexActiveOwnerOrder(book, order) {
   const orderIds = mutableOwnerOrderIds(book, order.ownerId);
   orderIds.delete(order.id);
+  bookIndex(book).sortedOwnerOrderIds.delete(
+    order.ownerId,
+  );
+  const activeOrders = mutableActiveOwnerOrders(
+    book,
+    order.ownerId,
+  );
+  if (activeOrders) {
+    const position = activeOrders.findIndex(
+      (candidate) => candidate.id === order.id,
+    );
+    if (position !== -1) activeOrders.splice(position, 1);
+  }
   if (orderIds.size === 0) {
     bookIndex(book).ownerOrderIds.delete(order.ownerId);
   }
@@ -380,6 +422,16 @@ function mutableOrder(book, orderId) {
   if (!source) return undefined;
   const cloned = { ...source };
   transaction.changedOrders.set(orderId, cloned);
+  const activeOrders = mutableActiveOwnerOrders(
+    book,
+    source.ownerId,
+  );
+  if (activeOrders) {
+    const position = activeOrders.findIndex(
+      (candidate) => candidate.id === orderId,
+    );
+    if (position !== -1) activeOrders[position] = cloned;
+  }
   return cloned;
 }
 
@@ -607,6 +659,7 @@ export function createOrderBookTransaction(sourceBook) {
     queueAppends: new Map(),
     removedQueueIds: new Set(),
     clonedOwnerOrderIds: new Set(),
+    clonedActiveOwnerOrders: new Set(),
   };
   book.orders = transactionOrdersProxy(transaction);
   transactionalBooks.set(book, transaction);
@@ -1048,17 +1101,33 @@ export function activeOrdersForOwner(book, ownerId) {
   ) {
     return [];
   }
-  const orderIds =
-    bookIndex(book).ownerOrderIds.get(ownerId);
+  const index = bookIndex(book);
+  const orderIds = index.ownerOrderIds.get(ownerId);
   if (!orderIds || orderIds.size === 0) return [];
-  return [...orderIds]
-    .map((orderId) => transactionalOrder(book, orderId))
-    .filter(orderIsActive)
-    .sort(
-      (left, right) =>
-        left.sequence - right.sequence ||
-        left.id.localeCompare(right.id),
+  const cachedOrders = index.activeOwnerOrders.get(ownerId);
+  if (cachedOrders) return cachedOrders;
+  let sortedOrderIds =
+    index.sortedOwnerOrderIds.get(ownerId);
+  if (!sortedOrderIds) {
+    sortedOrderIds = [...orderIds].sort((leftId, rightId) => {
+      const left = transactionalOrder(book, leftId);
+      const right = transactionalOrder(book, rightId);
+      return (
+        (left?.sequence ?? Number.MAX_SAFE_INTEGER) -
+          (right?.sequence ?? Number.MAX_SAFE_INTEGER) ||
+        leftId.localeCompare(rightId)
+      );
+    });
+    index.sortedOwnerOrderIds.set(
+      ownerId,
+      sortedOrderIds,
     );
+  }
+  const activeOrders = sortedOrderIds
+    .map((orderId) => transactionalOrder(book, orderId))
+    .filter(orderIsActive);
+  index.activeOwnerOrders.set(ownerId, activeOrders);
+  return activeOrders;
 }
 
 /**

@@ -5,7 +5,7 @@ import {
   createOrderBook,
   previewBookExecution,
   submitToBook,
-} from '../market/order-book.js?v=20260803-02';
+} from '../market/order-book.js?v=20260804-01';
 import {
   ACCESS_THRESHOLD_CENTS,
   assertAccessState,
@@ -16,7 +16,7 @@ import {
   enablePermission,
   observeEligibility,
   restoreAccess,
-} from './eligibility.js?v=20260803-02';
+} from './eligibility.js?v=20260804-01';
 import {
   CONTRACT_RULE_VERSION,
   allContracts,
@@ -28,7 +28,7 @@ import {
   equityBasketByIdentity,
   migrateContractUniverse,
   sameEquityBasketIdentity,
-} from './contracts.js?v=20260803-02';
+} from './contracts.js?v=20260804-01';
 import {
   FINANCING_INITIAL_RATIO_BPS,
   FINANCING_LIQUIDATION_RATIO_BPS,
@@ -42,7 +42,7 @@ import {
   markAccountEquity,
   securitiesLendingRiskState,
   settleFutureVariation,
-} from './risk.js?v=20260803-02';
+} from './risk.js?v=20260804-01';
 import {
   actorOpenContractLimitReason,
   actorOrderInvariantErrors,
@@ -52,18 +52,18 @@ import {
   deriveActorCommands,
   migrateDerivativeActorCatalog,
   updateActorCapacity,
-} from './actors.js?v=20260803-02';
+} from './actors.js?v=20260804-01';
 import {
   impliedVolatility,
   noArbitrageBounds,
   priceEuropeanOption,
   resolveOptionCarryInputs,
   surfaceVolatilityPpm,
-} from './pricing.js?v=20260803-02';
+} from './pricing.js?v=20260804-01';
 import {
   constrainDerivativeActorCommands,
   PROFESSIONAL_ECOLOGY_CONTROL_VERSION,
-} from '../market/professional-ecology-control.js?v=20260803-02';
+} from '../market/professional-ecology-control.js?v=20260804-01';
 
 export const DERIVATIVES_RULE_VERSION =
   'lzy-derivatives-market-v4';

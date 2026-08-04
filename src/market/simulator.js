@@ -11,7 +11,7 @@ import {
   settleOpenWorldCityCompletion,
   synchronizeEmbeddedDerivativeReservations,
   synchronizeEmbeddedDerivatives,
-} from '../engine.js?v=20260803-02';
+} from '../engine.js?v=20260804-01';
 import {
   activeOrdersForOwner,
   aggregateBook,
@@ -26,40 +26,41 @@ import {
   orderBookTransactionChanges,
   previewBookExecution,
   submitToBook,
-} from './order-book.js?v=20260803-02';
+} from './order-book.js?v=20260804-01';
 import {
   agentEcologyInvariantErrors,
   createAgentCatalog,
   decideAgentOrders,
   evaluateCapacity,
   migrateAgentEcologyState,
+  publicTradeTailsBySymbol,
   recordAgentCommandOutcome,
   refreshDelayedFundamentals,
   scheduleAgentDecisions,
   scheduleNextAgentDecision,
   scheduleDeferredPublicFlowResponse,
   schedulePublicFlowResponses,
-} from './agents.js?v=20260803-02';
+} from './agents.js?v=20260804-01';
 import {
   NATURAL_DAY_MS,
   aggregateBars,
   appendFillInPlace,
   closeFrameInPlace,
   createBarSeries,
-} from './bars.js?v=20260803-02';
+} from './bars.js?v=20260804-01';
 import {
   deriveFixedIntradayTimeDomain,
   INTRADAY_WINDOW_MS,
   MARKET_CLOCK_ORIGIN_OFFSET_MS,
-} from './chart-domain.js?v=20260803-02';
-import { deriveIssuerValuation } from './valuation.js?v=20260803-02';
+} from './chart-domain.js?v=20260804-01';
+import { deriveIssuerValuation } from './valuation.js?v=20260804-01';
 import {
   advanceWorldlineState,
   archiveWorldlineSourceEvidence,
-} from '../worldline.js?v=20260803-02';
+} from '../worldline.js?v=20260804-01';
 import {
   quantStrategyDefinition,
-} from '../role-strategies.js?v=20260803-02';
+} from '../role-strategies.js?v=20260804-01';
 import {
   acceptWorld2DControl,
   auditWorldSpatialState,
@@ -68,19 +69,19 @@ import {
   stepWorld2DMotion,
   WORLD2D_MOTION_STEP_MS,
   world2dMotionEventDescriptor,
-} from '../world2d/index.js?v=20260803-02';
+} from '../world2d/index.js?v=20260804-01';
 import {
   markEntertainmentProjectionChanged,
-} from '../experience/entertainment-world.js?v=20260803-02';
-import { reduceDerivatives } from '../derivatives/engine.js?v=20260803-02';
+} from '../experience/entertainment-world.js?v=20260804-01';
+import { reduceDerivatives } from '../derivatives/engine.js?v=20260804-01';
 import {
   createCumulativeTurnoverState,
   projectCumulativeTurnover,
   reduceCumulativeTurnover,
-} from './turnover-truth.js?v=20260803-02';
+} from './turnover-truth.js?v=20260804-01';
 import {
   projectFundamentalRelationshipNetwork,
-} from './fundamental-network-projection.js?v=20260803-02';
+} from './fundamental-network-projection.js?v=20260804-01';
 
 export const LEGACY_MARKET_RULE_VERSION =
   'lzy-realtime-market-0.4.0';
@@ -3719,6 +3720,30 @@ function marketExecutionQuote(state, command) {
   return quote;
 }
 
+function rejectedSubmitOrderReceipt(
+  state,
+  command,
+  reason,
+  roleAutomation,
+) {
+  const orderType = command.orderType ?? 'limit';
+  return rejectedReceipt(state, 'submit_order', reason, {
+    actorId: command.actorId,
+    symbol: command.symbol ?? null,
+    side: command.side ?? null,
+    orderType,
+    requestedQuantity: command.quantity ?? null,
+    limitPriceTicks:
+      orderType === 'market'
+        ? null
+        : command.priceTicks ?? null,
+    parentOrderId: command.parentOrderId ?? null,
+    ecologyAgentId: command.ecologyAgentId ?? null,
+    ecologyIntentKind: command.ecologyIntentKind ?? null,
+    ...roleAutomation,
+  });
+}
+
 function handleSubmitOrder(
   state,
   command,
@@ -3727,10 +3752,12 @@ function handleSubmitOrder(
   const roleAutomation = automationAttribution(command);
   const brokerCheck = validateBrokerCommand(state, command);
   if (brokerCheck.reason) {
-    return rejectedReceipt(state, 'submit_order', brokerCheck.reason, {
-      actorId: command.actorId,
-      ...roleAutomation,
-    });
+    return rejectedSubmitOrderReceipt(
+      state,
+      command,
+      brokerCheck.reason,
+      roleAutomation,
+    );
   }
   const validation = validateSubmitIntent(
     state,
@@ -3738,10 +3765,12 @@ function handleSubmitOrder(
     brokerCheck.account,
   );
   if (validation.reason) {
-    return rejectedReceipt(state, 'submit_order', validation.reason, {
-      actorId: command.actorId,
-      ...roleAutomation,
-    });
+    return rejectedSubmitOrderReceipt(
+      state,
+      command,
+      validation.reason,
+      roleAutomation,
+    );
   }
 
   const commitSeq = state.commitSeq + 1;
@@ -3843,11 +3872,11 @@ function handleSubmitOrder(
     } else {
       brokerCheck.account.reservedHoldings[order.symbol] -= order.reservedUnits;
     }
-    return rejectedReceipt(
+    return rejectedSubmitOrderReceipt(
       state,
-      'submit_order',
+      command,
       result.rejected.reason,
-      { actorId: command.actorId, ...roleAutomation },
+      roleAutomation,
     );
   }
   indexOrder(state, state.books[order.symbol].orders[orderId]);
@@ -16190,6 +16219,23 @@ function publicTradeSnapshot(trade) {
   };
 }
 
+function publicFlowTradeSnapshot(record) {
+  return {
+    id: record.tradeId,
+    symbol: record.symbol,
+    side: record.side,
+    priceTicks: record.priceTicks,
+    quantity: record.quantity,
+    virtualMs: record.virtualMs,
+    source: 'realtime_order_book',
+    selfTrade: record.selfTrade === true,
+    ...(record.playerSide
+      ? { playerSide: record.playerSide }
+      : {}),
+    commitSeq: record.commitSeq,
+  };
+}
+
 function publicTradeRetention(state, visibleTrades = null) {
   const retained = Array.isArray(visibleTrades)
     ? visibleTrades
@@ -16669,6 +16715,16 @@ export function snapshotMarket(
   const visibleTrades = state.world.market.trades
     .filter((trade) => trade.source === 'realtime_order_book')
     .slice(-MAX_VISIBLE_TRADES);
+  const tradesBySymbol = framePublication
+    ? null
+    : Object.fromEntries(
+        Object.entries(
+          publicTradeTailsBySymbol(state),
+        ).map(([symbol, records]) => [
+          symbol,
+          records.map(publicFlowTradeSnapshot),
+        ]),
+      );
   const marketData = publicMarketDataProjection(state.world);
   const symbols = Object.fromEntries(
     Object.keys(state.books).map((symbol) => [
@@ -16718,6 +16774,7 @@ export function snapshotMarket(
     ...(framePublication
       ? {}
       : {
+          tradesBySymbol,
           barArchives: state.barArchives,
           fundamentalNetwork:
             publicFundamentalNetworkProjection(state),

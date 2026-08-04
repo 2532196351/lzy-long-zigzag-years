@@ -6,20 +6,20 @@ import {
   snapshotMarket,
   snapshotMarketCommandPatch,
   snapshotRealtimeLevel2,
-} from './simulator.js?v=20260803-02';
+} from './simulator.js?v=20260804-01';
 import {
   getCompanyCatalog,
   getDerivativesProjection,
   getEntertainmentProjection,
   getLifeProjection,
-} from '../engine.js?v=20260803-02';
-import { buildCompanyUniverseV2 } from '../content/company-universe-v2.js?v=20260803-02';
-import { projectOpenWorldCityFromWorld } from '../experience/open-world-city-authority.js?v=20260803-02';
-import { projectWorld2D } from '../world2d/index.js?v=20260803-02';
+} from '../engine.js?v=20260804-01';
+import { buildCompanyUniverseV2 } from '../content/company-universe-v2.js?v=20260804-01';
+import { projectOpenWorldCityFromWorld } from '../experience/open-world-city-authority.js?v=20260804-01';
+import { projectWorld2D } from '../world2d/index.js?v=20260804-01';
 import {
   AUDIT_COLD_TRANSPORT_SCHEMA,
   validAuditColdReference,
-} from './audit-cold-store.js?v=20260803-02';
+} from './audit-cold-store.js?v=20260804-01';
 
 const NORMAL_VIRTUAL_RATE = 3;
 const PLAYBACK_VERIFICATION_INTERVAL_MS = 300_000;
@@ -47,10 +47,10 @@ const PLAYBACK_FAIRNESS_DELAY_MS_BY_SPEED = Object.freeze({
   1: 1,
   4: 1,
   // The bounded catch-up slice already returns to WebKit's task queue before
-  // every continuation. Retain one real timer turn so posted player messages
-  // remain dispatchable without charging an extra idle millisecond to every
-  // saturated accelerated slice.
-  16: 1,
+  // every continuation. A zero-delay timer is still a distinct task turn, so
+  // posted player messages remain dispatchable without letting a continuous
+  // command stream repeatedly overtake one-millisecond debt continuations.
+  16: 0,
 });
 // Every order receives the command-local conservation and audit-chain proof.
 // Complete scans belong to playback-idle periodic work and unconditional
@@ -2342,7 +2342,10 @@ export function createMarketWorkerController({
     // timer themselves, but rounding every fractional remainder up to a full
     // millisecond can put a fixed quote endpoint behind its wall mapping. Only
     // guard the true floating-point no-progress case.
-    if (wallMs + delayMs <= wallMs) {
+    if (
+      !outstandingVirtualDebt &&
+      wallMs + delayMs <= wallMs
+    ) {
       delayMs = 1;
     }
     timerId = scheduleTimeout(wake, delayMs);
@@ -2743,7 +2746,21 @@ export function createMarketWorkerController({
 
   function saveBarrier(message) {
     requireState();
-    if (playing) syncToWall({ rebase: true });
+    if (playing) {
+      // A save is a canonical barrier at the authority frontier already
+      // reached by this task; it is not permission to monopolize the Worker
+      // until every accelerated wall-clock debt event has been replayed.
+      // Consume one cooperative slice, verify that exact frontier, and leave
+      // any remaining debt on the unchanged wall anchor for the next wake.
+      // The checkpoint/commit pair remains exact while later player commands
+      // are no longer queued behind an unbounded 16x catch-up.
+      syncToWall({
+        rebase: true,
+        yieldToCommands: speed === 16,
+        wallSliceBudgetMs:
+          COMMAND_WALL_SLICE_BUDGET_MS_BY_SPEED[speed],
+      });
+    }
     else verifyCurrentState();
     const checkpoint = canonicalMarketState(state);
     const commitSeq = checkpoint.commitSeq;

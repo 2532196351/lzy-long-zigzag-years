@@ -2,7 +2,7 @@ import {
   getMarketIntelligencePage,
   projectMarketIntelligence,
   queryMarketIntelligence,
-} from './market-intelligence.js?v=20260803-02';
+} from './market-intelligence.js?v=20260804-01';
 
 const PAGE_LABELS = Object.freeze({
   overview: '行情总览',
@@ -1171,6 +1171,85 @@ function renderPage(model) {
   return overviewPage(model);
 }
 
+function stableNodeKey(node) {
+  if (node?.nodeType !== 1) return null;
+  const section = node.getAttribute('data-mi-section');
+  if (section) return `${node.tagName}:section:${section}`;
+  const page = node.getAttribute('data-mi-page');
+  if (page) return `${node.tagName}:page:${page}`;
+  return null;
+}
+
+function syncElementAttributes(current, next, { preserveOpen = false } = {}) {
+  for (const attribute of [...current.attributes]) {
+    if (preserveOpen && attribute.name === 'open') continue;
+    if (!next.hasAttribute(attribute.name)) {
+      current.removeAttribute(attribute.name);
+    }
+  }
+  for (const attribute of [...next.attributes]) {
+    if (preserveOpen && attribute.name === 'open') continue;
+    if (current.getAttribute(attribute.name) !== attribute.value) {
+      current.setAttribute(attribute.name, attribute.value);
+    }
+  }
+}
+
+function reconcileNode(current, next) {
+  if (
+    current.nodeType !== next.nodeType ||
+    (current.nodeType === 1 && current.tagName !== next.tagName)
+  ) {
+    current.replaceWith(next);
+    return next;
+  }
+  if (current.nodeType === 3) {
+    if (current.data !== next.data) current.data = next.data;
+    return current;
+  }
+  if (current.nodeType !== 1) return current;
+
+  const preserveOpen =
+    current.tagName === 'DETAILS' &&
+    current.hasAttribute('data-mi-section');
+  const wasOpen = preserveOpen ? current.open : false;
+  syncElementAttributes(current, next, { preserveOpen });
+
+  const nextChildren = [...next.childNodes];
+  for (let index = 0; index < nextChildren.length; index += 1) {
+    const nextChild = nextChildren[index];
+    let currentChild = current.childNodes[index] ?? null;
+    const key = stableNodeKey(nextChild);
+    if (key && stableNodeKey(currentChild) !== key) {
+      const keyedCurrent = [...current.childNodes]
+        .slice(index + 1)
+        .find((candidate) => stableNodeKey(candidate) === key);
+      if (keyedCurrent) {
+        current.insertBefore(keyedCurrent, currentChild);
+        currentChild = keyedCurrent;
+      }
+    }
+    if (!currentChild) {
+      current.appendChild(nextChild);
+      continue;
+    }
+    reconcileNode(currentChild, nextChild);
+  }
+  while (current.childNodes.length > nextChildren.length) {
+    current.lastChild.remove();
+  }
+  if (preserveOpen) current.open = wasOpen;
+  return current;
+}
+
+function routeIdentity(route) {
+  return [
+    route?.page ?? 'overview',
+    route?.companyId ?? '',
+    route?.industryId ?? '',
+  ].join(':');
+}
+
 function topLevelPage(route) {
   if (route.page === 'company') return 'companies';
   if (route.page === 'industry') return 'industries';
@@ -1298,6 +1377,7 @@ export function mountMarketIntelligence(
         : { page: 'overview' },
     query: '',
     kind: '',
+    renderedRouteIdentity: null,
     destroyed: false,
   };
 
@@ -1357,7 +1437,7 @@ export function mountMarketIntelligence(
     if (detail) detail.open = true;
   }
 
-  function renderContent() {
+  function renderContent({ preserveInteractiveState = false } = {}) {
     const model = getMarketIntelligencePage(
       state.network,
       state.route,
@@ -1365,7 +1445,23 @@ export function mountMarketIntelligence(
     if (model.page === 'overview' && state.route.page !== 'overview') {
       state.route = { page: 'overview' };
     }
-    nodes.pageHost.innerHTML = renderPage(model);
+    const nextRouteIdentity = routeIdentity(state.route);
+    const markup = renderPage(model);
+    const canReconcile =
+      preserveInteractiveState &&
+      state.renderedRouteIdentity === nextRouteIdentity &&
+      nodes.pageHost.childElementCount === 1;
+    if (canReconcile) {
+      const template = nodes.pageHost.ownerDocument.createElement('template');
+      template.innerHTML = markup;
+      const nextPage = template.content.firstElementChild;
+      if (nextPage) {
+        reconcileNode(nodes.pageHost.firstElementChild, nextPage);
+      }
+    } else {
+      nodes.pageHost.innerHTML = markup;
+    }
+    state.renderedRouteIdentity = nextRouteIdentity;
     updateAsOf();
     updateNavigation();
     revealRequestedSection();
@@ -1484,7 +1580,7 @@ export function mountMarketIntelligence(
     state.marketSnapshot = parts.marketSnapshot;
     state.network = nextNetwork;
     if (!routeExists(state.route)) state.route = { page: 'overview' };
-    renderContent();
+    renderContent({ preserveInteractiveState: true });
     renderSearchResults();
     return true;
   }

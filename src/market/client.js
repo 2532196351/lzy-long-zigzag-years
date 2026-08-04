@@ -1,23 +1,23 @@
 import {
   createMarketWorkerController,
   epochAlignedMonotonicNow,
-} from './worker.js?v=20260803-02';
+} from './worker.js?v=20260804-01';
 import {
   NATURAL_DAY_MS,
   aggregateBars,
-} from './bars.js?v=20260803-02';
+} from './bars.js?v=20260804-01';
 import {
   deriveFixedIntradayTimeDomain,
   INTRADAY_WINDOW_MS,
-} from './chart-domain.js?v=20260803-02';
+} from './chart-domain.js?v=20260804-01';
 import {
   mergeDerivativesAuthorityPublication,
   mergeWorldAuthorityPublication,
-} from './world-publication.js?v=20260803-02';
+} from './world-publication.js?v=20260804-01';
 import {
   AUDIT_COLD_TRANSPORT_SCHEMA,
   createBrowserAuditColdStore,
-} from './audit-cold-store.js?v=20260803-02';
+} from './audit-cold-store.js?v=20260804-01';
 
 const MAX_ADVANCE_WORLD_DAYS = 5;
 const MAX_ADVANCE_VIRTUAL_MS = 300_000;
@@ -26,6 +26,7 @@ const MAX_CLIENT_DAILY_ARCHIVE = 365;
 const QUOTE_FRAME_MS = 3_000;
 const MAX_CLIENT_INTRADAY_FRAMES =
   INTRADAY_WINDOW_MS / QUOTE_FRAME_MS;
+const MAX_CLIENT_PUBLIC_TRADES_PER_SYMBOL = 48;
 const PUBLICATION_CREDIT_SCHEMA =
   'lzy_market_publication_credit_v1';
 
@@ -156,7 +157,7 @@ function defaultWorkerFactory() {
   if (typeof Worker !== 'function') {
     throw new Error('Module Worker is unavailable.');
   }
-  return new Worker(new URL('./worker.js?v=20260803-02', import.meta.url), {
+  return new Worker(new URL('./worker.js?v=20260804-01', import.meta.url), {
     type: 'module',
   });
 }
@@ -781,6 +782,74 @@ function mergePublicTrades(previousTrades, ...deltaCollections) {
   return merged.length > 600 ? merged.slice(-600) : merged;
 }
 
+function mergePublicTradesBySymbol(
+  previous,
+  next,
+  ...deltaCollections
+) {
+  const previousCommitSeq = Number(previous?.commitSeq);
+  const currentCommitSeq = Number(next?.commitSeq);
+  const priorIsNewer =
+    Number.isSafeInteger(previousCommitSeq) &&
+    (
+      !Number.isSafeInteger(currentCommitSeq) ||
+      previousCommitSeq > currentCommitSeq
+    );
+  const priorMap =
+    previous?.tradesBySymbol &&
+    typeof previous.tradesBySymbol === 'object' &&
+    !Array.isArray(previous.tradesBySymbol)
+      ? previous.tradesBySymbol
+      : {};
+  if (priorIsNewer) return priorMap;
+
+  const authoritativeMap =
+    next?.tradesBySymbol &&
+    typeof next.tradesBySymbol === 'object' &&
+    !Array.isArray(next.tradesBySymbol)
+      ? next.tradesBySymbol
+      : null;
+  const merged = authoritativeMap
+    ? Object.fromEntries(
+        Object.entries(authoritativeMap).map(
+          ([symbol, trades]) => [
+            symbol,
+            mergePublicTrades([], trades).slice(
+              -MAX_CLIENT_PUBLIC_TRADES_PER_SYMBOL,
+            ),
+          ],
+        ),
+      )
+    : { ...priorMap };
+  if (authoritativeMap) return merged;
+
+  const additionsBySymbol = Object.create(null);
+  for (const collection of deltaCollections) {
+    for (const trade of Array.isArray(collection) ? collection : []) {
+      if (
+        typeof trade?.id !== 'string' ||
+        trade.id.length === 0 ||
+        typeof trade.symbol !== 'string' ||
+        trade.symbol.length === 0
+      ) {
+        continue;
+      }
+      const additions = additionsBySymbol[trade.symbol] ?? [];
+      additions.push(trade);
+      additionsBySymbol[trade.symbol] = additions;
+    }
+  }
+  for (const [symbol, additions] of Object.entries(
+    additionsBySymbol,
+  )) {
+    merged[symbol] = mergePublicTrades(
+      merged[symbol],
+      additions,
+    ).slice(-MAX_CLIENT_PUBLIC_TRADES_PER_SYMBOL);
+  }
+  return merged;
+}
+
 function applyLevel2DepthSideDelta(
   previousLevels,
   delta,
@@ -1020,6 +1089,12 @@ function mergeLevel2Publication(
     next.trades,
     tradeDeltas,
   );
+  const tradesBySymbol = mergePublicTradesBySymbol(
+    previous,
+    next,
+    next.trades,
+    tradeDeltas,
+  );
   return {
     ...previous,
     ...topLevel,
@@ -1027,6 +1102,7 @@ function mergeLevel2Publication(
     activeOrders,
     tradeRetention: retainedTrades.retention,
     trades: retainedTrades.trades,
+    tradesBySymbol,
   };
 }
 
@@ -1064,6 +1140,11 @@ function mergeCommandMarketPatch(previous, patch) {
     patch,
     tradeDeltas,
   );
+  const tradesBySymbol = mergePublicTradesBySymbol(
+    previous,
+    patch,
+    tradeDeltas,
+  );
   return {
     ...previous,
     ...topLevel,
@@ -1082,6 +1163,7 @@ function mergeCommandMarketPatch(previous, patch) {
     activeOrders,
     tradeRetention: retainedTrades.retention,
     trades: retainedTrades.trades,
+    tradesBySymbol,
     capacity: {
       ...previous.capacity,
       ...patch.capacity,
@@ -1343,6 +1425,12 @@ export function mergeMarketPublication(
     next.trades,
     next.tradeDeltas,
   );
+  const tradesBySymbol = mergePublicTradesBySymbol(
+    previous,
+    next,
+    next.trades,
+    next.tradeDeltas,
+  );
   return {
     ...next,
     nowMs: authorityNowMs,
@@ -1372,6 +1460,7 @@ export function mergeMarketPublication(
     activeOrders,
     tradeRetention: retainedTrades.retention,
     trades: retainedTrades.trades,
+    tradesBySymbol,
     capacity:
       retainedPriorPlayerAccount
         ? previous?.capacity
@@ -1403,6 +1492,7 @@ export function createMarketClient({
   onWorld2D = () => {},
   onPaint = () => {},
   onReceipt = () => {},
+  onPlaybackState = () => {},
   onError = () => {},
   workerFactory = defaultWorkerFactory,
   fallbackControllerOptions = {},
@@ -2165,6 +2255,16 @@ export function createMarketClient({
     }
     if (message.type === 'ERROR') {
       const error = asError(message);
+      if (message.requestType === 'PLAY') {
+        desiredPlaying = false;
+        resumeAfterVisibility = false;
+        safelyObserve(onPlaybackState, {
+          playing: false,
+          speed: null,
+          reason: 'worker_error',
+          requestType: 'PLAY',
+        });
+      }
       reportTransportError(error);
       settle(message, error);
       return;
@@ -2411,6 +2511,7 @@ export function createMarketClient({
     onWorld2D,
     onPaint,
     onReceipt,
+    onPlaybackState,
     onError,
     workerFactory,
     fallbackControllerOptions,

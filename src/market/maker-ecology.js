@@ -1796,9 +1796,13 @@ export function computeMakerQuotePlan(makerInput, contextInput) {
         (regime.quoteSizeMultiplierBps / 10_000) *
         (stateSizeBps / 10_000) *
         (riskSizeBps / 10_000) *
-        (capacityMultiplierBps / 10_000),
+      (capacityMultiplierBps / 10_000),
     ),
   );
+  const maximumTouchUnits =
+    isPositiveInteger(maker.maximumTouchUnits)
+      ? maker.maximumTouchUnits
+      : null;
   const longPressure = clamp(inventoryRatio, -1, 1);
   const bidWeight = clamp(1 - longPressure * 0.68, 0.15, 1.75);
   const askWeight = clamp(1 + longPressure * 0.68, 0.15, 1.75);
@@ -1929,6 +1933,30 @@ export function computeMakerQuotePlan(makerInput, contextInput) {
       extraUnits[index] += 1;
       undistributed -= 1;
     }
+    if (
+      maximumTouchUnits !== null &&
+      actualLevelCount > 1 &&
+      1 + extraUnits[0] > maximumTouchUnits
+    ) {
+      const displacedUnits =
+        1 + extraUnits[0] - maximumTouchUnits;
+      extraUnits[0] = maximumTouchUnits - 1;
+      const deeperLevelCount = actualLevelCount - 1;
+      const uniformDisplacedUnits = Math.floor(
+        displacedUnits / deeperLevelCount,
+      );
+      const remainderDisplacedUnits =
+        displacedUnits % deeperLevelCount;
+      for (
+        let index = 1;
+        index < actualLevelCount;
+        index += 1
+      ) {
+        extraUnits[index] +=
+          uniformDisplacedUnits +
+          (index <= remainderDisplacedUnits ? 1 : 0);
+      }
+    }
     const orders = new Array(actualLevelCount);
     for (let index = 0; index < actualLevelCount; index += 1) {
       const distance =
@@ -2005,6 +2033,7 @@ export function computeMakerQuotePlan(makerInput, contextInput) {
       expectedRiskCostTickBps,
       expectedNetEdgeTickBps,
       nearTouchAllocationBps,
+      maximumTouchUnits,
       quoteState,
     },
   };

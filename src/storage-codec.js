@@ -19,6 +19,10 @@ const DERIVED_MARKET_MIRROR_PROJECTION_KEY =
   '__lzy_checkpoint_derived_market_mirrors_v1';
 const COMPACT_BOOKS_PROJECTION_KEY =
   '__lzy_checkpoint_compact_books_v1';
+const COMPACT_BAR_ARCHIVES_PROJECTION_KEY =
+  '__lzy_checkpoint_compact_bar_archives_v1';
+const COMPACT_DERIVATIVE_CADENCE_ARCHIVE_PROJECTION_KEY =
+  '__lzy_checkpoint_compact_derivative_cadence_archive_v1';
 const PACKED_AUDIT_PAYLOADS_PROJECTION_KEY =
   '__lzy_checkpoint_packed_audit_payloads_v1';
 const PACKED_AUDIT_PAYLOAD_ENCODING =
@@ -859,6 +863,417 @@ function restoreCompactBooks(checkpoint) {
   return checkpoint;
 }
 
+const VISIBLE_BAR_KEYS = [
+  'symbol',
+  'dayId',
+  'frameStartMs',
+  'frameEndMs',
+  'startMs',
+  'endMs',
+  'openTicks',
+  'highTicks',
+  'lowTicks',
+  'closeTicks',
+  'volumeShares',
+  'volume',
+  'turnoverCents',
+  'turnoverTicks',
+  'tradeCount',
+  'vwapTicks',
+];
+const ULTRA_FILL_KEYS = [
+  'timestampMs',
+  'sequence',
+  'priceTicks',
+  'quantity',
+];
+
+function compactVisibleBar(bar, symbol) {
+  if (
+    !exactOrderedKeys(bar, VISIBLE_BAR_KEYS) ||
+    bar.symbol !== symbol ||
+    bar.frameStartMs !== bar.startMs ||
+    bar.frameEndMs !== bar.endMs ||
+    bar.volumeShares !== bar.volume ||
+    bar.turnoverCents !== bar.turnoverTicks ||
+    Object.values(bar).some((value) => value === undefined)
+  ) {
+    return null;
+  }
+  return [
+    bar.dayId,
+    bar.startMs,
+    bar.endMs,
+    bar.openTicks,
+    bar.highTicks,
+    bar.lowTicks,
+    bar.closeTicks,
+    bar.volume,
+    bar.turnoverTicks,
+    bar.tradeCount,
+    bar.vwapTicks,
+  ];
+}
+
+function compactUltraFill(fill) {
+  if (
+    !exactOrderedKeys(fill, ULTRA_FILL_KEYS) ||
+    Object.values(fill).some((value) => value === undefined)
+  ) {
+    return null;
+  }
+  return ULTRA_FILL_KEYS.map((key) => fill[key]);
+}
+
+function projectCompactBarArchives(checkpoint) {
+  if (Object.hasOwn(
+    checkpoint,
+    COMPACT_BAR_ARCHIVES_PROJECTION_KEY,
+  )) {
+    throw new TypeError(
+      'Checkpoint uses a reserved codec projection key.',
+    );
+  }
+  const archive = checkpoint.barArchives;
+  const bySymbol = archive?.bySymbol;
+  if (
+    !exactOrderedKeys(archive, ['bySymbol']) ||
+    !bySymbol ||
+    typeof bySymbol !== 'object' ||
+    Array.isArray(bySymbol)
+  ) {
+    return checkpoint;
+  }
+  const rows = [];
+  try {
+    for (const [symbol, entry] of Object.entries(bySymbol)) {
+      if (
+        typeof symbol !== 'string' ||
+        symbol.length === 0 ||
+        !exactOrderedKeys(entry, [
+          'minuteBars',
+          'dailyBars',
+          'ultraFills',
+        ]) ||
+        !Array.isArray(entry.minuteBars) ||
+        !Array.isArray(entry.dailyBars) ||
+        !Array.isArray(entry.ultraFills)
+      ) {
+        return checkpoint;
+      }
+      const minuteBars = entry.minuteBars.map((bar) =>
+        compactVisibleBar(bar, symbol));
+      const dailyBars = entry.dailyBars.map((bar) =>
+        compactVisibleBar(bar, symbol));
+      const ultraFills = entry.ultraFills.map(compactUltraFill);
+      if (
+        minuteBars.some((row) => row === null) ||
+        dailyBars.some((row) => row === null) ||
+        ultraFills.some((row) => row === null)
+      ) {
+        return checkpoint;
+      }
+      rows.push([
+        symbol,
+        minuteBars,
+        dailyBars,
+        ultraFills,
+      ]);
+    }
+  } catch {
+    return checkpoint;
+  }
+  if (rows.length === 0) return checkpoint;
+  const projected = {
+    ...checkpoint,
+    barArchives: {
+      version: 1,
+      rows,
+    },
+  };
+  projected[COMPACT_BAR_ARCHIVES_PROJECTION_KEY] = {
+    version: 1,
+    symbolOrder: Object.keys(bySymbol),
+  };
+  return projected;
+}
+
+function restoreCompactBarArchives(checkpoint) {
+  if (!Object.hasOwn(
+    checkpoint,
+    COMPACT_BAR_ARCHIVES_PROJECTION_KEY,
+  )) {
+    return checkpoint;
+  }
+  const projection =
+    checkpoint[COMPACT_BAR_ARCHIVES_PROJECTION_KEY];
+  const compact = checkpoint.barArchives;
+  if (
+    !exactOrderedKeys(projection, ['version', 'symbolOrder']) ||
+    projection.version !== 1 ||
+    !Array.isArray(projection.symbolOrder) ||
+    projection.symbolOrder.length === 0 ||
+    new Set(projection.symbolOrder).size !==
+      projection.symbolOrder.length ||
+    projection.symbolOrder.some(
+      (symbol) =>
+        typeof symbol !== 'string' || symbol.length === 0,
+    ) ||
+    !exactOrderedKeys(compact, ['version', 'rows']) ||
+    compact.version !== 1 ||
+    !Array.isArray(compact.rows) ||
+    compact.rows.length !== projection.symbolOrder.length
+  ) {
+    throw new Error(
+      'Invalid checkpoint compact bar archive projection.',
+    );
+  }
+  const restoreVisibleBars = (rows, symbol) => {
+    if (!Array.isArray(rows)) {
+      throw new Error(
+        'Invalid checkpoint compact visible bars.',
+      );
+    }
+    return rows.map((row) => {
+      if (
+        !Array.isArray(row) ||
+        row.length !== 11 ||
+        row.some((value) => value === undefined)
+      ) {
+        throw new Error(
+          'Invalid checkpoint compact visible bar row.',
+        );
+      }
+      const [
+        dayId,
+        startMs,
+        endMs,
+        openTicks,
+        highTicks,
+        lowTicks,
+        closeTicks,
+        volume,
+        turnoverTicks,
+        tradeCount,
+        vwapTicks,
+      ] = row;
+      return {
+        symbol,
+        dayId,
+        frameStartMs: startMs,
+        frameEndMs: endMs,
+        startMs,
+        endMs,
+        openTicks,
+        highTicks,
+        lowTicks,
+        closeTicks,
+        volumeShares: volume,
+        volume,
+        turnoverCents: turnoverTicks,
+        turnoverTicks,
+        tradeCount,
+        vwapTicks,
+      };
+    });
+  };
+  const restoreUltraFills = (rows) => {
+    if (!Array.isArray(rows)) {
+      throw new Error(
+        'Invalid checkpoint compact ultra fills.',
+      );
+    }
+    return rows.map((row) => {
+      if (
+        !Array.isArray(row) ||
+        row.length !== ULTRA_FILL_KEYS.length ||
+        row.some((value) => value === undefined)
+      ) {
+        throw new Error(
+          'Invalid checkpoint compact ultra fill row.',
+        );
+      }
+      return Object.fromEntries(
+        ULTRA_FILL_KEYS.map((key, index) => [key, row[index]]),
+      );
+    });
+  };
+  const bySymbol = {};
+  compact.rows.forEach((row, index) => {
+    const symbol = projection.symbolOrder[index];
+    if (
+      !Array.isArray(row) ||
+      row.length !== 4 ||
+      row[0] !== symbol
+    ) {
+      throw new Error(
+        'Invalid checkpoint compact bar archive row.',
+      );
+    }
+    bySymbol[symbol] = {
+      minuteBars: restoreVisibleBars(row[1], symbol),
+      dailyBars: restoreVisibleBars(row[2], symbol),
+      ultraFills: restoreUltraFills(row[3]),
+    };
+  });
+  checkpoint.barArchives = { bySymbol };
+  delete checkpoint[COMPACT_BAR_ARCHIVES_PROJECTION_KEY];
+  return checkpoint;
+}
+
+function projectCompactDerivativeCadenceArchive(checkpoint) {
+  if (Object.hasOwn(
+    checkpoint,
+    COMPACT_DERIVATIVE_CADENCE_ARCHIVE_PROJECTION_KEY,
+  )) {
+    throw new TypeError(
+      'Checkpoint uses a reserved codec projection key.',
+    );
+  }
+  const archive = checkpoint.derivativeCadenceReceiptArchive;
+  if (
+    !archive ||
+    typeof archive !== 'object' ||
+    Array.isArray(archive) ||
+    !Array.isArray(archive.ranges) ||
+    archive.ranges.length === 0
+  ) {
+    return checkpoint;
+  }
+  const archiveKeys = Object.keys(archive);
+  const shapes = [];
+  const shapeIndexBySignature = new Map();
+  const rows = [];
+  try {
+    for (const range of archive.ranges) {
+      if (
+        !range ||
+        typeof range !== 'object' ||
+        Array.isArray(range)
+      ) {
+        return checkpoint;
+      }
+      const keys = Object.keys(range);
+      if (
+        keys.length === 0 ||
+        new Set(keys).size !== keys.length ||
+        keys.some((key) => range[key] === undefined)
+      ) {
+        return checkpoint;
+      }
+      const signature = JSON.stringify(keys);
+      let shapeIndex = shapeIndexBySignature.get(signature);
+      if (shapeIndex === undefined) {
+        shapeIndex = shapes.length;
+        shapes.push(keys);
+        shapeIndexBySignature.set(signature, shapeIndex);
+      }
+      rows.push([
+        shapeIndex,
+        ...keys.map((key) => range[key]),
+      ]);
+    }
+  } catch {
+    return checkpoint;
+  }
+  const projected = {
+    ...checkpoint,
+    derivativeCadenceReceiptArchive: Object.fromEntries(
+      archiveKeys.map((key) => [
+        key,
+        key === 'ranges'
+          ? { version: 1, shapes, rows }
+          : archive[key],
+      ]),
+    ),
+  };
+  projected[
+    COMPACT_DERIVATIVE_CADENCE_ARCHIVE_PROJECTION_KEY
+  ] = {
+    version: 1,
+    archiveKeys,
+  };
+  return projected;
+}
+
+function restoreCompactDerivativeCadenceArchive(checkpoint) {
+  if (!Object.hasOwn(
+    checkpoint,
+    COMPACT_DERIVATIVE_CADENCE_ARCHIVE_PROJECTION_KEY,
+  )) {
+    return checkpoint;
+  }
+  const projection =
+    checkpoint[
+      COMPACT_DERIVATIVE_CADENCE_ARCHIVE_PROJECTION_KEY
+    ];
+  const archive = checkpoint.derivativeCadenceReceiptArchive;
+  const compact = archive?.ranges;
+  if (
+    !exactOrderedKeys(projection, ['version', 'archiveKeys']) ||
+    projection.version !== 1 ||
+    !Array.isArray(projection.archiveKeys) ||
+    projection.archiveKeys.length === 0 ||
+    new Set(projection.archiveKeys).size !==
+      projection.archiveKeys.length ||
+    !projection.archiveKeys.includes('ranges') ||
+    !exactOrderedKeys(archive, projection.archiveKeys) ||
+    !exactOrderedKeys(compact, ['version', 'shapes', 'rows']) ||
+    compact.version !== 1 ||
+    !Array.isArray(compact.shapes) ||
+    compact.shapes.length === 0 ||
+    !Array.isArray(compact.rows)
+  ) {
+    throw new Error(
+      'Invalid checkpoint compact derivative cadence archive projection.',
+    );
+  }
+  const shapes = compact.shapes.map((keys) => {
+    if (
+      !Array.isArray(keys) ||
+      keys.length === 0 ||
+      new Set(keys).size !== keys.length ||
+      keys.some(
+        (key) => typeof key !== 'string' || key.length === 0,
+      )
+    ) {
+      throw new Error(
+        'Invalid checkpoint compact derivative cadence shape.',
+      );
+    }
+    return keys;
+  });
+  const ranges = compact.rows.map((row) => {
+    const shapeIndex = row?.[0];
+    const keys = shapes[shapeIndex];
+    if (
+      !Array.isArray(row) ||
+      !Number.isSafeInteger(shapeIndex) ||
+      !keys ||
+      row.length !== keys.length + 1 ||
+      row.some((value) => value === undefined)
+    ) {
+      throw new Error(
+        'Invalid checkpoint compact derivative cadence row.',
+      );
+    }
+    return Object.fromEntries(
+      keys.map((key, index) => [key, row[index + 1]]),
+    );
+  });
+  checkpoint.derivativeCadenceReceiptArchive =
+    Object.fromEntries(
+      projection.archiveKeys.map((key) => [
+        key,
+        key === 'ranges' ? ranges : archive[key],
+      ]),
+    );
+  delete checkpoint[
+    COMPACT_DERIVATIVE_CADENCE_ARCHIVE_PROJECTION_KEY
+  ];
+  return checkpoint;
+}
+
 function projectPackedAuditPayloads(checkpoint) {
   if (
     Object.hasOwn(
@@ -1025,9 +1440,13 @@ function restoreCheckpointProjections(
 ) {
   return restoreDerivedMarketMirrors(
     restoreCompactBooks(
-      restorePackedAuditPayloads(
-        checkpoint,
-        auditAttachments,
+      restoreCompactBarArchives(
+        restoreCompactDerivativeCadenceArchive(
+          restorePackedAuditPayloads(
+            checkpoint,
+            auditAttachments,
+          ),
+        ),
       ),
     ),
   );
@@ -1042,8 +1461,12 @@ export function encodeCheckpoint(checkpoint) {
     throw new TypeError('Checkpoint must be a JSON object.');
   }
   const projectedAudit = projectPackedAuditPayloads(
-    projectCompactBooks(
-      projectDerivedMarketMirrors(checkpoint),
+    projectCompactDerivativeCadenceArchive(
+      projectCompactBarArchives(
+        projectCompactBooks(
+          projectDerivedMarketMirrors(checkpoint),
+        ),
+      ),
     ),
   );
   const projectedCheckpoint = projectedAudit.checkpoint;
