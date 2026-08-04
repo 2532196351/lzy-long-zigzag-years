@@ -11,7 +11,7 @@ import {
   settleOpenWorldCityCompletion,
   synchronizeEmbeddedDerivativeReservations,
   synchronizeEmbeddedDerivatives,
-} from '../engine.js?v=20260804-01';
+} from '../engine.js?v=f34a1d70e1a7aaed';
 import {
   activeOrdersForOwner,
   aggregateBook,
@@ -26,7 +26,7 @@ import {
   orderBookTransactionChanges,
   previewBookExecution,
   submitToBook,
-} from './order-book.js?v=20260804-01';
+} from './order-book.js?v=f34a1d70e1a7aaed';
 import {
   agentEcologyInvariantErrors,
   createAgentCatalog,
@@ -40,27 +40,27 @@ import {
   scheduleNextAgentDecision,
   scheduleDeferredPublicFlowResponse,
   schedulePublicFlowResponses,
-} from './agents.js?v=20260804-01';
+} from './agents.js?v=f34a1d70e1a7aaed';
 import {
   NATURAL_DAY_MS,
   aggregateBars,
   appendFillInPlace,
   closeFrameInPlace,
   createBarSeries,
-} from './bars.js?v=20260804-01';
+} from './bars.js?v=f34a1d70e1a7aaed';
 import {
   deriveFixedIntradayTimeDomain,
   INTRADAY_WINDOW_MS,
   MARKET_CLOCK_ORIGIN_OFFSET_MS,
-} from './chart-domain.js?v=20260804-01';
-import { deriveIssuerValuation } from './valuation.js?v=20260804-01';
+} from './chart-domain.js?v=f34a1d70e1a7aaed';
+import { deriveIssuerValuation } from './valuation.js?v=f34a1d70e1a7aaed';
 import {
   advanceWorldlineState,
   archiveWorldlineSourceEvidence,
-} from '../worldline.js?v=20260804-01';
+} from '../worldline.js?v=f34a1d70e1a7aaed';
 import {
   quantStrategyDefinition,
-} from '../role-strategies.js?v=20260804-01';
+} from '../role-strategies.js?v=f34a1d70e1a7aaed';
 import {
   acceptWorld2DControl,
   auditWorldSpatialState,
@@ -69,19 +69,19 @@ import {
   stepWorld2DMotion,
   WORLD2D_MOTION_STEP_MS,
   world2dMotionEventDescriptor,
-} from '../world2d/index.js?v=20260804-01';
+} from '../world2d/index.js?v=f34a1d70e1a7aaed';
 import {
   markEntertainmentProjectionChanged,
-} from '../experience/entertainment-world.js?v=20260804-01';
-import { reduceDerivatives } from '../derivatives/engine.js?v=20260804-01';
+} from '../experience/entertainment-world.js?v=f34a1d70e1a7aaed';
+import { reduceDerivatives } from '../derivatives/engine.js?v=f34a1d70e1a7aaed';
 import {
   createCumulativeTurnoverState,
   projectCumulativeTurnover,
   reduceCumulativeTurnover,
-} from './turnover-truth.js?v=20260804-01';
+} from './turnover-truth.js?v=f34a1d70e1a7aaed';
 import {
   projectFundamentalRelationshipNetwork,
-} from './fundamental-network-projection.js?v=20260804-01';
+} from './fundamental-network-projection.js?v=f34a1d70e1a7aaed';
 
 export const LEGACY_MARKET_RULE_VERSION =
   'lzy-realtime-market-0.4.0';

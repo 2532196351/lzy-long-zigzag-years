@@ -1,4 +1,4 @@
-import { JIANGWAN_ART_PACK_V1 } from '../world2d/jiangwan-art-pack.js?v=20260804-01';
+import { JIANGWAN_ART_PACK_V1 } from '../world2d/jiangwan-art-pack.js?v=f34a1d70e1a7aaed';
 
 const ART_FRAME_SCHEMA = 'lzy-game2d-art-frame-v1';
 const WORLD2D_SCHEMA = 'lzy-world2d-public-v1';

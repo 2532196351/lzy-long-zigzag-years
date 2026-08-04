@@ -1,7 +1,7 @@
 import {
   decodeCheckpoint,
   encodeCheckpoint,
-} from './storage-codec.js?v=20260804-01';
+} from './storage-codec.js?v=f34a1d70e1a7aaed';
 
 const REQUEST_TYPE = 'LZY_COMPRESS_CHECKPOINT';
 const RESPONSE_TYPE = 'LZY_CHECKPOINT_COMPRESSED';

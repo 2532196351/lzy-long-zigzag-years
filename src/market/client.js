@@ -1,23 +1,23 @@
 import {
   createMarketWorkerController,
   epochAlignedMonotonicNow,
-} from './worker.js?v=20260804-01';
+} from './worker.js?v=f34a1d70e1a7aaed';
 import {
   NATURAL_DAY_MS,
   aggregateBars,
-} from './bars.js?v=20260804-01';
+} from './bars.js?v=f34a1d70e1a7aaed';
 import {
   deriveFixedIntradayTimeDomain,
   INTRADAY_WINDOW_MS,
-} from './chart-domain.js?v=20260804-01';
+} from './chart-domain.js?v=f34a1d70e1a7aaed';
 import {
   mergeDerivativesAuthorityPublication,
   mergeWorldAuthorityPublication,
-} from './world-publication.js?v=20260804-01';
+} from './world-publication.js?v=f34a1d70e1a7aaed';
 import {
   AUDIT_COLD_TRANSPORT_SCHEMA,
   createBrowserAuditColdStore,
-} from './audit-cold-store.js?v=20260804-01';
+} from './audit-cold-store.js?v=f34a1d70e1a7aaed';
 
 const MAX_ADVANCE_WORLD_DAYS = 5;
 const MAX_ADVANCE_VIRTUAL_MS = 300_000;
@@ -157,7 +157,7 @@ function defaultWorkerFactory() {
   if (typeof Worker !== 'function') {
     throw new Error('Module Worker is unavailable.');
   }
-  return new Worker(new URL('./worker.js?v=20260804-01', import.meta.url), {
+  return new Worker(new URL('./worker.js?v=f34a1d70e1a7aaed', import.meta.url), {
     type: 'module',
   });
 }

@@ -11,7 +11,7 @@
 
 import {
   evaluateProfitSeekingOrder,
-} from './behavior-kernel.js?v=20260804-01';
+} from './behavior-kernel.js?v=f34a1d70e1a7aaed';
 
 export const INSTITUTIONAL_ECOLOGY_RULE_VERSION =
   'lzy-institutional-ecology-contract-0.4.0';

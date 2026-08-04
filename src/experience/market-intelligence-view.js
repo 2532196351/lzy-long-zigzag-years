@@ -2,7 +2,7 @@ import {
   getMarketIntelligencePage,
   projectMarketIntelligence,
   queryMarketIntelligence,
-} from './market-intelligence.js?v=20260804-01';
+} from './market-intelligence.js?v=f34a1d70e1a7aaed';
 
 const PAGE_LABELS = Object.freeze({
   overview: '行情总览',

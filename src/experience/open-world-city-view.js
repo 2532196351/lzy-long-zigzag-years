@@ -1,4 +1,4 @@
-import { JIANGWAN_OPEN_WORLD_CONTENT } from '../world2d/open-world-city-content.js?v=20260804-01';
+import { JIANGWAN_OPEN_WORLD_CONTENT } from '../world2d/open-world-city-content.js?v=f34a1d70e1a7aaed';
 
 const PLACE_BY_ID = new Map(
   JIANGWAN_OPEN_WORLD_CONTENT.places.map((entry) => [

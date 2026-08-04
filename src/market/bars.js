@@ -1,7 +1,7 @@
 import {
   deriveFixedIntradayTimeDomain,
   INTRADAY_WINDOW_MS,
-} from './chart-domain.js?v=20260804-01';
+} from './chart-domain.js?v=f34a1d70e1a7aaed';
 
 export const NATURAL_DAY_MS = 86_400_000;
 export const NATURAL_WEEK_MS = NATURAL_DAY_MS * 7;

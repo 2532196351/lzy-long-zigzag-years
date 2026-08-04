@@ -1,3 +1,3 @@
-export * from './scene.js?v=20260804-01';
-export * from './authority.js?v=20260804-01';
-export * from './projection.js?v=20260804-01';
+export * from './scene.js?v=f34a1d70e1a7aaed';
+export * from './authority.js?v=f34a1d70e1a7aaed';
+export * from './projection.js?v=f34a1d70e1a7aaed';

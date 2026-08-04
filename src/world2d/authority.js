@@ -11,7 +11,7 @@ import {
   world2dAnchor,
   world2dPortal,
   world2dScene,
-} from './scene.js?v=20260804-01';
+} from './scene.js?v=f34a1d70e1a7aaed';
 
 const MAX_RECENT_CONTROL_COMMANDS = 32;
 const MAX_PATH_EXPANSIONS = 2_048;

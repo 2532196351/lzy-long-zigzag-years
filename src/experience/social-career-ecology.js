@@ -1470,4 +1470,4 @@ export function socialCareerSchemaVersion() {
 export {
   advanceSocialCareerEcology,
   applySocialCareerAction,
-} from './social-career-rules.js?v=20260804-01';
+} from './social-career-rules.js?v=f34a1d70e1a7aaed';

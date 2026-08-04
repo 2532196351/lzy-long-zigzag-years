@@ -1,6 +1,6 @@
 import {
   validatePlatformRuntime,
-} from './runtime-boundary.js?v=20260804-01';
+} from './runtime-boundary.js?v=f34a1d70e1a7aaed';
 
 const PORT_METHODS = Object.freeze([
   'command',

@@ -3,11 +3,11 @@ import {
   priceEuropeanOption,
   resolveOptionCarryInputs,
   surfaceVolatilityPpm,
-} from './pricing.js?v=20260804-01';
+} from './pricing.js?v=f34a1d70e1a7aaed';
 import {
   contractReferenceSpotTicks,
-} from './contracts.js?v=20260804-01';
-import { markAccountEquity } from './risk.js?v=20260804-01';
+} from './contracts.js?v=f34a1d70e1a7aaed';
+import { markAccountEquity } from './risk.js?v=f34a1d70e1a7aaed';
 
 export const ACTOR_RULE_VERSION =
   'lzy-derivative-actors-v2';

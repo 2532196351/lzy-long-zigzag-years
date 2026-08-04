@@ -1,7 +1,7 @@
 import {
   compileEntertainmentIntent,
   projectEntertainmentAgency,
-} from './entertainment-agency.js?v=20260804-01';
+} from './entertainment-agency.js?v=f34a1d70e1a7aaed';
 
 export const ENTERTAINMENT_WORLD_SCHEMA =
   'lzy-entertainment-world-v1';

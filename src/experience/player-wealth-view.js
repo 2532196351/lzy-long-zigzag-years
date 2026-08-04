@@ -1,6 +1,6 @@
 import {
   PLAYER_WEALTH_PROJECTION_VERSION,
-} from './player-wealth.js?v=20260804-01';
+} from './player-wealth.js?v=f34a1d70e1a7aaed';
 
 const VARIANTS = new Set(['home', 'funds']);
 

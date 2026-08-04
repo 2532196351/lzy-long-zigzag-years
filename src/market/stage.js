@@ -1,22 +1,22 @@
-import { deriveMarketChartSeries } from './bars.js?v=20260804-01';
+import { deriveMarketChartSeries } from './bars.js?v=f34a1d70e1a7aaed';
 import {
   deriveAdaptiveIntradayPriceDomain,
   MARKET_CLOCK_ORIGIN_OFFSET_MS,
-} from './chart-domain.js?v=20260804-01';
+} from './chart-domain.js?v=f34a1d70e1a7aaed';
 import {
   projectMarketIntelligence,
   projectMarketQuote,
-} from '../experience/market-intelligence.js?v=20260804-01';
+} from '../experience/market-intelligence.js?v=f34a1d70e1a7aaed';
 import {
   isPublishedDerivativesProjection,
   patchStockFinancingPanel,
   renderDerivativeTerminalTask,
   renderStockFinancingPanel,
-} from '../experience/derivatives-view.js?v=20260804-01';
+} from '../experience/derivatives-view.js?v=f34a1d70e1a7aaed';
 import {
   deriveThreeAssetColumnGeometry,
   projectThreeAssetMarketColumns,
-} from '../experience/market-three-asset-contract.js?v=20260804-01';
+} from '../experience/market-three-asset-contract.js?v=f34a1d70e1a7aaed';
 
 const ACTIVE_ORDER_STATUSES = new Set([
   'accepted',

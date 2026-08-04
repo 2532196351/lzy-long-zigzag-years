@@ -1,5 +1,5 @@
-import { projectJiangwanArtFrame } from './jiangwan-art-frame.js?v=20260804-01';
-import { JIANGWAN_ART_PACK_V1 } from '../world2d/jiangwan-art-pack.js?v=20260804-01';
+import { projectJiangwanArtFrame } from './jiangwan-art-frame.js?v=f34a1d70e1a7aaed';
+import { JIANGWAN_ART_PACK_V1 } from '../world2d/jiangwan-art-pack.js?v=f34a1d70e1a7aaed';
 
 const CONTROL_KEYS = Object.freeze({
   ArrowUp: [0, -1024],

@@ -4,26 +4,26 @@ import {
   activePriceTicksExcludingOrders,
   aggregateBookMetrics,
   bookLevelMetrics,
-} from './order-book.js?v=20260804-01';
+} from './order-book.js?v=f34a1d70e1a7aaed';
 import {
   buildLimitFollowerQueue,
   diffLimitFollowerQueue,
   diffMakerLadder,
-} from './liquidity.js?v=20260804-01';
+} from './liquidity.js?v=f34a1d70e1a7aaed';
 import {
   createActorValuationObservation,
   createValuationSnapshot,
-} from './valuation.js?v=20260804-01';
+} from './valuation.js?v=f34a1d70e1a7aaed';
 import {
   computeMakerQuotePlan,
   REGIME_PRESETS,
-} from './maker-ecology.js?v=20260804-01';
-import { deriveInstitutionValuationView } from './institutional-ecology.js?v=20260804-01';
+} from './maker-ecology.js?v=f34a1d70e1a7aaed';
+import { deriveInstitutionValuationView } from './institutional-ecology.js?v=f34a1d70e1a7aaed';
 import {
   createInstitutionValuationObservation,
   createMakerValuationObservation,
   institutionalPolicyForLiveAgent,
-} from './ecology-contract.js?v=20260804-01';
+} from './ecology-contract.js?v=f34a1d70e1a7aaed';
 import {
   BEHAVIOR_LIMITS,
   BEHAVIOR_RULE_VERSION,
@@ -41,7 +41,7 @@ import {
   recordBehaviorAction,
   recordBehaviorReceipt,
   recordBehaviorSettlement,
-} from './behavior-kernel.js?v=20260804-01';
+} from './behavior-kernel.js?v=f34a1d70e1a7aaed';
 
 export const AGENT_RULE_VERSION =
   'lzy-agent-ecology-0.12.0';

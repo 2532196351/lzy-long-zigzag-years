@@ -1,10 +1,10 @@
 import {
   contractDisplayName,
   equityBasketDisplayName,
-} from '../derivatives/contracts.js?v=20260804-01';
+} from '../derivatives/contracts.js?v=f34a1d70e1a7aaed';
 import {
   mergeDerivativesAuthorityPublication,
-} from '../market/world-publication.js?v=20260804-01';
+} from '../market/world-publication.js?v=f34a1d70e1a7aaed';
 
 const PUBLIC_DERIVATIVES_SCHEMA =
   'lzy_derivatives_public_v1';

@@ -2,7 +2,7 @@ import {
   WORLD2D_PUBLIC_SCHEMA,
   world2dAnchor,
   world2dScene,
-} from './scene.js?v=20260804-01';
+} from './scene.js?v=f34a1d70e1a7aaed';
 
 function clone(value) {
   if (typeof structuredClone === 'function') return structuredClone(value);

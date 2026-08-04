@@ -1,4 +1,4 @@
-import { deriveMarketChartSeries } from './bars.js?v=20260804-01';
+import { deriveMarketChartSeries } from './bars.js?v=f34a1d70e1a7aaed';
 
 export const PLAYER_REALITY_TRACE_SCHEMA =
   'lzy_market_player_reality_trace_v1';

@@ -1,6 +1,6 @@
 import {
   actorOpenContractLimitReason,
-} from '../derivatives/actors.js?v=20260804-01';
+} from '../derivatives/actors.js?v=f34a1d70e1a7aaed';
 
 const BASIS_POINTS = 10_000;
 const MAX_CANDIDATE_COMMANDS = 1_024;

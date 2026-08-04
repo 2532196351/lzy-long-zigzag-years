@@ -6,20 +6,20 @@ import {
   snapshotMarket,
   snapshotMarketCommandPatch,
   snapshotRealtimeLevel2,
-} from './simulator.js?v=20260804-01';
+} from './simulator.js?v=f34a1d70e1a7aaed';
 import {
   getCompanyCatalog,
   getDerivativesProjection,
   getEntertainmentProjection,
   getLifeProjection,
-} from '../engine.js?v=20260804-01';
-import { buildCompanyUniverseV2 } from '../content/company-universe-v2.js?v=20260804-01';
-import { projectOpenWorldCityFromWorld } from '../experience/open-world-city-authority.js?v=20260804-01';
-import { projectWorld2D } from '../world2d/index.js?v=20260804-01';
+} from '../engine.js?v=f34a1d70e1a7aaed';
+import { buildCompanyUniverseV2 } from '../content/company-universe-v2.js?v=f34a1d70e1a7aaed';
+import { projectOpenWorldCityFromWorld } from '../experience/open-world-city-authority.js?v=f34a1d70e1a7aaed';
+import { projectWorld2D } from '../world2d/index.js?v=f34a1d70e1a7aaed';
 import {
   AUDIT_COLD_TRANSPORT_SCHEMA,
   validAuditColdReference,
-} from './audit-cold-store.js?v=20260804-01';
+} from './audit-cold-store.js?v=f34a1d70e1a7aaed';
 
 const NORMAL_VIRTUAL_RATE = 3;
 const PLAYBACK_VERIFICATION_INTERVAL_MS = 300_000;

@@ -1,4 +1,4 @@
-import { JIANGWAN_OUTDOOR_CITY_PACK } from './city-pack.js?v=20260804-01';
+import { JIANGWAN_OUTDOOR_CITY_PACK } from './city-pack.js?v=f34a1d70e1a7aaed';
 
 export const WORLD2D_SCHEMA_VERSION = 'lzy-world2d-v1';
 export const WORLD2D_PUBLIC_SCHEMA = 'lzy-world2d-public-v1';

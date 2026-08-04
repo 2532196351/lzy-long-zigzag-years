@@ -8,7 +8,7 @@ import {
   getRoleCatalog,
   getSocialCareerProjection,
   getDerivativesProjection,
-} from './engine.js?v=20260804-01';
+} from './engine.js?v=f34a1d70e1a7aaed';
 import {
   clearSavedWorld,
   exportSavedGameArchive,
@@ -19,49 +19,49 @@ import {
   loadGameState,
   saveGameState,
   saveGameStateAsync,
-} from './storage.js?v=20260804-01';
+} from './storage.js?v=f34a1d70e1a7aaed';
 import {
   createMarketClient,
   createVisibleFramePublicationGate,
-} from './market/client.js?v=20260804-01';
-import { mountMarketStage } from './market/stage.js?v=20260804-01';
-import { MARKET_CLOCK_ORIGIN_OFFSET_MS } from './market/chart-domain.js?v=20260804-01';
+} from './market/client.js?v=f34a1d70e1a7aaed';
+import { mountMarketStage } from './market/stage.js?v=f34a1d70e1a7aaed';
+import { MARKET_CLOCK_ORIGIN_OFFSET_MS } from './market/chart-domain.js?v=f34a1d70e1a7aaed';
 import {
   QUANT_STRATEGY_CATALOG,
   playerStrategyTemplate,
   quantStrategyDefinition,
   quantStrategyUpgradeCost,
-} from './role-strategies.js?v=20260804-01';
+} from './role-strategies.js?v=f34a1d70e1a7aaed';
 import {
   mergeWorldAuthorityPublication,
-} from './market/world-publication.js?v=20260804-01';
-import { projectWorldExperience } from './experience/world-experience.js?v=20260804-01';
+} from './market/world-publication.js?v=f34a1d70e1a7aaed';
+import { projectWorldExperience } from './experience/world-experience.js?v=f34a1d70e1a7aaed';
 import {
   renderWorldlinePanel,
-} from './experience/worldline-view.js?v=20260804-01';
-import { projectPlayerWealth } from './experience/player-wealth.js?v=20260804-01';
-import { renderPlayerWealth } from './experience/player-wealth-view.js?v=20260804-01';
+} from './experience/worldline-view.js?v=f34a1d70e1a7aaed';
+import { projectPlayerWealth } from './experience/player-wealth.js?v=f34a1d70e1a7aaed';
+import { renderPlayerWealth } from './experience/player-wealth-view.js?v=f34a1d70e1a7aaed';
 import {
   mountMarketIntelligence,
-} from './experience/market-intelligence-view.js?v=20260804-01';
+} from './experience/market-intelligence-view.js?v=f34a1d70e1a7aaed';
 import {
   renderCityAssetActions,
   renderCityPlaceGrid,
   renderCityResponsibilityPanel,
   renderCityServicePanel,
-} from './experience/city-life-view.js?v=20260804-01';
+} from './experience/city-life-view.js?v=f34a1d70e1a7aaed';
 import {
   renderOpenWorldCityPanel,
-} from './experience/open-world-city-view.js?v=20260804-01';
+} from './experience/open-world-city-view.js?v=f34a1d70e1a7aaed';
 import {
   renderSocialCareerView,
   socialCareerActionFromDataset,
-} from './experience/social-career-view.js?v=20260804-01';
+} from './experience/social-career-view.js?v=f34a1d70e1a7aaed';
 import {
   isPublishedDerivativesProjection,
   mergePublishedDerivativesProjection,
-} from './experience/derivatives-view.js?v=20260804-01';
-import { mountWorld2DRuntime } from './game2d/runtime.js?v=20260804-01';
+} from './experience/derivatives-view.js?v=f34a1d70e1a7aaed';
+import { mountWorld2DRuntime } from './game2d/runtime.js?v=f34a1d70e1a7aaed';
 
 const root = document.querySelector('#app');
 const ROLE_CATALOG = getRoleCatalog();
